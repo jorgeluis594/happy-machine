@@ -9,6 +9,9 @@ import { Cli } from "../src/infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "../src/infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { FilesystemRunRepository } from "../src/infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
 import { OrcaTaskExecutor } from "../src/infrastructure/outbound/task-executor/orca/orca-task-executor.js";
+import type { ProjectDefinitions } from "../src/ports/project-definitions.js";
+import type { RunRepository } from "../src/ports/run-repository.js";
+import type { TaskExecutor } from "../src/ports/task-executor.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 const temporaryDirectories: string[] = [];
@@ -154,6 +157,57 @@ describe("happy-machine execute", () => {
     await expect(
       readFile(path.join(root, ".happy-machine", "runs")),
     ).rejects.toThrow();
+  });
+
+  it("performs no run, workspace, ID, callback, or executor side effect after any definition error", async () => {
+    const calls: string[] = [];
+    const definitions: ProjectDefinitions = {
+      load: () => {
+        calls.push("definitions.load");
+        return Promise.reject(new Error("invalid definition"));
+      },
+    };
+    const runs = {
+      save: () => {
+        calls.push("runs.save");
+        return Promise.resolve();
+      },
+      prepareAttempt: () => {
+        calls.push("runs.prepareAttempt");
+        return Promise.reject(new Error("must not prepare"));
+      },
+      readResult: () => {
+        calls.push("runs.readResult");
+        return Promise.reject(new Error("must not read"));
+      },
+    } as RunRepository;
+    const executor = {
+      execute: () => {
+        calls.push("executor.execute");
+        return Promise.reject(new Error("must not execute"));
+      },
+    } as TaskExecutor;
+    const useCase = new ExecuteWorkflow(
+      definitions,
+      runs,
+      executor,
+      () => {
+        calls.push("clock");
+        return new Date();
+      },
+      () => {
+        calls.push("makeId");
+        return "forbidden";
+      },
+    );
+    await expect(
+      useCase.execute({
+        workflowPath: "invalid.yaml",
+        currentDirectory: "/project",
+        onRunAllocated: () => calls.push("onRunAllocated"),
+      }),
+    ).rejects.toThrow("invalid definition");
+    expect(calls).toEqual(["definitions.load"]);
   });
 
   it.each([

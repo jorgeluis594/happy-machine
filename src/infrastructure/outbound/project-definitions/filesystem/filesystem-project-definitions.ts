@@ -1,12 +1,66 @@
-import { readFile, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { parse } from "yaml";
 import type {
+  AgentDefinition,
+  EffectivePolicies,
   ExecutionDefinition,
+  ParallelStateDefinition,
+  ParallelTaskDefinition,
   ProjectDefinitions,
+  StateDefinition,
 } from "../../../../ports/project-definitions.js";
 
 type Mapping = Record<string, unknown>;
+type PolicyName = keyof EffectivePolicies;
+
+const executeFile = promisify(execFile);
+const terminals = new Set(["$succeeded", "$failed"]);
+const policyFields = {
+  attempt_timeout: "attemptTimeoutMs",
+  max_attempts: "maxAttempts",
+  retry_delay: "retryDelayMs",
+  workflow_timeout: "workflowTimeoutMs",
+  max_state_visits: "maxStateVisits",
+  max_transitions: "maxTransitions",
+  max_concurrency: "maxConcurrency",
+  controller_lease: "controllerLeaseMs",
+} as const satisfies Record<string, PolicyName>;
+type PolicyField = keyof typeof policyFields;
+
+const defaults: EffectivePolicies = {
+  attemptTimeoutMs: 30 * 60_000,
+  maxAttempts: 3,
+  retryDelayMs: 5_000,
+  workflowTimeoutMs: 24 * 3_600_000,
+  maxStateVisits: 10,
+  maxTransitions: 100,
+  maxConcurrency: 4,
+  controllerLeaseMs: 30_000,
+};
+
+const scopes: Record<"project" | "workflow" | "state" | "task", PolicyField[]> =
+  {
+    project: Object.keys(policyFields) as PolicyField[],
+    workflow: [
+      "attempt_timeout",
+      "max_attempts",
+      "retry_delay",
+      "workflow_timeout",
+      "max_state_visits",
+      "max_transitions",
+      "max_concurrency",
+    ],
+    state: [
+      "attempt_timeout",
+      "max_attempts",
+      "retry_delay",
+      "max_concurrency",
+    ],
+    task: ["attempt_timeout", "max_attempts", "retry_delay"],
+  };
 
 export class DefinitionError extends Error {}
 
@@ -16,15 +70,27 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     currentDirectory: string,
   ): Promise<ExecutionDefinition> {
     const absoluteWorkflow = path.resolve(currentDirectory, workflowPathInput);
-    const root = await this.discover(path.dirname(absoluteWorkflow));
-    if (!root)
+    const discoveredRoot = await this.discover(path.dirname(absoluteWorkflow));
+    if (!discoveredRoot)
       throw new DefinitionError(
         "No happy-machine.yaml found in the workflow path ancestor chain",
       );
-
-    const config = await this.yaml(path.join(root, "happy-machine.yaml"));
-    const workflowPath = this.inside(root, absoluteWorkflow, "workflow");
+    const root = discoveredRoot;
+    const configPath = await this.safeExistingFile(
+      root,
+      path.join(root, "happy-machine.yaml"),
+      "project configuration",
+      ".yaml",
+    );
+    const config = await this.yaml(configPath);
+    const workflowPath = await this.safeExistingFile(
+      root,
+      absoluteWorkflow,
+      "workflow",
+      ".yaml",
+    );
     const workflow = await this.yaml(workflowPath);
+
     this.keys(
       config,
       ["version", "executor", "workspace", "agents", "defaults"],
@@ -35,132 +101,382 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       ["version", "id", "initial_state", "states", "policies"],
       "workflow",
     );
-    this.equal(config.version, 1, "Project version must be 1");
-    this.equal(workflow.version, 1, "Workflow version must be 1");
+    this.version(config.version, "project.version");
+    this.version(workflow.version, "workflow.version");
 
-    const executor = this.optionalMap(config.executor, "executor");
-    const workspace = this.optionalMap(config.workspace, "workspace");
-    this.keys(executor, ["type"], "executor");
-    this.keys(workspace, ["mode"], "workspace");
+    const executor = this.optionalMap(config.executor, "project.executor");
+    this.keys(executor, ["type"], "project.executor");
     this.equal(
       executor.type ?? "orca",
       "orca",
-      "Only executor.type orca is supported",
+      "project.executor.type must be orca",
     );
-    this.equal(
-      workspace.mode ?? "direct",
-      "direct",
-      "Only workspace.mode direct is supported",
-    );
+    const workspace = this.optionalMap(config.workspace, "project.workspace");
+    this.keys(workspace, ["mode"], "project.workspace");
+    const workspaceMode = workspace.mode ?? "direct";
+    if (workspaceMode !== "direct" && workspaceMode !== "worktree")
+      throw new DefinitionError(
+        "project.workspace.mode must be direct or worktree",
+      );
+    if (workspaceMode === "worktree") await this.requireWorktreeSupport(root);
 
+    const agents = await this.agents(root, config.agents);
+    const projectPolicies = this.policies(
+      defaults,
+      config.defaults,
+      "project",
+      "project.defaults",
+    );
+    const workflowPolicies = this.policies(
+      projectPolicies,
+      workflow.policies,
+      "workflow",
+      "workflow.policies",
+    );
     const workflowId = this.string(workflow.id, "workflow.id");
     const initialState = this.string(
       workflow.initial_state,
       "workflow.initial_state",
     );
-    const states = this.map(workflow.states, "workflow.states");
-    if (Object.keys(states).length !== 1)
+    const rawStates = this.map(workflow.states, "workflow.states");
+    if (Object.keys(rawStates).length === 0)
+      throw new DefinitionError("workflow.states must not be empty");
+    if (!(initialState in rawStates))
       throw new DefinitionError(
-        "This release supports exactly one workflow state",
+        `workflow.initial_state references unknown state: ${initialState}`,
       );
-    const rawState = this.map(states[initialState], `states.${initialState}`);
-    this.keys(
-      rawState,
-      [
-        "type",
-        "agent",
-        "prompt",
-        "prompt_file",
-        "outcomes",
-        "model",
-        "attempt_timeout",
-      ],
-      `states.${initialState}`,
-    );
-    this.equal(
-      rawState.type,
-      "agent",
-      "The workflow state must have type agent",
-    );
 
-    const agentId = this.string(rawState.agent, `states.${initialState}.agent`);
-    const agents = this.map(config.agents, "project.agents");
-    const rawAgent = this.map(agents[agentId], `agents.${agentId}`);
-    this.keys(rawAgent, ["instructions", "model"], `agents.${agentId}`);
-    const instructionsPath = this.inside(
-      root,
-      path.resolve(
-        root,
-        this.string(rawAgent.instructions, `agents.${agentId}.instructions`),
-      ),
-      "instructions",
-    );
-    if (path.extname(instructionsPath).toLowerCase() !== ".md")
-      throw new DefinitionError("Agent instructions must be a Markdown file");
-    const instructions = await this.read(
-      instructionsPath,
-      "agent instructions",
-    );
-    const model = this.string(
-      rawState.model ?? rawAgent.model,
-      `agents.${agentId}.model`,
-    );
-
-    const hasPrompt = typeof rawState.prompt === "string";
-    const hasPromptFile = typeof rawState.prompt_file === "string";
-    if (hasPrompt === hasPromptFile)
-      throw new DefinitionError(
-        `State ${initialState} must declare exactly one of prompt or prompt_file`,
-      );
-    const prompt = hasPrompt
-      ? this.string(rawState.prompt, `states.${initialState}.prompt`)
-      : await this.read(
-          this.inside(
-            root,
-            path.resolve(
-              root,
-              this.string(
-                rawState.prompt_file,
-                `states.${initialState}.prompt_file`,
-              ),
-            ),
-            "prompt",
-          ),
-          "prompt",
-        );
-
-    const rawOutcomes = this.map(
-      rawState.outcomes,
-      `states.${initialState}.outcomes`,
-    );
-    if (Object.keys(rawOutcomes).length === 0)
-      throw new DefinitionError("The state outcomes map cannot be empty");
-    const outcomes: Record<string, "$succeeded" | "$failed"> = {};
-    for (const [outcome, target] of Object.entries(rawOutcomes)) {
-      if (target !== "$succeeded" && target !== "$failed")
-        throw new DefinitionError(
-          `Outcome ${outcome} must target $succeeded or $failed`,
-        );
-      outcomes[outcome] = target;
+    const states: Record<string, StateDefinition> = {};
+    for (const [id, value] of Object.entries(rawStates)) {
+      this.id(id, `state ID ${id}`);
+      states[id] = await this.state(root, id, value, agents, workflowPolicies);
     }
-    const defaults = this.optionalMap(config.defaults, "defaults");
-    const timeout =
-      rawState.attempt_timeout ?? defaults.attempt_timeout ?? "30m";
+    this.graph(initialState, states);
 
+    const initial = states[initialState];
     return {
       projectRoot: root,
       workflowPath,
       workflowId,
       executorType: "orca",
-      workspaceMode: "direct",
-      state: {
-        id: initialState,
-        agent: { id: agentId, instructions, model },
-        prompt,
-        outcomes,
-        attemptTimeoutMs: this.duration(timeout),
-      },
+      workspaceMode,
+      agents,
+      policies: workflowPolicies,
+      states,
+      initialState,
+      state: initial,
     };
+  }
+
+  private async agents(
+    root: string,
+    value: unknown,
+  ): Promise<Record<string, AgentDefinition>> {
+    const rawAgents = this.map(value, "project.agents");
+    if (Object.keys(rawAgents).length === 0)
+      throw new DefinitionError("project.agents must not be empty");
+    const result: Record<string, AgentDefinition> = {};
+    for (const [id, value] of Object.entries(rawAgents)) {
+      this.id(id, `agent ID ${id}`);
+      const raw = this.map(value, `project.agents.${id}`);
+      this.keys(raw, ["instructions", "model"], `project.agents.${id}`);
+      const instructions = await this.markdown(
+        root,
+        raw.instructions,
+        `project.agents.${id}.instructions`,
+      );
+      result[id] = {
+        id,
+        instructions,
+        model: this.string(raw.model, `project.agents.${id}.model`),
+      };
+    }
+    return result;
+  }
+
+  private async state(
+    root: string,
+    id: string,
+    value: unknown,
+    agents: Record<string, AgentDefinition>,
+    inherited: EffectivePolicies,
+  ): Promise<StateDefinition> {
+    const raw = this.map(value, `workflow.states.${id}`);
+    const type = this.string(raw.type, `workflow.states.${id}.type`);
+    if (type === "agent") {
+      this.keys(
+        raw,
+        [
+          "type",
+          "agent",
+          "prompt",
+          "prompt_file",
+          "outcomes",
+          "model",
+          "attempt_timeout",
+          "max_attempts",
+          "retry_delay",
+        ],
+        `workflow.states.${id}`,
+      );
+      const policies = this.inlinePolicies(
+        inherited,
+        raw,
+        "state",
+        `workflow.states.${id}`,
+      );
+      const work = await this.work(
+        root,
+        raw,
+        agents,
+        policies,
+        `workflow.states.${id}`,
+      );
+      const outcomes = this.outcomes(
+        raw.outcomes,
+        `workflow.states.${id}.outcomes`,
+      );
+      if (Object.keys(outcomes).length === 0)
+        throw new DefinitionError(
+          `workflow.states.${id}.outcomes must not be empty`,
+        );
+      return {
+        id,
+        type,
+        ...work,
+        outcomes,
+        policies,
+        attemptTimeoutMs: policies.attemptTimeoutMs,
+      };
+    }
+    if (type === "parallel") {
+      this.keys(
+        raw,
+        [
+          "type",
+          "tasks",
+          "outcomes",
+          "attempt_timeout",
+          "max_attempts",
+          "retry_delay",
+          "max_concurrency",
+        ],
+        `workflow.states.${id}`,
+      );
+      const policies = this.inlinePolicies(
+        inherited,
+        raw,
+        "state",
+        `workflow.states.${id}`,
+      );
+      const rawTasks = this.map(raw.tasks, `workflow.states.${id}.tasks`);
+      if (Object.keys(rawTasks).length === 0)
+        throw new DefinitionError(
+          `workflow.states.${id}.tasks must contain at least one task`,
+        );
+      const tasks: Record<string, ParallelTaskDefinition> = {};
+      for (const [taskId, taskValue] of Object.entries(rawTasks)) {
+        this.id(taskId, `task ID ${taskId}`);
+        const task = this.map(
+          taskValue,
+          `workflow.states.${id}.tasks.${taskId}`,
+        );
+        this.keys(
+          task,
+          [
+            "agent",
+            "prompt",
+            "prompt_file",
+            "model",
+            "attempt_timeout",
+            "max_attempts",
+            "retry_delay",
+          ],
+          `workflow.states.${id}.tasks.${taskId}`,
+        );
+        const taskPolicies = this.inlinePolicies(
+          policies,
+          task,
+          "task",
+          `workflow.states.${id}.tasks.${taskId}`,
+        );
+        tasks[taskId] = {
+          id: taskId,
+          ...(await this.work(
+            root,
+            task,
+            agents,
+            taskPolicies,
+            `workflow.states.${id}.tasks.${taskId}`,
+          )),
+          policies: taskPolicies,
+        };
+      }
+      const outcomes = this.outcomes(
+        raw.outcomes,
+        `workflow.states.${id}.outcomes`,
+      );
+      const names = Object.keys(outcomes).sort();
+      if (names.join(",") !== "failed,succeeded")
+        throw new DefinitionError(
+          `workflow.states.${id}.outcomes must contain exactly succeeded and failed`,
+        );
+      return {
+        id,
+        type,
+        tasks,
+        outcomes: { succeeded: outcomes.succeeded, failed: outcomes.failed },
+        policies,
+        effectiveMaxConcurrency: Math.min(
+          policies.maxConcurrency,
+          Object.keys(tasks).length,
+        ),
+      } satisfies ParallelStateDefinition;
+    }
+    throw new DefinitionError(
+      `workflow.states.${id}.type must be agent or parallel`,
+    );
+  }
+
+  private async work(
+    root: string,
+    raw: Mapping,
+    agents: Record<string, AgentDefinition>,
+    policies: EffectivePolicies,
+    label: string,
+  ) {
+    const agentId = this.string(raw.agent, `${label}.agent`);
+    const registered = agents[agentId];
+    if (!registered)
+      throw new DefinitionError(
+        `${label}.agent references unknown agent: ${agentId}`,
+      );
+    const agent =
+      raw.model === undefined
+        ? registered
+        : { ...registered, model: this.string(raw.model, `${label}.model`) };
+    const hasPrompt = Object.hasOwn(raw, "prompt");
+    const hasPromptFile = Object.hasOwn(raw, "prompt_file");
+    if (hasPrompt === hasPromptFile)
+      throw new DefinitionError(
+        `${label} must declare exactly one of prompt or prompt_file`,
+      );
+    const prompt = hasPrompt
+      ? this.string(raw.prompt, `${label}.prompt`)
+      : await this.markdown(root, raw.prompt_file, `${label}.prompt_file`);
+    return { agent, prompt, policies };
+  }
+
+  private outcomes(value: unknown, label: string): Record<string, string> {
+    const raw = this.map(value, label);
+    const result: Record<string, string> = {};
+    for (const [name, target] of Object.entries(raw)) {
+      this.id(name, `outcome name ${name} at ${label}`);
+      result[name] = this.string(target, `${label}.${name}`);
+    }
+    return result;
+  }
+
+  private graph(
+    initial: string,
+    states: Record<string, StateDefinition>,
+  ): void {
+    for (const state of Object.values(states)) {
+      for (const [outcome, target] of Object.entries(state.outcomes)) {
+        if (!terminals.has(target) && !(target in states))
+          throw new DefinitionError(
+            `workflow.states.${state.id}.outcomes.${outcome} references unknown target: ${target}`,
+          );
+      }
+    }
+    const reachable = this.walk([initial], states, false);
+    const unreachable = Object.keys(states).filter((id) => !reachable.has(id));
+    if (unreachable.length)
+      throw new DefinitionError(
+        `workflow state is unreachable from initial_state: ${unreachable[0]}`,
+      );
+    const canTerminate = this.walk(["$succeeded", "$failed"], states, true);
+    const trapped = [...reachable].find((id) => !canTerminate.has(id));
+    if (trapped)
+      throw new DefinitionError(
+        `reachable workflow state cannot reach a terminal target: ${trapped}`,
+      );
+  }
+
+  private walk(
+    starts: string[],
+    states: Record<string, StateDefinition>,
+    reverse: boolean,
+  ): Set<string> {
+    const seen = new Set(starts);
+    const queue = [...starts];
+    while (queue.length) {
+      const current = queue.shift()!;
+      if (!reverse) {
+        const state = states[current];
+        if (!state) continue;
+        for (const target of Object.values(state.outcomes))
+          if (!seen.has(target)) {
+            seen.add(target);
+            queue.push(target);
+          }
+      } else {
+        for (const state of Object.values(states))
+          if (
+            !seen.has(state.id) &&
+            Object.values(state.outcomes).includes(current)
+          ) {
+            seen.add(state.id);
+            queue.push(state.id);
+          }
+      }
+    }
+    return seen;
+  }
+
+  private policies(
+    base: EffectivePolicies,
+    value: unknown,
+    scope: keyof typeof scopes,
+    label: string,
+  ): EffectivePolicies {
+    const raw = this.optionalMap(value, label);
+    this.keys(raw, scopes[scope], label);
+    return this.applyPolicies(base, raw, label);
+  }
+
+  private inlinePolicies(
+    base: EffectivePolicies,
+    raw: Mapping,
+    scope: "state" | "task",
+    label: string,
+  ): EffectivePolicies {
+    const selected: Mapping = {};
+    for (const field of Object.keys(policyFields) as PolicyField[])
+      if (Object.hasOwn(raw, field)) selected[field] = raw[field];
+    this.keys(selected, scopes[scope], `${label} policies`);
+    return this.applyPolicies(base, selected, label);
+  }
+
+  private applyPolicies(
+    base: EffectivePolicies,
+    raw: Mapping,
+    label: string,
+  ): EffectivePolicies {
+    const result = { ...base };
+    for (const [field, value] of Object.entries(raw) as [
+      PolicyField,
+      unknown,
+    ][]) {
+      const property = policyFields[field];
+      result[property] =
+        field.endsWith("timeout") ||
+        field.endsWith("delay") ||
+        field === "controller_lease"
+          ? this.duration(value, `${label}.${field}`)
+          : this.positiveInteger(value, `${label}.${field}`);
+    }
+    return result;
   }
 
   private async discover(start: string): Promise<string | undefined> {
@@ -170,13 +486,14 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         if ((await stat(path.join(directory, "happy-machine.yaml"))).isFile())
           return directory;
       } catch {
-        // Continue searching in the parent directory.
+        /* search parent */
       }
       const parent = path.dirname(directory);
       if (parent === directory) return undefined;
       directory = parent;
     }
   }
+
   private async yaml(file: string): Promise<Mapping> {
     try {
       return this.map(
@@ -185,23 +502,72 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       );
     } catch (error) {
       throw new DefinitionError(
-        `Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}`,
+        `Cannot parse ${file}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
-  private async read(file: string, label: string): Promise<string> {
+
+  private async markdown(
+    root: string,
+    value: unknown,
+    label: string,
+  ): Promise<string> {
+    const file = await this.safeExistingFile(
+      root,
+      path.resolve(root, this.string(value, label)),
+      label,
+      ".md",
+    );
     try {
       return await readFile(file, "utf8");
     } catch {
       throw new DefinitionError(`Cannot read ${label}: ${file}`);
     }
   }
-  private inside(root: string, candidate: string, label: string): string {
-    const relative = path.relative(root, candidate);
+
+  private async safeExistingFile(
+    root: string,
+    candidate: string,
+    label: string,
+    extension: string,
+  ): Promise<string> {
+    let canonical: string;
+    try {
+      canonical = await realpath(candidate);
+    } catch {
+      throw new DefinitionError(`${label} file does not exist: ${candidate}`);
+    }
+    const canonicalRoot = await realpath(root);
+    const relative = path.relative(canonicalRoot, canonical);
     if (relative.startsWith("..") || path.isAbsolute(relative))
       throw new DefinitionError(`${label} path escapes the project root`);
-    return candidate;
+    if (path.extname(canonical).toLowerCase() !== extension)
+      throw new DefinitionError(`${label} must be a ${extension} file`);
+    try {
+      if (!(await stat(canonical)).isFile()) throw new Error();
+    } catch {
+      throw new DefinitionError(`${label} must be a file: ${canonical}`);
+    }
+    return path.resolve(candidate);
   }
+
+  private async requireWorktreeSupport(root: string): Promise<void> {
+    try {
+      const { stdout } = await executeFile("git", [
+        "-C",
+        root,
+        "rev-parse",
+        "--is-inside-work-tree",
+      ]);
+      if (stdout.trim() !== "true") throw new Error();
+      await executeFile("git", ["-C", root, "rev-parse", "--verify", "HEAD"]);
+    } catch {
+      throw new DefinitionError(
+        "project.workspace.mode worktree requires a Git worktree-capable project",
+      );
+    }
+  }
+
   private map(value: unknown, label: string): Mapping {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new DefinitionError(`${label} must be a mapping`);
@@ -215,22 +581,40 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       throw new DefinitionError(`${label} must be a non-empty string`);
     return value;
   }
+  private id(value: string, label: string): void {
+    if (value.trim() === "" || value.startsWith("$"))
+      throw new DefinitionError(`${label} is invalid`);
+  }
+  private version(value: unknown, label: string): void {
+    this.equal(value, 1, `${label} must be 1`);
+  }
   private equal(actual: unknown, expected: unknown, message: string): void {
     if (actual !== expected) throw new DefinitionError(message);
   }
-  private keys(value: Mapping, allowed: string[], label: string): void {
-    const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
-    if (unknown.length)
-      throw new DefinitionError(`Unknown ${label} field: ${unknown[0]}`);
+  private keys(
+    value: Mapping,
+    allowed: readonly string[],
+    label: string,
+  ): void {
+    const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+    if (unknown)
+      throw new DefinitionError(`Unknown ${label} field: ${unknown}`);
   }
-  private duration(value: unknown): number {
+  private positiveInteger(value: unknown, label: string): number {
+    if (!Number.isSafeInteger(value) || (value as number) <= 0)
+      throw new DefinitionError(`${label} must be a positive integer`);
+    return value as number;
+  }
+  private duration(value: unknown, label: string): number {
     if (typeof value !== "string")
-      throw new DefinitionError("attempt_timeout must be a duration");
+      throw new DefinitionError(`${label} must be a duration`);
     const match = /^(\d+)(ms|s|m|h)$/.exec(value);
-    if (!match || Number(match[1]) <= 0)
-      throw new DefinitionError("attempt_timeout must be a positive duration");
-    return (
-      Number(match[1]) * { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[match[2]]!
-    );
+    const amount = match ? Number(match[1]) : 0;
+    const milliseconds =
+      amount *
+      { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[match?.[2] ?? "ms"]!;
+    if (!match || amount <= 0 || !Number.isSafeInteger(milliseconds))
+      throw new DefinitionError(`${label} must be a positive duration`);
+    return milliseconds;
   }
 }

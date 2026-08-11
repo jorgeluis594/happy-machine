@@ -46,6 +46,8 @@ export class ExecuteWorkflow {
     request.onRunAllocated(run.id);
 
     const state = definition.state;
+    if (state.type !== "agent")
+      throw new Error("This release cannot execute a parallel initial state");
     const taskId = `${state.id}-task`;
     const visit: VisitRecord = {
       stateId: state.id,
@@ -114,6 +116,10 @@ export class ExecuteWorkflow {
       if (!target)
         throw new Error(
           `No transition configured for outcome ${result.outcome}`,
+        );
+      if (target !== "$succeeded" && target !== "$failed")
+        throw new Error(
+          "This release cannot execute transitions to another state",
         );
       visit.target = target;
       run.terminalTarget = target;
