@@ -19,6 +19,7 @@ export interface AttemptRecord {
   executor?: ExecutorReferences;
   logs: { stdout: string; stderr: string };
   outcome?: string;
+  documents: DocumentRecord[];
 }
 
 export interface TaskRecord {
@@ -33,6 +34,16 @@ export interface VisitRecord {
   task: TaskRecord;
   outcome?: string;
   target?: string;
+}
+
+export interface DocumentRecord {
+  stateId: string;
+  visitNumber: number;
+  taskId: string;
+  name: string;
+  internalPath: string;
+  durablePath: string;
+  sha256: string;
 }
 
 export interface SnapshotInputRecord {
@@ -60,6 +71,7 @@ export interface RunRecord {
   createdAt: string;
   terminalTarget?: "$succeeded" | "$failed";
   visits: VisitRecord[];
+  documents: DocumentRecord[];
   events: Array<{
     sequence: number;
     type: string;

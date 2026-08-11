@@ -47,6 +47,7 @@ export class ExecuteWorkflow {
       status: "running",
       createdAt: timestamp(),
       visits: [],
+      documents: [],
       events: [],
     };
     this.event(run, "run_created", timestamp(), {
@@ -56,106 +57,122 @@ export class ExecuteWorkflow {
     await this.runs.save(run);
     request.onRunAllocated(run.id);
 
-    const state =
-      createdSnapshot.definition.states[
-        createdSnapshot.definition.initialState
-      ];
-    if (state.type !== "agent")
-      throw new Error("This release cannot execute a parallel initial state");
-    const taskId = `${state.id}-task`;
-    const visit: VisitRecord = {
-      stateId: state.id,
-      number: 1,
-      contextPath: "",
-      task: { id: taskId, attempts: [] },
-    };
-    run.visits.push(visit);
-    this.event(run, "state_entered", timestamp(), {
-      stateId: state.id,
-      visitNumber: 1,
-    });
-    visit.contextPath = await this.runs.prepareVisitContext(run);
-    await this.runs.save(run);
-    const identity = `${run.id}:${state.id}:1:${taskId}:1`;
-    const attempt: AttemptRecord = {
-      id: identity,
-      number: 1,
-      status: "launching",
-      controlWorkspace: "",
-      contextPath: "",
-      outputDirectory: "",
-      resultPath: "",
-      logs: { stdout: "", stderr: "" },
-    };
-    visit.task.attempts.push(attempt);
-    const paths = await this.runs.prepareAttempt(run);
-    Object.assign(attempt, paths);
-    this.event(run, "attempt_launching", timestamp(), { identity });
-    await this.runs.save(run);
+    let stateId = createdSnapshot.definition.initialState;
+    while (true) {
+      const state = createdSnapshot.definition.states[stateId];
+      if (state.type !== "agent")
+        throw new Error("This release cannot execute a parallel state");
+      const visitNumber =
+        run.visits.filter((candidate) => candidate.stateId === state.id)
+          .length + 1;
+      const taskId = `${state.id}-task`;
+      const visit: VisitRecord = {
+        stateId: state.id,
+        number: visitNumber,
+        contextPath: "",
+        task: { id: taskId, attempts: [] },
+      };
+      run.visits.push(visit);
+      this.event(run, "state_entered", timestamp(), {
+        stateId: state.id,
+        visitNumber,
+      });
+      visit.contextPath = await this.runs.prepareVisitContext(run);
+      await this.runs.save(run);
+      const identity = `${run.id}:${state.id}:${visitNumber}:${taskId}:1`;
+      const attempt: AttemptRecord = {
+        id: identity,
+        number: 1,
+        status: "launching",
+        controlWorkspace: "",
+        contextPath: "",
+        outputDirectory: "",
+        resultPath: "",
+        logs: { stdout: "", stderr: "" },
+        documents: [],
+      };
+      visit.task.attempts.push(attempt);
+      const paths = await this.runs.prepareAttempt(run);
+      Object.assign(attempt, paths);
+      this.event(run, "attempt_launching", timestamp(), { identity });
+      await this.runs.save(run);
 
-    try {
-      const execution = await this.executor.execute(
-        {
-          identity,
-          projectWorkspace: definition.projectRoot,
-          ...paths,
-          instructions: state.agent.instructions,
-          prompt: state.prompt,
-          model: state.agent.model,
-          timeoutMs: state.attemptTimeoutMs,
-          attemptNumber: 1,
-        },
-        async (references) => {
-          attempt.executor = references;
-          attempt.status = "running";
-          this.event(run, "attempt_started", timestamp(), {
+      try {
+        const execution = await this.executor.execute(
+          {
             identity,
-            ...references,
+            projectWorkspace: definition.projectRoot,
+            ...paths,
+            instructions: state.agent.instructions,
+            prompt: state.prompt,
+            model: state.agent.model,
+            timeoutMs: state.policies.attemptTimeoutMs,
+            attemptNumber: 1,
+          },
+          async (references) => {
+            attempt.executor = references;
+            attempt.status = "running";
+            this.event(run, "attempt_started", timestamp(), {
+              identity,
+              ...references,
+            });
+            await this.runs.save(run);
+          },
+        );
+        attempt.executor = execution.references;
+        attempt.logs = execution.logs;
+        const result = await this.runs.readResult(
+          paths.resultPath,
+          paths.outputDirectory,
+          Object.keys(state.outcomes),
+        );
+        attempt.outcome = result.outcome;
+        attempt.status = "succeeded";
+        visit.outcome = result.outcome;
+        const target = state.outcomes[result.outcome];
+        if (!target)
+          throw new Error(
+            `No transition configured for outcome ${result.outcome}`,
+          );
+        visit.target = target;
+        attempt.documents = await this.runs.commitDocuments(
+          run,
+          paths.outputDirectory,
+          result.documents,
+        );
+        run.documents.push(...attempt.documents);
+        this.event(run, "attempt_succeeded", timestamp(), {
+          identity,
+          outcome: result.outcome,
+          documents: attempt.documents.map((document) => document.internalPath),
+        });
+        this.event(run, "transition_committed", timestamp(), {
+          stateId: state.id,
+          visitNumber,
+          outcome: result.outcome,
+          target,
+        });
+        if (target === "$succeeded" || target === "$failed") {
+          run.terminalTarget = target;
+          run.status = terminalStatus(target);
+          this.event(run, "run_terminal", timestamp(), {
+            status: run.status,
+            target: visit.target,
           });
-          await this.runs.save(run);
-        },
-      );
-      attempt.executor = execution.references;
-      attempt.logs = execution.logs;
-      const result = await this.runs.readResult(
-        paths.resultPath,
-        paths.outputDirectory,
-        Object.keys(state.outcomes),
-      );
-      attempt.outcome = result.outcome;
-      attempt.status = "succeeded";
-      visit.outcome = result.outcome;
-      const target = state.outcomes[result.outcome];
-      if (!target)
-        throw new Error(
-          `No transition configured for outcome ${result.outcome}`,
-        );
-      if (target !== "$succeeded" && target !== "$failed")
-        throw new Error(
-          "This release cannot execute transitions to another state",
-        );
-      visit.target = target;
-      run.terminalTarget = target;
-      run.status = terminalStatus(target);
-      this.event(run, "attempt_succeeded", timestamp(), {
-        identity,
-        outcome: result.outcome,
-      });
-      this.event(run, "run_terminal", timestamp(), {
-        status: run.status,
-        target: visit.target,
-      });
-      await this.runs.save(run);
-      return run;
-    } catch (error) {
-      attempt.status = "failed";
-      run.status = "failed";
-      this.event(run, "run_terminal", timestamp(), {
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await this.runs.save(run);
-      throw error;
+        }
+        await this.runs.save(run);
+        if (target === "$succeeded" || target === "$failed") return run;
+        stateId = target;
+      } catch (error) {
+        attempt.status = "failed";
+        run.status = "failed";
+        this.event(run, "run_terminal", timestamp(), {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.runs.save(run);
+        throw error;
+      }
     }
   }
 

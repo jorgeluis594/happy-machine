@@ -1,5 +1,6 @@
 import type {
   DefinitionSnapshotRecord,
+  DocumentRecord,
   RunRecord,
 } from "../domain/execution/run.js";
 import type {
@@ -38,4 +39,9 @@ export interface RunRepository {
     outputDirectory: string,
     allowedOutcomes: readonly string[],
   ): Promise<{ outcome: string; documents: string[] }>;
+  commitDocuments(
+    run: RunRecord,
+    outputDirectory: string,
+    names: readonly string[],
+  ): Promise<DocumentRecord[]>;
 }

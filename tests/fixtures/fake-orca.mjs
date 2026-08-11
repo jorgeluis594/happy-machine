@@ -71,16 +71,31 @@ if (operation === "orchestration run-create") {
 } else if (operation === "orchestration task-create") {
   const spec = args[args.indexOf("--spec") + 1];
   writeFileSync(path.join(process.cwd(), ".fake-contract.json"), spec);
+  appendFileSync(
+    path.join(process.cwd(), ".fake-contracts.jsonl"),
+    `${spec}\n`,
+  );
   response = { task: { taskId: "orca-task-1" } };
 } else if (operation === "orchestration worker-start") {
   const contract = JSON.parse(
     readFileSync(path.join(process.cwd(), ".fake-contract.json"), "utf8"),
   );
+  const stateId = contract.happyMachineAttemptIdentity.split(":")[1];
+  const resultsFile = path.join(process.cwd(), ".fake-results.json");
+  const configured = existsSync(resultsFile)
+    ? JSON.parse(readFileSync(resultsFile, "utf8"))[stateId]
+    : undefined;
   const outcomeFile = path.join(process.cwd(), ".fake-outcome");
-  const outcome = existsSync(outcomeFile)
-    ? readFileSync(outcomeFile, "utf8").trim()
-    : "approved";
+  const outcome =
+    configured?.outcome ??
+    (existsSync(outcomeFile)
+      ? readFileSync(outcomeFile, "utf8").trim()
+      : "approved");
   const context = readFileSync(contract.contextPath, "utf8");
+  writeFileSync(
+    path.join(process.cwd(), `.fake-context-${stateId}.md`),
+    context,
+  );
   const durableLine = context
     .split("\n")
     .find((line) => line.startsWith("- Durable path: "));
@@ -93,9 +108,16 @@ if (operation === "orchestration run-create") {
       readFileSync(durablePath, "utf8"),
     );
   }
+  const documents = (configured?.documents ?? []).map((document) => {
+    const target = path.join(contract.outputDirectory, document.path);
+    writeFileSync(target, document.content);
+    return document.path;
+  });
+  for (const edit of configured?.workspaceEdits ?? [])
+    writeFileSync(path.join(process.cwd(), edit.path), edit.content);
   writeFileSync(
     contract.resultPath,
-    `${JSON.stringify({ outcome, documents: [] })}\n`,
+    `${JSON.stringify({ outcome, documents })}\n`,
   );
   response = {
     dispatch: { dispatchId: "orca-dispatch-1" },

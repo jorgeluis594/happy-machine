@@ -193,6 +193,7 @@ describe("filesystem run snapshots", () => {
       definitionSnapshot: first.record,
       status: "running",
       createdAt: "2026-08-11T12:00:00.000Z",
+      documents: [],
       visits: [
         {
           stateId: "start",
@@ -219,6 +220,7 @@ describe("filesystem run snapshots", () => {
       outputDirectory: "",
       resultPath: "",
       logs: { stdout: "", stderr: "" },
+      documents: [],
     });
     const firstAttempt = await repository.prepareAttempt(run);
     run.visits[0].task.attempts.push({
@@ -230,6 +232,7 @@ describe("filesystem run snapshots", () => {
       outputDirectory: "",
       resultPath: "",
       logs: { stdout: "", stderr: "" },
+      documents: [],
     });
     const secondAttempt = await repository.prepareAttempt(run);
     expect(secondAttempt.contextPath).toBe(firstAttempt.contextPath);

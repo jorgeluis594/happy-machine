@@ -80,6 +80,52 @@ async function project(
   return { root, workflow };
 }
 
+async function routingProject(
+  results: Record<
+    string,
+    {
+      outcome: string;
+      documents?: Array<{ path: string; content: string }>;
+      workspaceEdits?: Array<{ path: string; content: string }>;
+    }
+  >,
+  states = `  review:
+    type: agent
+    agent: worker
+    prompt: Review
+    outcomes:
+      approved: publish
+      needs_revision: revise
+  revise:
+    type: agent
+    agent: worker
+    prompt: Revise
+    outcomes:
+      completed: publish
+  publish:
+    type: agent
+    agent: worker
+    prompt: Publish
+    outcomes:
+      published: $succeeded`,
+): Promise<{ root: string; workflow: string }> {
+  const setup = await project();
+  await writeFile(
+    setup.workflow,
+    `version: 1
+id: routed
+initial_state: review
+states:
+${states}
+`,
+  );
+  await writeFile(
+    path.join(setup.root, ".fake-results.json"),
+    `${JSON.stringify(results, null, 2)}\n`,
+  );
+  return setup;
+}
+
 function cli(projectRoot?: string) {
   let id = 0;
   const useCase = new ExecuteWorkflow(
@@ -215,6 +261,10 @@ describe("happy-machine execute", () => {
         calls.push("runs.readResult");
         return Promise.reject(new Error("must not read"));
       },
+      commitDocuments: () => {
+        calls.push("runs.commitDocuments");
+        return Promise.reject(new Error("must not commit"));
+      },
     } as RunRepository;
     const executor = {
       execute: () => {
@@ -263,6 +313,278 @@ describe("happy-machine execute", () => {
     },
   );
 
+  it.each([
+    [
+      "approved",
+      { review: { outcome: "approved" }, publish: { outcome: "published" } },
+      ["review", "publish"],
+      ["publish", "$succeeded"],
+    ],
+    [
+      "needs_revision",
+      {
+        review: { outcome: "needs_revision" },
+        revise: { outcome: "completed" },
+        publish: { outcome: "published" },
+      },
+      ["review", "revise", "publish"],
+      ["revise", "publish", "$succeeded"],
+    ],
+  ])(
+    "executes only the %s branch through a three-state workflow",
+    async (_branch, results, expectedStates, expectedTargets) => {
+      const setup = await routingProject(results);
+      const app = cli(setup.root);
+      expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(
+        0,
+      );
+      const run = await storedRun(setup.root);
+      expect(run.visits.map((visit) => visit.stateId)).toEqual(expectedStates);
+      expect(run.visits.map((visit) => visit.target)).toEqual(expectedTargets);
+      expect(run.status).toBe("succeeded");
+    },
+  );
+
+  it("treats a rejected business result as successful when configured that way", async () => {
+    const setup = await routingProject(
+      { review: { outcome: "rejected" } },
+      `  review:
+    type: agent
+    agent: worker
+    prompt: Decide
+    outcomes:
+      rejected: $succeeded`,
+    );
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const run = await storedRun(setup.root);
+    expect(run).toMatchObject({
+      status: "succeeded",
+      terminalTarget: "$succeeded",
+    });
+    expect(run.visits.at(-1)?.outcome).toBe("rejected");
+  });
+
+  it.each(["succeeded", "failed"])(
+    "treats %s as an ordinary outcome name in a normal state",
+    async (ordinaryOutcome) => {
+      const setup = await routingProject(
+        {
+          review: { outcome: ordinaryOutcome },
+          followup: { outcome: "done" },
+        },
+        `  review:
+    type: agent
+    agent: worker
+    prompt: Decide
+    outcomes:
+      succeeded: followup
+      failed: followup
+  followup:
+    type: agent
+    agent: worker
+    prompt: Follow up
+    outcomes:
+      done: $succeeded`,
+      );
+      const app = cli(setup.root);
+      expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(
+        0,
+      );
+      const run = await storedRun(setup.root);
+      expect(run.visits.map((visit) => visit.stateId)).toEqual([
+        "review",
+        "followup",
+      ]);
+      expect(run.visits[0]).toMatchObject({
+        outcome: ordinaryOutcome,
+        target: "followup",
+      });
+    },
+  );
+
+  it("exchanges multiple immutable documents, preserves repeated basenames, and snapshots each visit context", async () => {
+    const setup = await routingProject({
+      review: {
+        outcome: "needs_revision",
+        documents: [
+          { path: "report.md", content: "review report says publish\n" },
+          { path: "notes.md", content: "review notes\n" },
+        ],
+        workspaceEdits: [
+          { path: "undeclared-source.ts", content: "workspace only\n" },
+        ],
+      },
+      revise: {
+        outcome: "completed",
+        documents: [
+          { path: "report.md", content: "revised report says rejected\n" },
+        ],
+      },
+      publish: { outcome: "published" },
+    });
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const run = await storedRun(setup.root);
+
+    expect(run.documents).toHaveLength(3);
+    expect(run.documents.map((document) => document.name)).toEqual([
+      "report.md",
+      "notes.md",
+      "report.md",
+    ]);
+    expect(
+      new Set(run.documents.map((document) => document.internalPath)).size,
+    ).toBe(3);
+    for (const document of run.documents) {
+      expect(document.internalPath).toBe(
+        `states/${document.stateId}/visits/${document.visitNumber}/tasks/${document.taskId}/documents/${document.name}`,
+      );
+      expect(document.sha256).toMatch(/^[a-f0-9]{64}$/);
+      await expect(
+        readFile(document.durablePath, "utf8"),
+      ).resolves.toBeTruthy();
+    }
+    expect(run.documents[0].durablePath).not.toBe(run.documents[2].durablePath);
+
+    const [reviewContext, reviseContext, publishContext] = await Promise.all(
+      run.visits.map((visit) => readFile(visit.contextPath, "utf8")),
+    );
+    expect(reviewContext).not.toContain("review-task/documents/report.md");
+    expect(reviseContext).toContain(
+      "states/review/visits/1/tasks/review-task/documents/report.md",
+    );
+    expect(reviseContext).toContain(
+      "states/review/visits/1/tasks/review-task/documents/notes.md",
+    );
+    expect(publishContext).toContain(
+      "states/review/visits/1/tasks/review-task/documents/report.md",
+    );
+    expect(publishContext).toContain(
+      "states/revise/visits/1/tasks/revise-task/documents/report.md",
+    );
+    expect(publishContext.match(/^### report\.md$/gm)).toHaveLength(2);
+    expect(publishContext).not.toContain("undeclared-source.ts");
+    expect(run.visits.map((visit) => visit.contextPath)).toEqual([
+      expect.stringContaining("states/review/visits/1/context.md"),
+      expect.stringContaining("states/revise/visits/1/context.md"),
+      expect.stringContaining("states/publish/visits/1/context.md"),
+    ]);
+    expect(await readFile(run.visits[0].contextPath, "utf8")).toBe(
+      reviewContext,
+    );
+    expect(run.visits[0].outcome).toBe("needs_revision");
+  });
+
+  it("does not launch the next state when the committed transition cannot be persisted", async () => {
+    const setup = await routingProject({
+      review: { outcome: "approved" },
+      publish: { outcome: "published" },
+    });
+    const filesystem = new FilesystemRunRepository();
+    let blocked = false;
+    const runs: RunRepository = {
+      createSnapshot: (request) => filesystem.createSnapshot(request),
+      prepareVisitContext: (run) => filesystem.prepareVisitContext(run),
+      prepareAttempt: (run) => filesystem.prepareAttempt(run),
+      readResult: (resultPath, outputDirectory, outcomes) =>
+        filesystem.readResult(resultPath, outputDirectory, outcomes),
+      commitDocuments: (run, outputDirectory, names) =>
+        filesystem.commitDocuments(run, outputDirectory, names),
+      save: (run) => {
+        if (!blocked && run.visits[0]?.target === "publish") {
+          blocked = true;
+          return Promise.reject(new Error("blocked transition persistence"));
+        }
+        return filesystem.save(run);
+      },
+    };
+    let id = 0;
+    const useCase = new ExecuteWorkflow(
+      new FilesystemProjectDefinitions(),
+      runs,
+      new OrcaTaskExecutor(fixture),
+      () => new Date("2026-08-11T12:00:00.000Z"),
+      () => `blocked-${++id}`,
+    );
+    await expect(
+      useCase.execute({
+        workflowPath: setup.workflow,
+        currentDirectory: setup.root,
+        onRunAllocated: (runId) =>
+          writeFileSync(path.join(setup.root, ".run-id-printed"), runId),
+      }),
+    ).rejects.toThrow("blocked transition persistence");
+    const run = await storedRun(setup.root);
+    expect(run.visits.map((visit) => visit.stateId)).toEqual(["review"]);
+    expect(run.status).toBe("failed");
+    const calls = (
+      await readFile(path.join(setup.root, ".fake-orca-calls.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n");
+    expect(calls).toHaveLength(4);
+  });
+
+  it("executes every later state from its snapshotted overrides despite workspace definition edits", async () => {
+    const setup = await routingProject(
+      {
+        review: {
+          outcome: "approved",
+          workspaceEdits: [
+            {
+              path: "workflows/one.yaml",
+              content: "the live workflow is no longer valid\n",
+            },
+          ],
+        },
+        publish: { outcome: "published" },
+      },
+      `  review:
+    type: agent
+    agent: worker
+    model: review-model
+    prompt: Review snapshot prompt
+    outcomes:
+      approved: publish
+  publish:
+    type: agent
+    agent: worker
+    model: publish-model
+    prompt: Publish snapshot prompt
+    attempt_timeout: 2s
+    outcomes:
+      published: $succeeded`,
+    );
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const contracts = (
+      await readFile(path.join(setup.root, ".fake-contracts.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          parseJson(line) as {
+            model: string;
+            prompt: string;
+            timeoutMs: number;
+          },
+      );
+    expect(contracts).toMatchObject([
+      {
+        model: "review-model",
+        prompt: "Review snapshot prompt",
+        timeoutMs: 5000,
+      },
+      {
+        model: "publish-model",
+        prompt: "Publish snapshot prompt",
+        timeoutMs: 2000,
+      },
+    ]);
+  });
+
   it("uses only result.json for routing and durably attributes the launch, logs, and outcome", async () => {
     const setup = await project("approved");
     const app = cli(setup.root);
@@ -298,6 +620,7 @@ describe("happy-machine execute", () => {
       "attempt_launching",
       "attempt_started",
       "attempt_succeeded",
+      "transition_committed",
       "run_terminal",
     ]);
     expect(run.events[0].data.definitionSnapshotIdentity).toBe(

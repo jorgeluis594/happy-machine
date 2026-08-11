@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,7 +11,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import type { RunRecord } from "../../../../domain/execution/run.js";
+import type {
+  DocumentRecord,
+  RunRecord,
+} from "../../../../domain/execution/run.js";
 import type {
   AttemptPaths,
   RunRepository,
@@ -135,6 +140,17 @@ export class FilesystemRunRepository implements RunRepository {
       `- SHA-256: \`${input.sha256}\``,
       "",
     ]);
+    const documentIndex = run.documents.flatMap((document) => [
+      `### ${document.name}`,
+      "",
+      `- Producing state: ${JSON.stringify(document.stateId)}`,
+      `- Visit: ${document.visitNumber}`,
+      `- Task: ${JSON.stringify(document.taskId)}`,
+      `- Provenance path: ${JSON.stringify(document.internalPath)}`,
+      `- Durable path: ${JSON.stringify(document.durablePath)}`,
+      `- SHA-256: \`${document.sha256}\``,
+      "",
+    ]);
     const context = [
       "# Happy Machine Visit Context",
       "",
@@ -148,6 +164,11 @@ export class FilesystemRunRepository implements RunRepository {
       ...(inputIndex.length
         ? inputIndex
         : ["No input documents were supplied for this run.", ""]),
+      "## Workflow documents",
+      "",
+      ...(documentIndex.length
+        ? documentIndex
+        : ["No workflow documents have been committed yet.", ""]),
     ].join("\n");
     await writeFile(contextPath, context, { encoding: "utf8", flag: "wx" });
     return contextPath;
@@ -218,6 +239,52 @@ export class FilesystemRunRepository implements RunRepository {
         throw new Error(`Invalid result document: ${document}`);
     }
     return { outcome: result.outcome, documents: result.documents as string[] };
+  }
+
+  async commitDocuments(
+    run: RunRecord,
+    outputDirectory: string,
+    names: readonly string[],
+  ): Promise<DocumentRecord[]> {
+    const visit = run.visits.at(-1)!;
+    const records: DocumentRecord[] = [];
+    for (const name of names) {
+      const source = path.resolve(outputDirectory, name);
+      const relative = path.relative(outputDirectory, source);
+      if (
+        relative.startsWith("..") ||
+        path.isAbsolute(relative) ||
+        path.extname(source).toLowerCase() !== ".md"
+      )
+        throw new Error(`Invalid result document: ${name}`);
+      const internalPath = path.posix.join(
+        "states",
+        this.segment(visit.stateId),
+        "visits",
+        String(visit.number),
+        "tasks",
+        this.segment(visit.task.id),
+        "documents",
+        ...relative.split(path.sep),
+      );
+      const durablePath = this.durablePath(
+        this.runDirectory(run),
+        internalPath,
+      );
+      await mkdir(path.dirname(durablePath), { recursive: true });
+      await copyFile(source, durablePath, constants.COPYFILE_EXCL);
+      const content = await readFile(durablePath);
+      records.push({
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        taskId: visit.task.id,
+        name: path.posix.basename(relative.split(path.sep).join("/")),
+        internalPath,
+        durablePath,
+        sha256: createHash("sha256").update(content).digest("hex"),
+      });
+    }
+    return records;
   }
 
   private runDirectory(run: RunRecord): string {
