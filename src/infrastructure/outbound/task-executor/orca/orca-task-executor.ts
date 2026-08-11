@@ -27,10 +27,19 @@ export class OrcaTaskExecutor implements TaskExecutor {
   ): Promise<TaskExecution> {
     const logs = { stdout: "", stderr: "" };
     const command = async (args: string[]): Promise<CommandResult> => {
-      const result = await this.run(args, launch.projectWorkspace);
-      logs.stdout += result.stdout;
-      logs.stderr += result.stderr;
-      return result;
+      try {
+        const result = await this.run(args, launch.projectWorkspace);
+        logs.stdout += result.stdout;
+        logs.stderr += result.stderr;
+        return result;
+      } catch (error) {
+        if (error instanceof TaskExecutorError) {
+          logs.stdout += error.logs.stdout;
+          logs.stderr += error.logs.stderr;
+          throw new TaskExecutorError(error.message, { ...logs });
+        }
+        throw error;
+      }
     };
     const contract = JSON.stringify({
       happyMachineAttemptIdentity: launch.identity,
@@ -71,6 +80,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
     if (!taskId)
       throw new TaskExecutorError(
         "Orca task-create response did not contain a task ID",
+        logs,
       );
     const workerReceipt = await command([
       "orchestration",
@@ -98,6 +108,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
     if (!dispatchId)
       throw new TaskExecutorError(
         "Orca worker-start response did not contain a dispatch ID",
+        logs,
       );
     const references: ExecutorReferences = {
       runId: orcaRunId,
@@ -119,6 +130,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
     if (!this.hasCompletion(completion.json, dispatchId))
       throw new TaskExecutorError(
         "Orca did not return a successful worker_done event for the attempt",
+        logs,
       );
     return { references, logs };
   }
@@ -173,19 +185,25 @@ export class OrcaTaskExecutor implements TaskExecutor {
         stderr += String(chunk);
       });
       child.on("error", (error) =>
-        reject(new TaskExecutorError(error.message)),
+        reject(new TaskExecutorError(error.message, { stdout, stderr })),
       );
       child.on("close", (code) => {
         if (code !== 0)
           return reject(
             new TaskExecutorError(
               `Orca command failed (${code}): ${stderr.trim()}`,
+              { stdout, stderr },
             ),
           );
         try {
           resolve({ stdout, stderr, json: JSON.parse(stdout) });
         } catch {
-          reject(new TaskExecutorError("Orca command returned invalid JSON"));
+          reject(
+            new TaskExecutorError("Orca command returned invalid JSON", {
+              stdout,
+              stderr,
+            }),
+          );
         }
       });
     });

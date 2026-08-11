@@ -314,8 +314,11 @@ export class ExecuteWorkflow {
     });
     const settled = execution.then(
       (value) => ({ kind: "completed", execution: value }) as const,
-      (error: unknown) =>
-        ({ kind: "failed", failure: this.failure(error) }) as const,
+      (error: unknown) => {
+        if (!(error instanceof TaskExecutorError)) throw error;
+        attempt.logs = error.logs;
+        return { kind: "failed", failure: this.failure(error) } as const;
+      },
     );
     const timeout = this.wait(launch.timeoutMs, timeoutController.signal).then(
       () => ({ kind: "timeout" }) as const,

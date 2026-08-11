@@ -181,7 +181,13 @@ async function result(
 
 const succeed: Behavior = { run: (launch) => result(launch) };
 const fail = (message: string): Behavior => ({
-  run: () => Promise.reject(new TaskExecutorError(message)),
+  run: () =>
+    Promise.reject(
+      new TaskExecutorError(message, {
+        stdout: `stdout: ${message}`,
+        stderr: `stderr: ${message}`,
+      }),
+    ),
 });
 const never: Behavior = { run: () => new Promise(() => {}) };
 const retryWait: Wait = (_milliseconds, signal) =>
@@ -229,6 +235,10 @@ describe("retries and timeouts", () => {
     expect(run).toMatchObject({
       status: "failed",
       failure: { code: "executor_failed", message: "failure three" },
+    });
+    expect(run.visits[0].task.attempts[2].logs).toEqual({
+      stdout: "stdout: failure three",
+      stderr: "stderr: failure three",
     });
     expect(run.events.at(-2)).toMatchObject({
       type: "retry_exhausted",

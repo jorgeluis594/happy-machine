@@ -38,4 +38,14 @@ export interface TaskExecutor {
 
 export class TaskExecutorError extends Error {
   readonly code = "executor_failed";
+
+  constructor(
+    message: string,
+    readonly logs: { stdout: string; stderr: string } = {
+      stdout: "",
+      stderr: "",
+    },
+  ) {
+    super(message);
+  }
 }
