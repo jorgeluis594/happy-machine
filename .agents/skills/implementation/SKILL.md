@@ -13,8 +13,8 @@ description: Guide implementation through contextual analysis, continuous develo
 4. Implement continuously.
 5. Add or update tests and run focused checks while developing.
 6. Regularly evaluate whether the accumulated changes are ready for a commit.
-7. When they are ready, run `npm test` and `npm run typecheck`.
-8. If both commands pass, inspect the diff, stage only the related changes, and create a concise commit describing their meaning.
+7. When they are ready, run `npm run lint:fix`, `npm test`, and `npm run typecheck`.
+8. If all three commands pass, inspect the diff, stage only the related changes, and create a concise commit describing their meaning.
 9. Continue implementing and repeat the flow until all requirements are complete.
 10. Run `npm test` and `npm run typecheck` again before reporting completion.
 
