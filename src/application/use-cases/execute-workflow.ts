@@ -38,7 +38,7 @@ export class ExecuteWorkflow {
       workflowId: definition.workflowId,
       source: definition.snapshotSource,
     });
-    const run: RunRecord = {
+    let run: RunRecord = {
       id: runId,
       workflowId: definition.workflowId,
       workflowPath: definition.workflowPath,
@@ -126,46 +126,56 @@ export class ExecuteWorkflow {
           paths.outputDirectory,
           Object.keys(state.outcomes),
         );
-        attempt.outcome = result.outcome;
-        attempt.status = "succeeded";
-        visit.outcome = result.outcome;
         const target = state.outcomes[result.outcome];
         if (!target)
           throw new Error(
             `No transition configured for outcome ${result.outcome}`,
           );
-        visit.target = target;
-        attempt.documents = await this.runs.commitDocuments(
+        const documents = await this.runs.stageDocuments(
           run,
           paths.outputDirectory,
           result.documents,
         );
-        run.documents.push(...attempt.documents);
-        this.event(run, "attempt_succeeded", timestamp(), {
+        const committed = structuredClone(run);
+        const committedVisit = committed.visits.at(-1)!;
+        const committedAttempt = committedVisit.task.attempts.at(-1)!;
+        committedAttempt.outcome = result.outcome;
+        committedAttempt.status = "succeeded";
+        committedAttempt.documents = documents;
+        if (result.error !== undefined) committedAttempt.error = result.error;
+        committedVisit.outcome = result.outcome;
+        committedVisit.target = target;
+        committed.documents.push(...documents);
+        this.event(committed, "attempt_succeeded", timestamp(), {
           identity,
           outcome: result.outcome,
-          documents: attempt.documents.map((document) => document.internalPath),
+          documents: documents.map((document) => document.internalPath),
         });
-        this.event(run, "transition_committed", timestamp(), {
+        this.event(committed, "transition_committed", timestamp(), {
           stateId: state.id,
           visitNumber,
           outcome: result.outcome,
           target,
         });
         if (target === "$succeeded" || target === "$failed") {
-          run.terminalTarget = target;
-          run.status = terminalStatus(target);
-          this.event(run, "run_terminal", timestamp(), {
-            status: run.status,
-            target: visit.target,
+          committed.terminalTarget = target;
+          committed.status = terminalStatus(target);
+          this.event(committed, "run_terminal", timestamp(), {
+            status: committed.status,
+            target,
           });
         }
-        await this.runs.save(run);
+        await this.runs.save(committed);
+        run = committed;
         if (target === "$succeeded" || target === "$failed") return run;
         stateId = target;
       } catch (error) {
         attempt.status = "failed";
         run.status = "failed";
+        this.event(run, "attempt_failed", timestamp(), {
+          identity,
+          error: error instanceof Error ? error.message : String(error),
+        });
         this.event(run, "run_terminal", timestamp(), {
           status: "failed",
           error: error instanceof Error ? error.message : String(error),

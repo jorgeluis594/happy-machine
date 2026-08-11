@@ -1,6 +1,7 @@
 import type {
   DefinitionSnapshotRecord,
   DocumentRecord,
+  JsonValue,
   RunRecord,
 } from "../domain/execution/run.js";
 import type {
@@ -27,6 +28,12 @@ export interface SnapshotCreationResult {
   definition: EffectiveExecutionDefinition;
 }
 
+export interface ValidatedNormalResult {
+  outcome: string;
+  documents: string[];
+  error?: JsonValue;
+}
+
 export interface RunRepository {
   createSnapshot(
     request: SnapshotCreationRequest,
@@ -38,8 +45,8 @@ export interface RunRepository {
     resultPath: string,
     outputDirectory: string,
     allowedOutcomes: readonly string[],
-  ): Promise<{ outcome: string; documents: string[] }>;
-  commitDocuments(
+  ): Promise<ValidatedNormalResult>;
+  stageDocuments(
     run: RunRecord,
     outputDirectory: string,
     names: readonly string[],

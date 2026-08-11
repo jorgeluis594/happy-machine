@@ -85,6 +85,7 @@ async function routingProject(
     string,
     {
       outcome: string;
+      error?: unknown;
       documents?: Array<{ path: string; content: string }>;
       workspaceEdits?: Array<{ path: string; content: string }>;
     }
@@ -261,8 +262,8 @@ describe("happy-machine execute", () => {
         calls.push("runs.readResult");
         return Promise.reject(new Error("must not read"));
       },
-      commitDocuments: () => {
-        calls.push("runs.commitDocuments");
+      stageDocuments: () => {
+        calls.push("runs.stageDocuments");
         return Promise.reject(new Error("must not commit"));
       },
     } as RunRepository;
@@ -478,7 +479,10 @@ describe("happy-machine execute", () => {
 
   it("does not launch the next state when the committed transition cannot be persisted", async () => {
     const setup = await routingProject({
-      review: { outcome: "approved" },
+      review: {
+        outcome: "approved",
+        documents: [{ path: "audit.md", content: "staged only\n" }],
+      },
       publish: { outcome: "published" },
     });
     const filesystem = new FilesystemRunRepository();
@@ -489,12 +493,22 @@ describe("happy-machine execute", () => {
       prepareAttempt: (run) => filesystem.prepareAttempt(run),
       readResult: (resultPath, outputDirectory, outcomes) =>
         filesystem.readResult(resultPath, outputDirectory, outcomes),
-      commitDocuments: (run, outputDirectory, names) =>
-        filesystem.commitDocuments(run, outputDirectory, names),
-      save: (run) => {
+      stageDocuments: (run, outputDirectory, names) =>
+        filesystem.stageDocuments(run, outputDirectory, names),
+      save: async (run) => {
         if (!blocked && run.visits[0]?.target === "publish") {
           blocked = true;
-          return Promise.reject(new Error("blocked transition persistence"));
+          await writeFile(
+            path.join(
+              run.projectRoot,
+              ".happy-machine",
+              "runs",
+              run.id,
+              "run.json.tmp",
+            ),
+            "{interrupted logical commit",
+          );
+          throw new Error("blocked transition persistence");
         }
         return filesystem.save(run);
       },
@@ -518,12 +532,101 @@ describe("happy-machine execute", () => {
     const run = await storedRun(setup.root);
     expect(run.visits.map((visit) => visit.stateId)).toEqual(["review"]);
     expect(run.status).toBe("failed");
+    expect(run.documents).toEqual([]);
+    expect(run.visits[0]).not.toHaveProperty("outcome");
+    expect(run.visits[0]).not.toHaveProperty("target");
+    expect(run.visits[0].task.attempts[0].documents).toEqual([]);
+    expect(await readFile(run.visits[0].contextPath, "utf8")).not.toContain(
+      "audit.md",
+    );
+    await expect(
+      readFile(
+        path.join(
+          setup.root,
+          ".happy-machine",
+          "runs",
+          run.id,
+          "states",
+          "review",
+          "visits",
+          "1",
+          "tasks",
+          "review-task",
+          "documents",
+          "audit.md",
+        ),
+        "utf8",
+      ),
+    ).resolves.toBe("staged only\n");
     const calls = (
       await readFile(path.join(setup.root, ".fake-orca-calls.jsonl"), "utf8")
     )
       .trim()
       .split("\n");
     expect(calls).toHaveLength(4);
+  });
+
+  it("fails an unknown outcome after one attempt without promoting output or workspace edits", async () => {
+    const setup = await routingProject(
+      {
+        review: {
+          outcome: "uncertain",
+          documents: [{ path: "audit.md", content: "audit only\n" }],
+          workspaceEdits: [
+            { path: "source-change.ts", content: "preserved workspace edit\n" },
+          ],
+        },
+      },
+      `  review:
+    type: agent
+    agent: worker
+    prompt: Decide
+    max_attempts: 1
+    outcomes:
+      approved: $succeeded`,
+    );
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(1);
+    const stored = await storedRun(setup.root);
+    expect(stored.status).toBe("failed");
+    expect(stored.documents).toEqual([]);
+    expect(stored.visits[0]).not.toHaveProperty("outcome");
+    expect(stored.visits[0]).not.toHaveProperty("target");
+    expect(stored.visits[0].task.attempts).toHaveLength(1);
+    expect(stored.visits[0].task.attempts[0]).toMatchObject({
+      status: "failed",
+      documents: [],
+    });
+    expect(stored.events.map((event) => event.type)).not.toContain(
+      "transition_committed",
+    );
+    await expect(
+      readFile(path.join(setup.root, "source-change.ts"), "utf8"),
+    ).resolves.toBe("preserved workspace edit\n");
+    expect(await readFile(stored.visits[0].contextPath, "utf8")).not.toContain(
+      "audit.md",
+    );
+  });
+
+  it("retains result error as diagnostic data while routing only by outcome", async () => {
+    const setup = await routingProject({
+      review: {
+        outcome: "approved",
+        error: { code: "quality-warning", suggestedOutcome: "rejected" },
+      },
+      publish: { outcome: "published" },
+    });
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const stored = await storedRun(setup.root);
+    expect(stored.visits.map((visit) => visit.stateId)).toEqual([
+      "review",
+      "publish",
+    ]);
+    expect(stored.visits[0].task.attempts[0].error).toEqual({
+      code: "quality-warning",
+      suggestedOutcome: "rejected",
+    });
   });
 
   it("executes every later state from its snapshotted overrides despite workspace definition edits", async () => {

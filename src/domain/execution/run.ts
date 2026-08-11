@@ -19,8 +19,12 @@ export interface AttemptRecord {
   executor?: ExecutorReferences;
   logs: { stdout: string; stderr: string };
   outcome?: string;
+  error?: JsonValue;
   documents: DocumentRecord[];
 }
+
+export type JsonValue =
+  null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface TaskRecord {
   id: string;

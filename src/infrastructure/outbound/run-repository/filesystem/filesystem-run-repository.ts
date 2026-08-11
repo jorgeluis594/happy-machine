@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   rename,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -20,6 +22,7 @@ import type {
   RunRepository,
   SnapshotCreationRequest,
   SnapshotCreationResult,
+  ValidatedNormalResult,
 } from "../../../../ports/run-repository.js";
 
 interface StoredArtifact {
@@ -199,7 +202,7 @@ export class FilesystemRunRepository implements RunRepository {
     resultPath: string,
     outputDirectory: string,
     allowedOutcomes: readonly string[],
-  ): Promise<{ outcome: string; documents: string[] }> {
+  ): Promise<ValidatedNormalResult> {
     let value: unknown;
     try {
       value = JSON.parse(await readFile(resultPath, "utf8"));
@@ -219,44 +222,25 @@ export class FilesystemRunRepository implements RunRepository {
       result.documents.some((item) => typeof item !== "string")
     )
       throw new Error("result.json documents must be an array of paths");
-    for (const document of result.documents as string[]) {
-      if (path.isAbsolute(document))
-        throw new Error("Result document paths must be relative");
-      const file = path.resolve(outputDirectory, document);
-      const relative = path.relative(outputDirectory, file);
-      let validFile = false;
-      try {
-        validFile = (await stat(file)).isFile();
-      } catch {
-        // The validation below reports missing or inaccessible files.
-      }
-      if (
-        relative.startsWith("..") ||
-        path.isAbsolute(relative) ||
-        path.extname(file).toLowerCase() !== ".md" ||
-        !validFile
-      )
-        throw new Error(`Invalid result document: ${document}`);
-    }
-    return { outcome: result.outcome, documents: result.documents as string[] };
+    await this.validateDocuments(outputDirectory, result.documents as string[]);
+    if ("error" in result && !this.isJsonValue(result.error))
+      throw new Error("result.json error must be serializable diagnostic data");
+    return {
+      outcome: result.outcome,
+      documents: result.documents as string[],
+      ...(result.error === undefined ? {} : { error: result.error }),
+    } as ValidatedNormalResult;
   }
 
-  async commitDocuments(
+  async stageDocuments(
     run: RunRecord,
     outputDirectory: string,
     names: readonly string[],
   ): Promise<DocumentRecord[]> {
     const visit = run.visits.at(-1)!;
+    const validated = await this.validateDocuments(outputDirectory, names);
     const records: DocumentRecord[] = [];
-    for (const name of names) {
-      const source = path.resolve(outputDirectory, name);
-      const relative = path.relative(outputDirectory, source);
-      if (
-        relative.startsWith("..") ||
-        path.isAbsolute(relative) ||
-        path.extname(source).toLowerCase() !== ".md"
-      )
-        throw new Error(`Invalid result document: ${name}`);
+    const planned = validated.map(({ source, relative }) => {
       const internalPath = path.posix.join(
         "states",
         this.segment(visit.stateId),
@@ -267,10 +251,22 @@ export class FilesystemRunRepository implements RunRepository {
         "documents",
         ...relative.split(path.sep),
       );
+      if (
+        run.documents.some((document) => document.internalPath === internalPath)
+      )
+        throw new Error(`Document provenance collision: ${internalPath}`);
       const durablePath = this.durablePath(
         this.runDirectory(run),
         internalPath,
       );
+      return { source, relative, internalPath, durablePath };
+    });
+    if (
+      new Set(planned.map((document) => document.internalPath)).size !==
+      planned.length
+    )
+      throw new Error("Result documents contain a provenance collision");
+    for (const { source, relative, internalPath, durablePath } of planned) {
       await mkdir(path.dirname(durablePath), { recursive: true });
       await copyFile(source, durablePath, constants.COPYFILE_EXCL);
       const content = await readFile(durablePath);
@@ -285,6 +281,62 @@ export class FilesystemRunRepository implements RunRepository {
       });
     }
     return records;
+  }
+
+  private async validateDocuments(
+    outputDirectory: string,
+    names: readonly string[],
+  ): Promise<Array<{ source: string; relative: string }>> {
+    const outputRoot = await realpath(outputDirectory);
+    return Promise.all(
+      names.map(async (name) => {
+        if (!name || path.isAbsolute(name))
+          throw new Error(`Invalid result document: ${name}`);
+        const candidate = path.resolve(outputRoot, name);
+        const relative = path.relative(outputRoot, candidate);
+        if (
+          relative.startsWith(`..${path.sep}`) ||
+          relative === ".." ||
+          path.isAbsolute(relative) ||
+          path.extname(candidate).toLowerCase() !== ".md"
+        )
+          throw new Error(`Invalid result document: ${name}`);
+        try {
+          const [entry, resolved, file] = await Promise.all([
+            lstat(candidate),
+            realpath(candidate),
+            stat(candidate),
+          ]);
+          const resolvedRelative = path.relative(outputRoot, resolved);
+          if (
+            entry.isSymbolicLink() ||
+            resolved !== candidate ||
+            !file.isFile() ||
+            resolvedRelative.startsWith(`..${path.sep}`) ||
+            resolvedRelative === ".." ||
+            path.isAbsolute(resolvedRelative)
+          )
+            throw new Error();
+          return { source: resolved, relative };
+        } catch {
+          throw new Error(`Invalid result document: ${name}`);
+        }
+      }),
+    );
+  }
+
+  private isJsonValue(value: unknown): boolean {
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "boolean"
+    )
+      return true;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (Array.isArray(value))
+      return value.every((item) => this.isJsonValue(item));
+    if (!value || typeof value !== "object") return false;
+    return Object.values(value).every((item) => this.isJsonValue(item));
   }
 
   private runDirectory(run: RunRecord): string {

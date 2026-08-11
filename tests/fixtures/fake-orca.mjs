@@ -117,7 +117,11 @@ if (operation === "orchestration run-create") {
     writeFileSync(path.join(process.cwd(), edit.path), edit.content);
   writeFileSync(
     contract.resultPath,
-    `${JSON.stringify({ outcome, documents })}\n`,
+    `${JSON.stringify({
+      outcome,
+      documents,
+      ...(configured?.error === undefined ? {} : { error: configured.error }),
+    })}\n`,
   );
   response = {
     dispatch: { dispatchId: "orca-dispatch-1" },
