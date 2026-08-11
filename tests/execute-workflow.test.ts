@@ -11,7 +11,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ExecuteWorkflow } from "../src/application/use-cases/execute-workflow.js";
-import type { RunRecord } from "../src/domain/execution/run.js";
+import type {
+  NormalVisitRecord,
+  RunRecord,
+} from "../src/domain/execution/run.js";
 import { Cli } from "../src/infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "../src/infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { FilesystemRunRepository } from "../src/infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
@@ -22,6 +25,12 @@ import type { TaskExecutor } from "../src/ports/task-executor.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 const temporaryDirectories: string[] = [];
+
+function normalVisit(run: RunRecord, index = 0): NormalVisitRecord {
+  const visit = run.visits[index];
+  if (!visit || visit.type !== "agent") throw new Error("expected agent visit");
+  return visit;
+}
 
 beforeAll(async () => chmod(fixture, 0o755));
 afterEach(() => {
@@ -503,11 +512,12 @@ describe("happy-machine execute", () => {
     const runs: RunRepository = {
       createSnapshot: (request) => filesystem.createSnapshot(request),
       prepareVisitContext: (run) => filesystem.prepareVisitContext(run),
-      prepareAttempt: (run) => filesystem.prepareAttempt(run),
+      prepareAttempt: (run, visit, task, attemptNumber) =>
+        filesystem.prepareAttempt(run, visit, task, attemptNumber),
       readResult: (resultPath, outputDirectory, outcomes) =>
         filesystem.readResult(resultPath, outputDirectory, outcomes),
-      stageDocuments: (run, outputDirectory, names) =>
-        filesystem.stageDocuments(run, outputDirectory, names),
+      stageDocuments: (run, visit, task, outputDirectory, names) =>
+        filesystem.stageDocuments(run, visit, task, outputDirectory, names),
       save: async (run) => {
         if (!blocked && run.visits[0]?.target === "publish") {
           blocked = true;
@@ -549,7 +559,7 @@ describe("happy-machine execute", () => {
     expect(run.documents).toEqual([]);
     expect(run.visits[0]).not.toHaveProperty("outcome");
     expect(run.visits[0]).not.toHaveProperty("target");
-    expect(run.visits[0].task.attempts[0].documents).toEqual([]);
+    expect(normalVisit(run).task.attempts[0].documents).toEqual([]);
     expect(await readFile(run.visits[0].contextPath, "utf8")).not.toContain(
       "audit.md",
     );
@@ -606,8 +616,8 @@ describe("happy-machine execute", () => {
     expect(stored.documents).toEqual([]);
     expect(stored.visits[0]).not.toHaveProperty("outcome");
     expect(stored.visits[0]).not.toHaveProperty("target");
-    expect(stored.visits[0].task.attempts).toHaveLength(1);
-    expect(stored.visits[0].task.attempts[0]).toMatchObject({
+    expect(normalVisit(stored).task.attempts).toHaveLength(1);
+    expect(normalVisit(stored).task.attempts[0]).toMatchObject({
       status: "failed",
       documents: [],
     });
@@ -637,7 +647,7 @@ describe("happy-machine execute", () => {
       "review",
       "publish",
     ]);
-    expect(stored.visits[0].task.attempts[0].error).toEqual({
+    expect(normalVisit(stored).task.attempts[0].error).toEqual({
       code: "quality-warning",
       suggestedOutcome: "rejected",
     });
@@ -707,7 +717,7 @@ describe("happy-machine execute", () => {
     const app = cli(setup.root);
     expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
     const run = await storedRun(setup.root);
-    const attempt = run.visits[0].task.attempts[0];
+    const attempt = normalVisit(run).task.attempts[0];
     expect(run.visits[0]).toMatchObject({
       stateId: "review",
       number: 1,

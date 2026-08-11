@@ -43,6 +43,7 @@ function run(root: string): RunRecord {
     createdAt: "2026-08-11T00:00:00.000Z",
     visits: [
       {
+        type: "agent",
         stateId: "review",
         number: 1,
         contextPath: path.join(root, "context.md"),
@@ -67,6 +68,23 @@ function run(root: string): RunRecord {
     documents: [],
     events: [],
   };
+}
+
+function stage(
+  repository: FilesystemRunRepository,
+  current: RunRecord,
+  outputDirectory: string,
+  names: readonly string[],
+) {
+  const visit = current.visits[0];
+  if (visit.type !== "agent") throw new Error("expected agent visit");
+  return repository.stageDocuments(
+    current,
+    visit,
+    visit.task,
+    outputDirectory,
+    names,
+  );
 }
 
 describe("normal result validation", () => {
@@ -160,7 +178,7 @@ describe("normal result validation", () => {
     const paths = await area();
     await writeFile(path.join(paths.output, "valid.md"), "valid\n");
     await expect(
-      repository.stageDocuments(run(paths.root), paths.output, [
+      stage(repository, run(paths.root), paths.output, [
         "valid.md",
         "missing.md",
       ]),
@@ -189,13 +207,13 @@ describe("normal result validation", () => {
     const paths = await area();
     await writeFile(path.join(paths.output, "report.md"), "original\n");
     const current = run(paths.root);
-    const [record] = await repository.stageDocuments(current, paths.output, [
+    const [record] = await stage(repository, current, paths.output, [
       "report.md",
     ]);
     current.documents.push(record);
     await writeFile(path.join(paths.output, "report.md"), "replacement\n");
     await expect(
-      repository.stageDocuments(current, paths.output, ["report.md"]),
+      stage(repository, current, paths.output, ["report.md"]),
     ).rejects.toThrow("provenance collision");
     await expect(readFile(record.durablePath, "utf8")).resolves.toBe(
       "original\n",

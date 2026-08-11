@@ -48,13 +48,50 @@ export interface TaskRecord {
   attempts: AttemptRecord[];
 }
 
-export interface VisitRecord {
+export interface NormalVisitRecord {
+  type: "agent";
   stateId: string;
   number: number;
   contextPath: string;
   task: TaskRecord;
   outcome?: string;
   target?: string;
+}
+
+export type ParallelTaskStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface ParallelTaskRecord extends TaskRecord {
+  status: ParallelTaskStatus;
+  outcome?: "succeeded";
+  failure?: AttemptFailure;
+  documents: DocumentRecord[];
+  workspace: { mode: "direct"; path: string };
+}
+
+export interface ParallelVisitRecord {
+  type: "parallel";
+  stateId: string;
+  number: number;
+  contextPath: string;
+  tasks: ParallelTaskRecord[];
+  outcome?: "succeeded" | "failed";
+  target?: string;
+}
+
+export type VisitRecord = NormalVisitRecord | ParallelVisitRecord;
+
+export function calculateParallelOutcome(
+  tasks: readonly ParallelTaskRecord[],
+): "succeeded" | "failed" {
+  if (
+    tasks.some((task) => task.status === "queued" || task.status === "running")
+  )
+    throw new Error(
+      "Cannot calculate a parallel outcome before every task settles",
+    );
+  return tasks.every((task) => task.status === "succeeded")
+    ? "succeeded"
+    : "failed";
 }
 
 export interface DocumentRecord {

@@ -196,6 +196,7 @@ describe("filesystem run snapshots", () => {
       documents: [],
       visits: [
         {
+          type: "agent",
           stateId: "start",
           number: 1,
           contextPath: "",
@@ -204,14 +205,16 @@ describe("filesystem run snapshots", () => {
       ],
       events: [],
     };
-    run.visits[0].contextPath = await repository.prepareVisitContext(run);
-    const originalContext = await readFile(run.visits[0].contextPath, "utf8");
+    const visit = run.visits[0];
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    visit.contextPath = await repository.prepareVisitContext(run);
+    const originalContext = await readFile(visit.contextPath, "utf8");
     expect(originalContext.match(/^### input-0001$/gm)).toHaveLength(1);
     expect(originalContext).toContain("inputs/input-0001/brief.md");
     expect(originalContext).toContain(first.record.inputs[0].durablePath);
     expect(originalContext).not.toContain(setup.externalInput);
 
-    run.visits[0].task.attempts.push({
+    visit.task.attempts.push({
       id: "attempt-1",
       number: 1,
       status: "launching",
@@ -222,8 +225,13 @@ describe("filesystem run snapshots", () => {
       logs: { stdout: "", stderr: "" },
       documents: [],
     });
-    const firstAttempt = await repository.prepareAttempt(run);
-    run.visits[0].task.attempts.push({
+    const firstAttempt = await repository.prepareAttempt(
+      run,
+      visit,
+      visit.task,
+      1,
+    );
+    visit.task.attempts.push({
       id: "attempt-2",
       number: 2,
       status: "launching",
@@ -234,7 +242,12 @@ describe("filesystem run snapshots", () => {
       logs: { stdout: "", stderr: "" },
       documents: [],
     });
-    const secondAttempt = await repository.prepareAttempt(run);
+    const secondAttempt = await repository.prepareAttempt(
+      run,
+      visit,
+      visit.task,
+      2,
+    );
     expect(secondAttempt.contextPath).toBe(firstAttempt.contextPath);
     expect(secondAttempt.outputDirectory).not.toBe(
       firstAttempt.outputDirectory,

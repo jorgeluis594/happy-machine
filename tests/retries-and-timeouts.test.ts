@@ -9,6 +9,7 @@ import {
 import type {
   ExecutorReferences,
   ExternalExecutionStatus,
+  NormalVisitRecord,
   RunRecord,
 } from "../src/domain/execution/run.js";
 import { FilesystemRunRepository } from "../src/infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
@@ -27,6 +28,12 @@ import { TaskExecutorError } from "../src/ports/task-executor.js";
 
 interface Behavior {
   run(launch: TaskLaunch): Promise<void>;
+}
+
+function normalVisit(run: RunRecord, index = 0): NormalVisitRecord {
+  const visit = run.visits[index];
+  if (!visit || visit.type !== "agent") throw new Error("expected agent visit");
+  return visit;
 }
 
 const references = (attempt: number): ExecutorReferences => ({
@@ -225,18 +232,18 @@ describe("retries and timeouts", () => {
     const run = await execute(executor, setup.definitions, retryWait);
 
     expect(executor.launches).toHaveLength(3);
-    expect(run.visits[0].task.attempts).toHaveLength(3);
+    expect(normalVisit(run).task.attempts).toHaveLength(3);
     expect(
-      run.visits[0].task.attempts.map((attempt) => attempt.number),
+      normalVisit(run).task.attempts.map((attempt) => attempt.number),
     ).toEqual([1, 2, 3]);
     expect(
-      run.visits[0].task.attempts.map((attempt) => attempt.externalStatus),
+      normalVisit(run).task.attempts.map((attempt) => attempt.externalStatus),
     ).toEqual(["stopped", "stopped", "stopped"]);
     expect(run).toMatchObject({
       status: "failed",
       failure: { code: "executor_failed", message: "failure three" },
     });
-    expect(run.visits[0].task.attempts[2].logs).toEqual({
+    expect(normalVisit(run).task.attempts[2].logs).toEqual({
       stdout: "stdout: failure three",
       stderr: "stderr: failure three",
     });
@@ -288,7 +295,7 @@ describe("retries and timeouts", () => {
 
     expect(run.status).toBe("succeeded");
     expect(run.visits).toHaveLength(1);
-    expect(run.visits[0].task.attempts).toHaveLength(3);
+    expect(normalVisit(run).task.attempts).toHaveLength(3);
     expect(run.documents.map((document) => document.name)).toEqual([
       "final.md",
     ]);
@@ -297,7 +304,9 @@ describe("retries and timeouts", () => {
     ).toHaveLength(1);
     expect(
       new Set(
-        run.visits[0].task.attempts.map((attempt) => attempt.controlWorkspace),
+        normalVisit(run).task.attempts.map(
+          (attempt) => attempt.controlWorkspace,
+        ),
       ).size,
     ).toBe(3);
     expect(
@@ -391,7 +400,7 @@ describe("retries and timeouts", () => {
       expect(run.status).toBe("failed");
       expect(run.failure?.code).toBe(code);
       expect(run.failure?.message).toEqual(expect.any(String));
-      expect(run.visits[0].task.attempts[0].failure).toEqual(run.failure);
+      expect(normalVisit(run).task.attempts[0].failure).toEqual(run.failure);
     },
   );
 
@@ -457,7 +466,7 @@ describe("retries and timeouts", () => {
     expect(executor.reconciliations).toEqual(statuses);
     expect(executor.launches).toHaveLength(2);
     expect(executor.maxActive).toBe(1);
-    expect(run.visits[0].task.attempts[0]).toMatchObject({
+    expect(normalVisit(run).task.attempts[0]).toMatchObject({
       status: "failed",
       failure: { code: "attempt_timeout" },
       reconciliation: { observations: statuses.map((status) => ({ status })) },
@@ -501,9 +510,9 @@ describe("retries and timeouts", () => {
       });
       expect(executor.launches).toHaveLength(1);
       expect(executor.cancellations).toHaveLength(1);
-      expect(run.visits[0].task.attempts).toHaveLength(1);
-      expect(run.visits[0].task.attempts[0].failure).toEqual(run.failure);
-      expect(run.visits[0].task.attempts[0].externalStatus).toBe(
+      expect(normalVisit(run).task.attempts).toHaveLength(1);
+      expect(normalVisit(run).task.attempts[0].failure).toEqual(run.failure);
+      expect(normalVisit(run).task.attempts[0].externalStatus).toBe(
         externalStatus,
       );
       expect(

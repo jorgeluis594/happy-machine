@@ -16,6 +16,8 @@ import path from "node:path";
 import type {
   DocumentRecord,
   RunRecord,
+  TaskRecord,
+  VisitRecord,
 } from "../../../../domain/execution/run.js";
 import { ResultValidationError } from "../../../../ports/run-repository.js";
 import type {
@@ -36,6 +38,8 @@ interface StoredArtifact {
 }
 
 export class FilesystemRunRepository implements RunRepository {
+  private readonly saveQueues = new Map<string, Promise<void>>();
+
   async createSnapshot(
     request: SnapshotCreationRequest,
   ): Promise<SnapshotCreationResult> {
@@ -115,13 +119,29 @@ export class FilesystemRunRepository implements RunRepository {
     }
   }
 
-  async save(run: RunRecord): Promise<void> {
-    const directory = this.runDirectory(run);
-    await mkdir(directory, { recursive: true });
-    const target = path.join(directory, "run.json");
-    const temporary = `${target}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, "utf8");
-    await rename(temporary, target);
+  save(run: RunRecord): Promise<void> {
+    const snapshot = structuredClone(run);
+    const previous = this.saveQueues.get(run.id) ?? Promise.resolve();
+    const save = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const directory = this.runDirectory(snapshot);
+        await mkdir(directory, { recursive: true });
+        const target = path.join(directory, "run.json");
+        const temporary = `${target}.tmp`;
+        await writeFile(
+          temporary,
+          `${JSON.stringify(snapshot, null, 2)}\n`,
+          "utf8",
+        );
+        await rename(temporary, target);
+      });
+    this.saveQueues.set(run.id, save);
+    const cleanup = () => {
+      if (this.saveQueues.get(run.id) === save) this.saveQueues.delete(run.id);
+    };
+    void save.then(cleanup, cleanup);
+    return save;
   }
 
   async prepareVisitContext(run: RunRecord): Promise<string> {
@@ -155,6 +175,32 @@ export class FilesystemRunRepository implements RunRepository {
       `- SHA-256: \`${document.sha256}\``,
       "",
     ]);
+    const parallelIndex = run.visits.flatMap((candidate) =>
+      candidate.type !== "parallel" || candidate.outcome === undefined
+        ? []
+        : [
+            `### ${candidate.stateId} visit ${candidate.number}`,
+            "",
+            `- Aggregate outcome: ${candidate.outcome}`,
+            `- Transition target: ${candidate.target}`,
+            "",
+            ...candidate.tasks.flatMap((task) => {
+              const finalAttempt = task.attempts.at(-1);
+              return [
+                `#### Task ${task.id}`,
+                "",
+                `- Status: ${task.status}`,
+                `- Attempts: ${task.attempts.length}`,
+                `- Final error: ${task.failure ? `${task.failure.code}: ${task.failure.message}` : "none"}`,
+                `- Control workspaces: ${task.attempts.map((attempt) => JSON.stringify(attempt.controlWorkspace)).join(", ") || "none"}`,
+                `- Result paths: ${task.attempts.map((attempt) => JSON.stringify(attempt.resultPath)).join(", ") || "none"}`,
+                `- Executor references: ${finalAttempt?.executor ? JSON.stringify(finalAttempt.executor) : "none"}`,
+                `- Project workspace: ${JSON.stringify(task.workspace.path)} (${task.workspace.mode})`,
+                "",
+              ];
+            }),
+          ],
+    );
     const context = [
       "# Happy Machine Visit Context",
       "",
@@ -173,14 +219,22 @@ export class FilesystemRunRepository implements RunRepository {
       ...(documentIndex.length
         ? documentIndex
         : ["No workflow documents have been committed yet.", ""]),
+      "## Completed parallel states",
+      "",
+      ...(parallelIndex.length
+        ? parallelIndex
+        : ["No parallel state has completed yet.", ""]),
     ].join("\n");
     await writeFile(contextPath, context, { encoding: "utf8", flag: "wx" });
     return contextPath;
   }
 
-  async prepareAttempt(run: RunRecord): Promise<AttemptPaths> {
-    const visit = run.visits.at(-1)!;
-    const attempt = visit.task.attempts.at(-1)!;
+  async prepareAttempt(
+    run: RunRecord,
+    visit: VisitRecord,
+    task: TaskRecord,
+    attemptNumber: number,
+  ): Promise<AttemptPaths> {
     const controlWorkspace = path.join(
       this.runDirectory(run),
       "states",
@@ -188,9 +242,9 @@ export class FilesystemRunRepository implements RunRepository {
       "visits",
       String(visit.number),
       "tasks",
-      this.segment(visit.task.id),
+      this.segment(task.id),
       "attempts",
-      String(attempt.number),
+      String(attemptNumber),
     );
     const outputDirectory = path.join(controlWorkspace, "output");
     const contextPath = visit.contextPath;
@@ -250,10 +304,11 @@ export class FilesystemRunRepository implements RunRepository {
 
   async stageDocuments(
     run: RunRecord,
+    visit: VisitRecord,
+    task: TaskRecord,
     outputDirectory: string,
     names: readonly string[],
   ): Promise<DocumentRecord[]> {
-    const visit = run.visits.at(-1)!;
     const validated = await this.validateDocuments(outputDirectory, names);
     const records: DocumentRecord[] = [];
     const planned = validated.map(({ source, relative }) => {
@@ -263,7 +318,7 @@ export class FilesystemRunRepository implements RunRepository {
         "visits",
         String(visit.number),
         "tasks",
-        this.segment(visit.task.id),
+        this.segment(task.id),
         "documents",
         ...relative.split(path.sep),
       );
@@ -295,7 +350,7 @@ export class FilesystemRunRepository implements RunRepository {
       records.push({
         stateId: visit.stateId,
         visitNumber: visit.number,
-        taskId: visit.task.id,
+        taskId: task.id,
         name: path.posix.basename(relative.split(path.sep).join("/")),
         internalPath,
         durablePath,

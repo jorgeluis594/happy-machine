@@ -1,12 +1,22 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  NormalVisitRecord,
+  ParallelVisitRecord,
   RunRecord,
+  TaskRecord,
   VisitRecord,
 } from "../../domain/execution/run.js";
-import { terminalStatus } from "../../domain/execution/run.js";
-import type { ProjectDefinitions } from "../../ports/project-definitions.js";
-import type { NormalStateDefinition } from "../../ports/project-definitions.js";
+import {
+  calculateParallelOutcome,
+  terminalStatus,
+} from "../../domain/execution/run.js";
+import type {
+  AgentWorkDefinition,
+  NormalStateDefinition,
+  ParallelStateDefinition,
+  ProjectDefinitions,
+} from "../../ports/project-definitions.js";
 import type { RunRepository } from "../../ports/run-repository.js";
 import { ResultValidationError } from "../../ports/run-repository.js";
 import type {
@@ -82,18 +92,31 @@ export class ExecuteWorkflow {
       let stateId = createdSnapshot.definition.initialState;
       while (true) {
         const state = createdSnapshot.definition.states[stateId];
-        if (state.type !== "agent")
-          throw new Error("This release cannot execute a parallel state");
         const visitNumber =
           run.visits.filter((candidate) => candidate.stateId === state.id)
             .length + 1;
-        const taskId = `${state.id}-task`;
-        const visit: VisitRecord = {
-          stateId: state.id,
-          number: visitNumber,
-          contextPath: "",
-          task: { id: taskId, attempts: [] },
-        };
+        const visit: VisitRecord =
+          state.type === "agent"
+            ? {
+                type: "agent",
+                stateId: state.id,
+                number: visitNumber,
+                contextPath: "",
+                task: { id: `${state.id}-task`, attempts: [] },
+              }
+            : {
+                type: "parallel",
+                stateId: state.id,
+                number: visitNumber,
+                contextPath: "",
+                tasks: Object.values(state.tasks).map((task) => ({
+                  id: task.id,
+                  status: "queued",
+                  attempts: [],
+                  documents: [],
+                  workspace: { mode: "direct", path: definition.projectRoot },
+                })),
+              };
         run.visits.push(visit);
         this.event(run, "state_entered", timestamp(), {
           stateId: state.id,
@@ -102,13 +125,22 @@ export class ExecuteWorkflow {
         visit.contextPath = await this.runs.prepareVisitContext(run);
         await this.runs.save(run);
 
-        const result = await this.executeVisit(
-          run,
-          visit,
-          state,
-          definition.projectRoot,
-          timestamp,
-        );
+        const result =
+          state.type === "agent"
+            ? await this.executeNormalVisit(
+                run,
+                visit as NormalVisitRecord,
+                state,
+                definition.projectRoot,
+                timestamp,
+              )
+            : await this.executeParallelVisit(
+                run,
+                visit as ParallelVisitRecord,
+                state,
+                definition.projectRoot,
+                timestamp,
+              );
         if (result.kind !== "completed") {
           run.status = "failed";
           run.failure = result.failure;
@@ -120,22 +152,39 @@ export class ExecuteWorkflow {
           return run;
         }
 
-        const { attempt, outcome, target, documents, diagnostic } = result;
+        const { outcome, target, documents } = result;
         const committed = structuredClone(run);
         const committedVisit = committed.visits.at(-1)!;
-        const committedAttempt = committedVisit.task.attempts.at(-1)!;
-        committedAttempt.outcome = outcome;
-        committedAttempt.status = "succeeded";
-        committedAttempt.documents = documents;
-        if (diagnostic !== undefined) committedAttempt.error = diagnostic;
         committedVisit.outcome = outcome;
         committedVisit.target = target;
         committed.documents.push(...documents);
-        this.event(committed, "attempt_succeeded", timestamp(), {
-          identity: attempt.id,
-          outcome,
-          documents: documents.map((document) => document.internalPath),
-        });
+        if (committedVisit.type === "agent") {
+          const committedAttempt = committedVisit.task.attempts.at(-1)!;
+          committedAttempt.outcome = outcome;
+          committedAttempt.status = "succeeded";
+          committedAttempt.documents = documents;
+          if (result.diagnostic !== undefined)
+            committedAttempt.error = result.diagnostic;
+          this.event(committed, "attempt_succeeded", timestamp(), {
+            identity: result.attempt!.id,
+            outcome,
+            documents: documents.map((document) => document.internalPath),
+          });
+        } else {
+          this.event(committed, "parallel_join_committed", timestamp(), {
+            stateId: state.id,
+            visitNumber,
+            outcome,
+            tasks: committedVisit.tasks.map((task) => ({
+              id: task.id,
+              status: task.status,
+              attempts: task.attempts.length,
+              ...(task.failure === undefined
+                ? {}
+                : { finalError: task.failure }),
+            })),
+          });
+        }
         this.event(committed, "transition_committed", timestamp(), {
           stateId: state.id,
           visitNumber,
@@ -168,9 +217,9 @@ export class ExecuteWorkflow {
     }
   }
 
-  private async executeVisit(
+  private async executeNormalVisit(
     run: RunRecord,
-    visit: VisitRecord,
+    visit: NormalVisitRecord,
     state: NormalStateDefinition,
     projectWorkspace: string,
     timestamp: () => string,
@@ -185,12 +234,152 @@ export class ExecuteWorkflow {
       }
     | { kind: "failed" | "unsafe"; failure: AttemptFailure }
   > {
+    const result = await this.executeTask(
+      run,
+      visit,
+      visit.task,
+      state,
+      Object.keys(state.outcomes),
+      false,
+      projectWorkspace,
+      timestamp,
+    );
+    if (result.kind !== "completed") return result;
+    const target = state.outcomes[result.outcome];
+    if (!target)
+      throw new ResultValidationError(
+        "outcome_invalid",
+        `No transition configured for outcome ${result.outcome}`,
+      );
+    return { ...result, target };
+  }
+
+  private async executeParallelVisit(
+    run: RunRecord,
+    visit: ParallelVisitRecord,
+    state: ParallelStateDefinition,
+    projectWorkspace: string,
+    timestamp: () => string,
+  ): Promise<
+    | {
+        kind: "completed";
+        outcome: "succeeded" | "failed";
+        target: string;
+        documents: RunRecord["documents"];
+        attempt?: AttemptRecord;
+        diagnostic?: AttemptRecord["error"];
+      }
+    | { kind: "failed" | "unsafe"; failure: AttemptFailure }
+  > {
+    let nextIndex = 0;
+    const unsafeFailures: AttemptFailure[] = [];
+    const workers = Array.from(
+      { length: state.effectiveMaxConcurrency },
+      async () => {
+        while (true) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= visit.tasks.length) return;
+          const task = visit.tasks[index];
+          const definition = state.tasks[task.id];
+          task.status = "running";
+          this.event(run, "parallel_task_started", timestamp(), {
+            stateId: state.id,
+            visitNumber: visit.number,
+            taskId: task.id,
+          });
+          await this.runs.save(run);
+          try {
+            const result = await this.executeTask(
+              run,
+              visit,
+              task,
+              definition,
+              ["succeeded", "failed"],
+              true,
+              projectWorkspace,
+              timestamp,
+            );
+            if (result.kind === "completed") {
+              const attempt = task.attempts.at(-1)!;
+              attempt.status = "succeeded";
+              attempt.outcome = "succeeded";
+              attempt.documents = result.documents;
+              if (result.diagnostic !== undefined)
+                attempt.error = result.diagnostic;
+              task.status = "succeeded";
+              task.outcome = "succeeded";
+              task.documents = result.documents;
+              this.event(run, "parallel_task_settled", timestamp(), {
+                taskId: task.id,
+                status: "succeeded",
+                attempts: task.attempts.length,
+                documents: result.documents.map(
+                  (document) => document.internalPath,
+                ),
+              });
+            } else {
+              task.status = "failed";
+              task.failure = result.failure;
+              if (result.kind === "unsafe") unsafeFailures.push(result.failure);
+              this.event(run, "parallel_task_settled", timestamp(), {
+                taskId: task.id,
+                status: "failed",
+                attempts: task.attempts.length,
+                finalError: result.failure,
+              });
+            }
+          } catch (error) {
+            const failure = this.failure(error);
+            task.status = "failed";
+            task.failure = failure;
+            unsafeFailures.push(failure);
+            this.event(run, "parallel_task_settled", timestamp(), {
+              taskId: task.id,
+              status: "failed",
+              attempts: task.attempts.length,
+              finalError: failure,
+            });
+          }
+          await this.runs.save(run);
+        }
+      },
+    );
+    await Promise.all(workers);
+
+    if (unsafeFailures.length)
+      return { kind: "unsafe", failure: unsafeFailures[0] };
+    const outcome = calculateParallelOutcome(visit.tasks);
+    const target = state.outcomes[outcome];
+    const documents = visit.tasks.flatMap((task) => task.documents);
+    return { kind: "completed", outcome, target, documents };
+  }
+
+  private async executeTask(
+    run: RunRecord,
+    visit: VisitRecord,
+    task: TaskRecord,
+    work: AgentWorkDefinition,
+    allowedOutcomes: readonly string[],
+    declaredFailedRetryable: boolean,
+    projectWorkspace: string,
+    timestamp: () => string,
+  ): Promise<
+    | {
+        kind: "completed";
+        attempt: AttemptRecord;
+        outcome: string;
+        documents: RunRecord["documents"];
+        diagnostic?: AttemptRecord["error"];
+      }
+    | { kind: "failed" | "unsafe"; failure: AttemptFailure }
+  > {
     for (
       let attemptNumber = 1;
-      attemptNumber <= state.policies.maxAttempts;
+      attemptNumber <= work.policies.maxAttempts;
       attemptNumber += 1
     ) {
-      const identity = `${run.id}:${state.id}:${visit.number}:${visit.task.id}:${attemptNumber}`;
+      const identity = `${run.id}:${visit.stateId}:${visit.number}:${task.id}:${attemptNumber}`;
       const attempt: AttemptRecord = {
         id: identity,
         number: attemptNumber,
@@ -202,8 +391,13 @@ export class ExecuteWorkflow {
         logs: { stdout: "", stderr: "" },
         documents: [],
       };
-      visit.task.attempts.push(attempt);
-      const paths = await this.runs.prepareAttempt(run);
+      task.attempts.push(attempt);
+      const paths = await this.runs.prepareAttempt(
+        run,
+        visit,
+        task,
+        attemptNumber,
+      );
       Object.assign(attempt, paths);
       this.event(run, "attempt_launching", timestamp(), {
         identity,
@@ -218,10 +412,10 @@ export class ExecuteWorkflow {
           identity,
           projectWorkspace,
           ...paths,
-          instructions: state.agent.instructions,
-          prompt: state.prompt,
-          model: state.agent.model,
-          timeoutMs: state.policies.attemptTimeoutMs,
+          instructions: work.agent.instructions,
+          prompt: work.prompt,
+          model: work.agent.model,
+          timeoutMs: work.policies.attemptTimeoutMs,
           attemptNumber,
         },
         timestamp,
@@ -234,16 +428,32 @@ export class ExecuteWorkflow {
           const result = await this.runs.readResult(
             paths.resultPath,
             paths.outputDirectory,
-            Object.keys(state.outcomes),
+            allowedOutcomes,
           );
-          const target = state.outcomes[result.outcome];
-          if (!target)
-            throw new ResultValidationError(
-              "outcome_invalid",
-              `No transition configured for outcome ${result.outcome}`,
+          if (declaredFailedRetryable && result.outcome === "failed") {
+            const failure = {
+              code: "declared_failed",
+              message:
+                result.error === undefined
+                  ? "Parallel task declared failed"
+                  : `Parallel task declared failed: ${JSON.stringify(result.error)}`,
+            };
+            attempt.error = result.error;
+            await this.recordFailure(run, attempt, failure, timestamp);
+            const terminal = await this.retryOrFinish(
+              run,
+              attemptNumber,
+              work,
+              failure,
+              timestamp,
             );
+            if (terminal) return terminal;
+            continue;
+          }
           const documents = await this.runs.stageDocuments(
             run,
+            visit,
+            task,
             paths.outputDirectory,
             result.documents,
           );
@@ -251,7 +461,6 @@ export class ExecuteWorkflow {
             kind: "completed",
             attempt,
             outcome: result.outcome,
-            target,
             documents,
             ...(result.error === undefined ? {} : { diagnostic: result.error }),
           };
@@ -262,7 +471,7 @@ export class ExecuteWorkflow {
           const terminal = await this.retryOrFinish(
             run,
             attemptNumber,
-            state,
+            work,
             failure,
             timestamp,
           );
@@ -284,7 +493,7 @@ export class ExecuteWorkflow {
       const terminal = await this.retryOrFinish(
         run,
         attemptNumber,
-        state,
+        work,
         attemptResult.failure,
         timestamp,
       );
@@ -455,7 +664,7 @@ export class ExecuteWorkflow {
   private async retryOrFinish(
     run: RunRecord,
     attemptNumber: number,
-    state: NormalStateDefinition,
+    state: AgentWorkDefinition,
     failure: AttemptFailure,
     timestamp: () => string,
   ): Promise<{ kind: "failed"; failure: AttemptFailure } | undefined> {

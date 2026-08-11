@@ -2,6 +2,8 @@ import type {
   DefinitionSnapshotRecord,
   DocumentRecord,
   JsonValue,
+  TaskRecord,
+  VisitRecord,
   RunRecord,
 } from "../domain/execution/run.js";
 import type {
@@ -52,7 +54,12 @@ export interface RunRepository {
   ): Promise<SnapshotCreationResult>;
   save(run: RunRecord): Promise<void>;
   prepareVisitContext(run: RunRecord): Promise<string>;
-  prepareAttempt(run: RunRecord): Promise<AttemptPaths>;
+  prepareAttempt(
+    run: RunRecord,
+    visit: VisitRecord,
+    task: TaskRecord,
+    attemptNumber: number,
+  ): Promise<AttemptPaths>;
   readResult(
     resultPath: string,
     outputDirectory: string,
@@ -60,6 +67,8 @@ export interface RunRepository {
   ): Promise<ValidatedNormalResult>;
   stageDocuments(
     run: RunRecord,
+    visit: VisitRecord,
+    task: TaskRecord,
     outputDirectory: string,
     names: readonly string[],
   ): Promise<DocumentRecord[]>;
