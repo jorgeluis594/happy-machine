@@ -22,6 +22,51 @@ if (operation === "orchestration run-create") {
     process.stderr.write("run ID was not printed before Orca started\n");
     process.exit(3);
   }
+  if (existsSync(path.join(process.cwd(), ".fake-require-snapshot-marker"))) {
+    const runId = readFileSync(
+      path.join(process.cwd(), ".run-id-printed"),
+      "utf8",
+    ).trim();
+    const runDirectory = path.join(
+      process.cwd(),
+      ".happy-machine",
+      "runs",
+      runId,
+    );
+    const run = JSON.parse(
+      readFileSync(path.join(runDirectory, "run.json"), "utf8"),
+    );
+    const attempt = run.visits[0].task.attempts[0];
+    const requiredPaths = [
+      run.definitionSnapshot.manifestPath,
+      run.visits[0].contextPath,
+      attempt.contextPath,
+      attempt.outputDirectory,
+      path.dirname(attempt.resultPath),
+    ];
+    const manifest = JSON.parse(
+      readFileSync(run.definitionSnapshot.manifestPath, "utf8"),
+    );
+    for (const artifact of manifest.artifacts)
+      requiredPaths.push(
+        path.join(
+          run.definitionSnapshot.directory,
+          ...artifact.internalPath.split("/"),
+        ),
+      );
+    if (requiredPaths.some((requiredPath) => !existsSync(requiredPath))) {
+      process.stderr.write("snapshot or control path missing before Orca\n");
+      process.exit(4);
+    }
+    const originalMarker = path.join(
+      process.cwd(),
+      ".fake-original-input-path",
+    );
+    if (existsSync(originalMarker)) {
+      const originalPath = readFileSync(originalMarker, "utf8").trim();
+      writeFileSync(originalPath, "content changed after run creation\n");
+    }
+  }
   response = { run: { runId: "orca-run-1" } };
 } else if (operation === "orchestration task-create") {
   const spec = args[args.indexOf("--spec") + 1];
@@ -35,6 +80,19 @@ if (operation === "orchestration run-create") {
   const outcome = existsSync(outcomeFile)
     ? readFileSync(outcomeFile, "utf8").trim()
     : "approved";
+  const context = readFileSync(contract.contextPath, "utf8");
+  const durableLine = context
+    .split("\n")
+    .find((line) => line.startsWith("- Durable path: "));
+  if (durableLine) {
+    const durablePath = JSON.parse(
+      durableLine.slice("- Durable path: ".length),
+    );
+    writeFileSync(
+      path.join(process.cwd(), ".fake-agent-input-content"),
+      readFileSync(durablePath, "utf8"),
+    );
+  }
   writeFileSync(
     contract.resultPath,
     `${JSON.stringify({ outcome, documents: [] })}\n`,

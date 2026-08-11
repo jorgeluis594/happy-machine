@@ -11,6 +11,7 @@ import type { TaskExecutor } from "../../ports/task-executor.js";
 export interface ExecuteWorkflowRequest {
   workflowPath: string;
   currentDirectory: string;
+  inputPaths?: readonly string[];
   onRunAllocated(runId: string): void;
 }
 
@@ -27,13 +28,22 @@ export class ExecuteWorkflow {
     const definition = await this.definitions.load(
       request.workflowPath,
       request.currentDirectory,
+      request.inputPaths ?? [],
     );
     const timestamp = () => this.now().toISOString();
+    const runId = `run_${this.makeId()}`;
+    const createdSnapshot = await this.runs.createSnapshot({
+      runId,
+      projectRoot: definition.projectRoot,
+      workflowId: definition.workflowId,
+      source: definition.snapshotSource,
+    });
     const run: RunRecord = {
-      id: `run_${this.makeId()}`,
+      id: runId,
       workflowId: definition.workflowId,
       workflowPath: definition.workflowPath,
       projectRoot: definition.projectRoot,
+      definitionSnapshot: createdSnapshot.record,
       status: "running",
       createdAt: timestamp(),
       visits: [],
@@ -41,17 +51,22 @@ export class ExecuteWorkflow {
     };
     this.event(run, "run_created", timestamp(), {
       workflowId: definition.workflowId,
+      definitionSnapshotIdentity: createdSnapshot.record.identity,
     });
     await this.runs.save(run);
     request.onRunAllocated(run.id);
 
-    const state = definition.state;
+    const state =
+      createdSnapshot.definition.states[
+        createdSnapshot.definition.initialState
+      ];
     if (state.type !== "agent")
       throw new Error("This release cannot execute a parallel initial state");
     const taskId = `${state.id}-task`;
     const visit: VisitRecord = {
       stateId: state.id,
       number: 1,
+      contextPath: "",
       task: { id: taskId, attempts: [] },
     };
     run.visits.push(visit);
@@ -59,6 +74,8 @@ export class ExecuteWorkflow {
       stateId: state.id,
       visitNumber: 1,
     });
+    visit.contextPath = await this.runs.prepareVisitContext(run);
+    await this.runs.save(run);
     const identity = `${run.id}:${state.id}:1:${taskId}:1`;
     const attempt: AttemptRecord = {
       id: identity,
@@ -71,11 +88,7 @@ export class ExecuteWorkflow {
       logs: { stdout: "", stderr: "" },
     };
     visit.task.attempts.push(attempt);
-    const paths = await this.runs.prepareAttempt(
-      run,
-      state.agent.instructions,
-      state.prompt,
-    );
+    const paths = await this.runs.prepareAttempt(run);
     Object.assign(attempt, paths);
     this.event(run, "attempt_launching", timestamp(), { identity });
     await this.runs.save(run);

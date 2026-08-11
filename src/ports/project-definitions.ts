@@ -15,6 +15,25 @@ export interface AgentDefinition {
   model: string;
 }
 
+export type DefinitionArtifactKind =
+  | "project_configuration"
+  | "workflow"
+  | "agent_instructions"
+  | "inline_prompt"
+  | "prompt_file";
+
+export interface DefinitionArtifactSource {
+  kind: DefinitionArtifactKind;
+  logicalId: string;
+  content: string;
+}
+
+export interface InputDocumentSource {
+  id: string;
+  originalName: string;
+  content: string;
+}
+
 export interface AgentWorkDefinition {
   agent: AgentDefinition;
   prompt: string;
@@ -44,9 +63,7 @@ export interface ParallelStateDefinition {
 
 export type StateDefinition = NormalStateDefinition | ParallelStateDefinition;
 
-export interface ExecutionDefinition {
-  projectRoot: string;
-  workflowPath: string;
+export interface EffectiveExecutionDefinition {
   workflowId: string;
   executorType: "orca";
   workspaceMode: "direct" | "worktree";
@@ -54,6 +71,18 @@ export interface ExecutionDefinition {
   policies: EffectivePolicies;
   states: Record<string, StateDefinition>;
   initialState: string;
+}
+
+export interface DefinitionSnapshotSource {
+  effectiveDefinition: EffectiveExecutionDefinition;
+  artifacts: DefinitionArtifactSource[];
+  inputs: InputDocumentSource[];
+}
+
+export interface ExecutionDefinition extends EffectiveExecutionDefinition {
+  projectRoot: string;
+  workflowPath: string;
+  snapshotSource: DefinitionSnapshotSource;
   /** Task 01 compatibility until the multi-state executor is delivered. */
   state: StateDefinition;
 }
@@ -62,5 +91,6 @@ export interface ProjectDefinitions {
   load(
     workflowPath: string,
     currentDirectory: string,
+    inputPaths?: readonly string[],
   ): Promise<ExecutionDefinition>;
 }

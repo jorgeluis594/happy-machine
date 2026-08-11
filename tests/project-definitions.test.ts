@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -557,5 +557,114 @@ describe("definition path safety", () => {
       validWorkflow,
       /requires a Git/,
     );
+  });
+});
+
+describe("snapshot sources and explicit inputs", () => {
+  it("captures raw declarative artifacts and all effective values", async () => {
+    const workflow = validWorkflow.replace(
+      "    outcomes:",
+      "    model: override-model\n    attempt_timeout: 7m\n    outcomes:",
+    );
+    const setup = await fixture(validProject, workflow);
+    const definition = await loader.load(setup.workflowPath, setup.root);
+
+    expect(definition.snapshotSource.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "project_configuration",
+          content: validProject,
+        }),
+        expect.objectContaining({ kind: "workflow", content: workflow }),
+        {
+          kind: "agent_instructions",
+          logicalId: "worker",
+          content: "# Worker\n",
+        },
+        {
+          kind: "inline_prompt",
+          logicalId: "workflow.states.start",
+          content: "Do the work.",
+        },
+      ]),
+    );
+    expect(
+      definition.snapshotSource.effectiveDefinition.states.start,
+    ).toMatchObject({
+      agent: { id: "worker", model: "override-model" },
+      policies: { attemptTimeoutMs: 420_000 },
+    });
+  });
+
+  it("captures prompt files separately from inline prompts", async () => {
+    const setup = await fixture(
+      validProject,
+      validWorkflow.replace(
+        "prompt: Do the work.",
+        "prompt_file: prompts/work.md",
+      ),
+    );
+    await mkdir(path.join(setup.root, "prompts"));
+    await writeFile(path.join(setup.root, "prompts", "work.md"), "# Prompt\n");
+    const definition = await loader.load(setup.workflowPath, setup.root);
+    expect(definition.snapshotSource.artifacts).toContainEqual({
+      kind: "prompt_file",
+      logicalId: "workflow.states.start",
+      content: "# Prompt\n",
+    });
+  });
+
+  it("captures internal and external inputs in argument order", async () => {
+    const setup = await fixture();
+    const external = await mkdtemp(path.join(os.tmpdir(), "external-input-"));
+    const internalPath = path.join(setup.root, "brief.md");
+    const externalPath = path.join(external, "brief.md");
+    await writeFile(internalPath, "internal\n");
+    await writeFile(externalPath, "external\n");
+
+    const definition = await loader.load(setup.workflowPath, setup.root, [
+      "brief.md",
+      externalPath,
+    ]);
+    expect(definition.snapshotSource.inputs).toEqual([
+      {
+        id: "input-0001",
+        originalName: "brief.md",
+        content: "internal\n",
+      },
+      {
+        id: "input-0002",
+        originalName: "brief.md",
+        content: "external\n",
+      },
+    ]);
+  });
+
+  it.each([
+    ["missing", "missing.md", /does not exist/],
+    ["non-Markdown", "notes.txt", /must be a \.md file/],
+    ["nonregular", "folder.md", /must be a file/],
+  ])("rejects a %s input", async (_label, name, message) => {
+    const setup = await fixture();
+    const candidate = path.join(setup.root, name);
+    if (name.endsWith(".txt")) await writeFile(candidate, "text\n");
+    if (name === "folder.md") await mkdir(candidate);
+    await expect(
+      loader.load(setup.workflowPath, setup.root, [candidate]),
+    ).rejects.toThrow(message);
+  });
+
+  it("rejects an unreadable input", async () => {
+    const setup = await fixture();
+    const candidate = path.join(setup.root, "private.md");
+    await writeFile(candidate, "private\n");
+    await chmod(candidate, 0o000);
+    try {
+      await expect(
+        loader.load(setup.workflowPath, setup.root, [candidate]),
+      ).rejects.toThrow(/Cannot read input/);
+    } finally {
+      await chmod(candidate, 0o600);
+    }
   });
 });

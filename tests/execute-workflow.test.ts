@@ -1,4 +1,11 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  writeFile,
+} from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -69,6 +76,7 @@ async function project(
   );
   await writeFile(path.join(root, ".fake-outcome"), outcome);
   await writeFile(path.join(root, ".fake-require-run-id-marker"), "required");
+  await writeFile(path.join(root, ".fake-require-snapshot-marker"), "required");
   return { root, workflow };
 }
 
@@ -111,6 +119,25 @@ async function storedRun(root: string): Promise<RunRecord> {
       "utf8",
     ),
   ) as RunRecord;
+}
+
+async function storedRunById(root: string, runId: string): Promise<RunRecord> {
+  return parseJson(
+    await readFile(
+      path.join(root, ".happy-machine", "runs", runId, "run.json"),
+      "utf8",
+    ),
+  ) as RunRecord;
+}
+
+async function allFileContents(directory: string): Promise<string> {
+  const contents: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) contents.push(await allFileContents(target));
+    else contents.push(await readFile(target, "utf8"));
+  }
+  return contents.join("\n");
 }
 
 describe("happy-machine execute", () => {
@@ -168,9 +195,17 @@ describe("happy-machine execute", () => {
       },
     };
     const runs = {
+      createSnapshot: () => {
+        calls.push("runs.createSnapshot");
+        return Promise.reject(new Error("must not snapshot"));
+      },
       save: () => {
         calls.push("runs.save");
         return Promise.resolve();
+      },
+      prepareVisitContext: () => {
+        calls.push("runs.prepareVisitContext");
+        return Promise.reject(new Error("must not prepare context"));
       },
       prepareAttempt: () => {
         calls.push("runs.prepareAttempt");
@@ -265,6 +300,9 @@ describe("happy-machine execute", () => {
       "attempt_succeeded",
       "run_terminal",
     ]);
+    expect(run.events[0].data.definitionSnapshotIdentity).toBe(
+      run.definitionSnapshot.identity,
+    );
     const contract = parseJson(
       await readFile(path.join(setup.root, ".fake-contract.json"), "utf8"),
     ) as {
@@ -291,5 +329,293 @@ describe("happy-machine execute", () => {
     });
     expect(contract.instructions).toContain("Follow the task");
     expect(contract.prompt).toContain("Choose an outcome");
+  });
+
+  it("copies external and duplicate-basename inputs into the initial context", async () => {
+    const setup = await project();
+    const outside = await mkdtemp(path.join(os.tmpdir(), "execute-input-"));
+    const internalInput = path.join(setup.root, "brief.md");
+    const externalInput = path.join(outside, "brief.md");
+    await writeFile(internalInput, "internal brief\n");
+    await writeFile(externalInput, "external brief\n");
+    const app = cli(setup.root);
+
+    expect(
+      await app.cli.run(
+        [
+          "execute",
+          setup.workflow,
+          "--input",
+          internalInput,
+          "--input",
+          externalInput,
+        ],
+        setup.root,
+      ),
+    ).toBe(0);
+    const run = await storedRun(setup.root);
+    expect(run.definitionSnapshot.inputs).toMatchObject([
+      {
+        id: "input-0001",
+        internalPath: "inputs/input-0001/brief.md",
+      },
+      {
+        id: "input-0002",
+        internalPath: "inputs/input-0002/brief.md",
+      },
+    ]);
+    const context = await readFile(run.visits[0].contextPath, "utf8");
+    expect(context.match(/^### input-0001$/gm)).toHaveLength(1);
+    expect(context.match(/^### input-0002$/gm)).toHaveLength(1);
+    expect(context).toContain("inputs/input-0001/brief.md");
+    expect(context).toContain("inputs/input-0002/brief.md");
+    expect(context).not.toContain(externalInput);
+  });
+
+  it("lets the agent read the captured input after the original changes mid-run", async () => {
+    const setup = await project();
+    const outside = await mkdtemp(path.join(os.tmpdir(), "execute-copy-"));
+    const input = path.join(outside, "request.md");
+    await writeFile(input, "content captured at run creation\n");
+    await writeFile(path.join(setup.root, ".fake-original-input-path"), input);
+    const app = cli(setup.root);
+
+    expect(
+      await app.cli.run(
+        ["execute", setup.workflow, "--input", input],
+        setup.root,
+      ),
+    ).toBe(0);
+    await expect(readFile(input, "utf8")).resolves.toBe(
+      "content changed after run creation\n",
+    );
+    await expect(
+      readFile(path.join(setup.root, ".fake-agent-input-content"), "utf8"),
+    ).resolves.toBe("content captured at run creation\n");
+  });
+
+  it.each([
+    ["missing", "missing.md"],
+    ["non-Markdown", "notes.txt"],
+    ["nonregular", "folder.md"],
+  ])("rejects a %s input before allocating a run", async (_label, name) => {
+    const setup = await project();
+    const input = path.join(setup.root, name);
+    if (name.endsWith(".txt")) await writeFile(input, "not Markdown\n");
+    if (name === "folder.md") await mkdir(input);
+    const app = cli(setup.root);
+    expect(
+      await app.cli.run(
+        ["execute", setup.workflow, "--input", input],
+        setup.root,
+      ),
+    ).toBe(1);
+    expect(app.stdout).toEqual([]);
+    await expect(
+      readFile(path.join(setup.root, ".happy-machine", "runs")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(path.join(setup.root, ".fake-orca-calls.jsonl")),
+    ).rejects.toThrow();
+  });
+
+  it("rejects an unreadable input before allocating a run", async () => {
+    const setup = await project();
+    const input = path.join(setup.root, "private.md");
+    await writeFile(input, "private\n");
+    await chmod(input, 0o000);
+    try {
+      const app = cli(setup.root);
+      expect(
+        await app.cli.run(
+          ["execute", setup.workflow, "--input", input],
+          setup.root,
+        ),
+      ).toBe(1);
+      expect(app.stdout).toEqual([]);
+      await expect(
+        readFile(path.join(setup.root, ".happy-machine", "runs")),
+      ).rejects.toThrow();
+    } finally {
+      await chmod(input, 0o600);
+    }
+  });
+
+  it("rejects an implicit external definition path before creating a run", async () => {
+    const setup = await project();
+    const outside = path.join(setup.root, "..", "outside-agent.md");
+    await writeFile(outside, "# Outside agent\n");
+    await writeFile(
+      path.join(setup.root, "happy-machine.yaml"),
+      [
+        "version: 1",
+        "agents:",
+        "  worker:",
+        "    instructions: ../outside-agent.md",
+        "    model: test-model",
+        "",
+      ].join("\n"),
+    );
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(1);
+    expect(app.stdout).toEqual([]);
+    await expect(
+      readFile(path.join(setup.root, ".happy-machine", "runs")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(path.join(setup.root, ".fake-orca-calls.jsonl")),
+    ).rejects.toThrow();
+  });
+
+  it.each([
+    ["execute"],
+    ["execute", "workflow.yaml", "--input"],
+    ["execute", "workflow.yaml", "--unknown", "value"],
+    ["execute", "workflow.yaml", "extra.yaml"],
+  ])("rejects malformed execute arguments: %j", async (...argv) => {
+    const app = cli();
+    expect(await app.cli.run(argv, "/project")).toBe(1);
+    expect(app.stderr).toEqual([
+      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...]",
+    ]);
+  });
+
+  it("snapshots prompt files, overrides, policies, and later definition edits", async () => {
+    const setup = await project();
+    await mkdir(path.join(setup.root, "prompts"));
+    await writeFile(
+      path.join(setup.root, "prompts", "review.md"),
+      "# File prompt\n",
+    );
+    await writeFile(
+      setup.workflow,
+      [
+        "version: 1",
+        "id: one-state",
+        "initial_state: review",
+        "policies:",
+        "  max_attempts: 6",
+        "states:",
+        "  review:",
+        "    type: agent",
+        "    agent: worker",
+        "    model: override-model",
+        "    prompt_file: prompts/review.md",
+        "    outcomes:",
+        "      approved: $succeeded",
+        "      rejected: $failed",
+        "",
+      ].join("\n"),
+    );
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const first = await storedRunById(setup.root, "run_id-1");
+    const firstManifest = await readFile(
+      first.definitionSnapshot.manifestPath,
+      "utf8",
+    );
+    const firstEffective = await readFile(
+      path.join(
+        first.definitionSnapshot.directory,
+        "definition",
+        "effective.json",
+      ),
+      "utf8",
+    );
+    const parsedManifest = parseJson(firstManifest) as {
+      artifacts: Array<{ kind: string; internalPath: string }>;
+    };
+    const promptArtifact = parsedManifest.artifacts.find(
+      (artifact) => artifact.kind === "prompt_file",
+    )!;
+    await expect(
+      readFile(
+        path.join(
+          first.definitionSnapshot.directory,
+          ...promptArtifact.internalPath.split("/"),
+        ),
+        "utf8",
+      ),
+    ).resolves.toBe("# File prompt\n");
+    expect(firstEffective).toContain('"model": "override-model"');
+    expect(firstEffective).toContain('"maxAttempts": 6');
+    expect(firstEffective).toContain("# File prompt");
+
+    await writeFile(
+      path.join(setup.root, "agents", "worker.md"),
+      "# Edited instructions\n",
+    );
+    await writeFile(
+      path.join(setup.root, "happy-machine.yaml"),
+      (await readFile(path.join(setup.root, "happy-machine.yaml"), "utf8"))
+        .replace("test-model", "new-default-model")
+        .replace("attempt_timeout: 5s", "attempt_timeout: 9s"),
+    );
+    await writeFile(
+      path.join(setup.root, "prompts", "review.md"),
+      "# Edited prompt\n",
+    );
+    await writeFile(
+      setup.workflow,
+      (await readFile(setup.workflow, "utf8")).replace(
+        "override-model",
+        "new-model",
+      ),
+    );
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const second = await storedRunById(setup.root, "run_id-2");
+    expect(second.definitionSnapshot.identity).not.toBe(
+      first.definitionSnapshot.identity,
+    );
+    await expect(
+      readFile(first.definitionSnapshot.manifestPath, "utf8"),
+    ).resolves.toBe(firstManifest);
+    await expect(
+      readFile(
+        path.join(
+          first.definitionSnapshot.directory,
+          "definition",
+          "effective.json",
+        ),
+        "utf8",
+      ),
+    ).resolves.toBe(firstEffective);
+    const secondEffective = await readFile(
+      path.join(
+        second.definitionSnapshot.directory,
+        "definition",
+        "effective.json",
+      ),
+      "utf8",
+    );
+    expect(secondEffective).toContain('"model": "new-model"');
+    expect(secondEffective).toContain('"model": "new-default-model"');
+    expect(secondEffective).toContain('"attemptTimeoutMs": 9000');
+    expect(secondEffective).toContain("# Edited instructions");
+    expect(secondEffective).toContain("# Edited prompt");
+  });
+
+  it("does not persist a sentinel environment secret", async () => {
+    const setup = await project();
+    const sentinel = "SECRET_SENTINEL_7c29030f";
+    const previous = process.env.HAPPY_MACHINE_TEST_SECRET;
+    process.env.HAPPY_MACHINE_TEST_SECRET = sentinel;
+    try {
+      const app = cli(setup.root);
+      expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(
+        0,
+      );
+      const persisted = await allFileContents(
+        path.join(setup.root, ".happy-machine", "runs", "run_id-1"),
+      );
+      const contract = await readFile(
+        path.join(setup.root, ".fake-contract.json"),
+        "utf8",
+      );
+      expect(`${persisted}\n${contract}`).not.toContain(sentinel);
+    } finally {
+      if (previous === undefined) delete process.env.HAPPY_MACHINE_TEST_SECRET;
+      else process.env.HAPPY_MACHINE_TEST_SECRET = previous;
+    }
   });
 });

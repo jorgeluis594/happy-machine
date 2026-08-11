@@ -5,8 +5,11 @@ import { promisify } from "node:util";
 import { parse } from "yaml";
 import type {
   AgentDefinition,
+  DefinitionArtifactSource,
   EffectivePolicies,
+  EffectiveExecutionDefinition,
   ExecutionDefinition,
+  InputDocumentSource,
   ParallelStateDefinition,
   ParallelTaskDefinition,
   ProjectDefinitions,
@@ -68,6 +71,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
   async load(
     workflowPathInput: string,
     currentDirectory: string,
+    inputPaths: readonly string[] = [],
   ): Promise<ExecutionDefinition> {
     const absoluteWorkflow = path.resolve(currentDirectory, workflowPathInput);
     const discoveredRoot = await this.discover(path.dirname(absoluteWorkflow));
@@ -82,14 +86,28 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       "project configuration",
       ".yaml",
     );
-    const config = await this.yaml(configPath);
+    const configContent = await this.text(configPath, "project configuration");
+    const config = this.yaml(configPath, configContent);
     const workflowPath = await this.safeExistingFile(
       root,
       absoluteWorkflow,
       "workflow",
       ".yaml",
     );
-    const workflow = await this.yaml(workflowPath);
+    const workflowContent = await this.text(workflowPath, "workflow");
+    const workflow = this.yaml(workflowPath, workflowContent);
+    const artifacts: DefinitionArtifactSource[] = [
+      {
+        kind: "project_configuration",
+        logicalId: "project",
+        content: configContent,
+      },
+      {
+        kind: "workflow",
+        logicalId: "workflow",
+        content: workflowContent,
+      },
+    ];
 
     this.keys(
       config,
@@ -120,7 +138,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       );
     if (workspaceMode === "worktree") await this.requireWorktreeSupport(root);
 
-    const agents = await this.agents(root, config.agents);
+    const agents = await this.agents(root, config.agents, artifacts);
     const projectPolicies = this.policies(
       defaults,
       config.defaults,
@@ -149,14 +167,19 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     const states: Record<string, StateDefinition> = {};
     for (const [id, value] of Object.entries(rawStates)) {
       this.id(id, `state ID ${id}`);
-      states[id] = await this.state(root, id, value, agents, workflowPolicies);
+      states[id] = await this.state(
+        root,
+        id,
+        value,
+        agents,
+        workflowPolicies,
+        artifacts,
+      );
     }
     this.graph(initialState, states);
 
     const initial = states[initialState];
-    return {
-      projectRoot: root,
-      workflowPath,
+    const effectiveDefinition: EffectiveExecutionDefinition = {
       workflowId,
       executorType: "orca",
       workspaceMode,
@@ -164,6 +187,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       policies: workflowPolicies,
       states,
       initialState,
+    };
+    const inputs = await this.inputs(inputPaths, currentDirectory);
+    return {
+      projectRoot: root,
+      workflowPath,
+      ...effectiveDefinition,
+      snapshotSource: { effectiveDefinition, artifacts, inputs },
       state: initial,
     };
   }
@@ -171,6 +201,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
   private async agents(
     root: string,
     value: unknown,
+    artifacts: DefinitionArtifactSource[],
   ): Promise<Record<string, AgentDefinition>> {
     const rawAgents = this.map(value, "project.agents");
     if (Object.keys(rawAgents).length === 0)
@@ -185,6 +216,11 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         raw.instructions,
         `project.agents.${id}.instructions`,
       );
+      artifacts.push({
+        kind: "agent_instructions",
+        logicalId: id,
+        content: instructions,
+      });
       result[id] = {
         id,
         instructions,
@@ -200,6 +236,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     value: unknown,
     agents: Record<string, AgentDefinition>,
     inherited: EffectivePolicies,
+    artifacts: DefinitionArtifactSource[],
   ): Promise<StateDefinition> {
     const raw = this.map(value, `workflow.states.${id}`);
     const type = this.string(raw.type, `workflow.states.${id}.type`);
@@ -231,6 +268,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         agents,
         policies,
         `workflow.states.${id}`,
+        artifacts,
       );
       const outcomes = this.outcomes(
         raw.outcomes,
@@ -308,6 +346,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
             agents,
             taskPolicies,
             `workflow.states.${id}.tasks.${taskId}`,
+            artifacts,
           )),
           policies: taskPolicies,
         };
@@ -344,6 +383,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     agents: Record<string, AgentDefinition>,
     policies: EffectivePolicies,
     label: string,
+    artifacts: DefinitionArtifactSource[],
   ) {
     const agentId = this.string(raw.agent, `${label}.agent`);
     const registered = agents[agentId];
@@ -364,6 +404,11 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     const prompt = hasPrompt
       ? this.string(raw.prompt, `${label}.prompt`)
       : await this.markdown(root, raw.prompt_file, `${label}.prompt_file`);
+    artifacts.push({
+      kind: hasPrompt ? "inline_prompt" : "prompt_file",
+      logicalId: label,
+      content: prompt,
+    });
     return { agent, prompt, policies };
   }
 
@@ -494,17 +539,57 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     }
   }
 
-  private async yaml(file: string): Promise<Mapping> {
+  private yaml(file: string, content: string): Mapping {
     try {
-      return this.map(
-        parse(await readFile(file, "utf8"), { uniqueKeys: true }),
-        file,
-      );
+      return this.map(parse(content, { uniqueKeys: true }), file);
     } catch (error) {
       throw new DefinitionError(
         `Cannot parse ${file}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  private async text(file: string, label: string): Promise<string> {
+    try {
+      return await readFile(file, "utf8");
+    } catch {
+      throw new DefinitionError(`Cannot read ${label}: ${file}`);
+    }
+  }
+
+  private async inputs(
+    inputPaths: readonly string[],
+    currentDirectory: string,
+  ): Promise<InputDocumentSource[]> {
+    const inputs: InputDocumentSource[] = [];
+    for (const [index, inputPath] of inputPaths.entries()) {
+      const candidate = path.resolve(currentDirectory, inputPath);
+      let canonical: string;
+      try {
+        canonical = await realpath(candidate);
+      } catch {
+        throw new DefinitionError(`input file does not exist: ${candidate}`);
+      }
+      if (path.extname(candidate).toLowerCase() !== ".md")
+        throw new DefinitionError(`input must be a .md file: ${candidate}`);
+      try {
+        if (!(await stat(canonical)).isFile()) throw new Error();
+      } catch {
+        throw new DefinitionError(`input must be a file: ${candidate}`);
+      }
+      let content: string;
+      try {
+        content = await readFile(canonical, "utf8");
+      } catch {
+        throw new DefinitionError(`Cannot read input: ${candidate}`);
+      }
+      inputs.push({
+        id: `input-${String(index + 1).padStart(4, "0")}`,
+        originalName: path.basename(candidate),
+        content,
+      });
+    }
+    return inputs;
   }
 
   private async markdown(
@@ -518,11 +603,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       label,
       ".md",
     );
-    try {
-      return await readFile(file, "utf8");
-    } catch {
-      throw new DefinitionError(`Cannot read ${label}: ${file}`);
-    }
+    return this.text(file, label);
   }
 
   private async safeExistingFile(

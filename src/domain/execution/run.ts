@@ -29,9 +29,25 @@ export interface TaskRecord {
 export interface VisitRecord {
   stateId: string;
   number: number;
+  contextPath: string;
   task: TaskRecord;
   outcome?: string;
   target?: string;
+}
+
+export interface SnapshotInputRecord {
+  id: string;
+  originalName: string;
+  internalPath: string;
+  durablePath: string;
+  sha256: string;
+}
+
+export interface DefinitionSnapshotRecord {
+  identity: string;
+  directory: string;
+  manifestPath: string;
+  inputs: SnapshotInputRecord[];
 }
 
 export interface RunRecord {
@@ -39,6 +55,7 @@ export interface RunRecord {
   workflowId: string;
   workflowPath: string;
   projectRoot: string;
+  definitionSnapshot: DefinitionSnapshotRecord;
   status: RunStatus;
   createdAt: string;
   terminalTarget?: "$succeeded" | "$failed";
