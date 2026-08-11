@@ -1,0 +1,31 @@
+{
+  "name": "happy-machine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "happy-machine": "./dist/src/main.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "packageManager": "npm@11.17.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit false --outDir dist",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  }
+}
