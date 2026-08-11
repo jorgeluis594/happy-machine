@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recall happy-memory context"
+  short_description: "Retrieve memories with the happy-memory CLI"
+  default_prompt: "Use $happy-memory-recall to retrieve memory context for this task with the happy-memory CLI."

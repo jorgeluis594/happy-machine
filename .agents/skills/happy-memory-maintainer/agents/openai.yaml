@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain happy-memory"
+  short_description: "Maintain durable project memories"
+  default_prompt: "Use $happy-memory-maintainer to maintain durable, atomic project memories and their tags."
