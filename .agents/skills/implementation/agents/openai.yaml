@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implementation"
+  short_description: "Implement changes with validated commits"
+  default_prompt: "Use $implementation to implement this change with architecture-aware, validated commits."
