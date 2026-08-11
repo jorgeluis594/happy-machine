@@ -16,7 +16,7 @@ Add one project-level quality command that checks TypeScript code quality with E
 
 The change adds an ESLint configuration, a Prettier configuration, and a Prettier ignore file. It updates `package.json` and `package-lock.json` with the required development dependencies and scripts.
 
-ESLint checks the repository's JavaScript and TypeScript configuration and source files while ignoring generated artifacts and dependencies. Prettier checks supported repository text files while ignoring dependencies, build output, coverage output, and local generated runtime state.
+ESLint checks the repository's JavaScript and TypeScript configuration and source files while ignoring generated artifacts and dependencies. Prettier checks supported code and root configuration files while ignoring documentation, dependencies, build output, coverage output, and local generated runtime state. Documentation is excluded so adopting the formatter does not rewrite existing prose.
 
 ## Commands
 

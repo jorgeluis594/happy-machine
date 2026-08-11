@@ -1,0 +1,9 @@
+.agents/
+.claude/
+.happy-machine/
+.happy-memory/
+.superpowers/
+coverage/
+dist/
+docs/
+node_modules/

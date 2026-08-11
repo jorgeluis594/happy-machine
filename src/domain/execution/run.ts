@@ -1,5 +1,5 @@
-export type RunStatus = 'running' | 'succeeded' | 'failed';
-export type AttemptStatus = 'launching' | 'running' | 'succeeded' | 'failed';
+export type RunStatus = "running" | "succeeded" | "failed";
+export type AttemptStatus = "launching" | "running" | "succeeded" | "failed";
 
 export interface ExecutorReferences {
   runId?: string;
@@ -41,13 +41,18 @@ export interface RunRecord {
   projectRoot: string;
   status: RunStatus;
   createdAt: string;
-  terminalTarget?: '$succeeded' | '$failed';
+  terminalTarget?: "$succeeded" | "$failed";
   visits: VisitRecord[];
-  events: Array<{ sequence: number; type: string; at: string; data: Record<string, unknown> }>;
+  events: Array<{
+    sequence: number;
+    type: string;
+    at: string;
+    data: Record<string, unknown>;
+  }>;
 }
 
 export function terminalStatus(target: string): RunStatus {
-  if (target === '$succeeded') return 'succeeded';
-  if (target === '$failed') return 'failed';
+  if (target === "$succeeded") return "succeeded";
+  if (target === "$failed") return "failed";
   throw new Error(`Unsupported transition target: ${target}`);
 }

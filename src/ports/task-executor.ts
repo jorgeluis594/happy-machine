@@ -1,4 +1,4 @@
-import type { ExecutorReferences } from '../domain/execution/run.js';
+import type { ExecutorReferences } from "../domain/execution/run.js";
 
 export interface TaskLaunch {
   identity: string;
@@ -19,5 +19,8 @@ export interface TaskExecution {
 }
 
 export interface TaskExecutor {
-  execute(launch: TaskLaunch, onStarted: (references: ExecutorReferences) => Promise<void>): Promise<TaskExecution>;
+  execute(
+    launch: TaskLaunch,
+    onStarted: (references: ExecutorReferences) => Promise<void>,
+  ): Promise<TaskExecution>;
 }

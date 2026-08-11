@@ -1,4 +1,4 @@
-import type { RunRecord } from '../domain/execution/run.js';
+import type { RunRecord } from "../domain/execution/run.js";
 
 export interface AttemptPaths {
   controlWorkspace: string;
@@ -9,6 +9,14 @@ export interface AttemptPaths {
 
 export interface RunRepository {
   save(run: RunRecord): Promise<void>;
-  prepareAttempt(run: RunRecord, instructions: string, prompt: string): Promise<AttemptPaths>;
-  readResult(resultPath: string, outputDirectory: string, allowedOutcomes: readonly string[]): Promise<{ outcome: string; documents: string[] }>;
+  prepareAttempt(
+    run: RunRecord,
+    instructions: string,
+    prompt: string,
+  ): Promise<AttemptPaths>;
+  readResult(
+    resultPath: string,
+    outputDirectory: string,
+    allowedOutcomes: readonly string[],
+  ): Promise<{ outcome: string; documents: string[] }>;
 }
