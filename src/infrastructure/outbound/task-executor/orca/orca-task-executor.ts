@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
-import type { ExecutorReferences } from "../../../../domain/execution/run.js";
+import type {
+  ExecutorReferences,
+  ExternalExecutionStatus,
+} from "../../../../domain/execution/run.js";
 import type {
   TaskExecution,
   TaskExecutor,
   TaskLaunch,
 } from "../../../../ports/task-executor.js";
+import { TaskExecutorError } from "../../../../ports/task-executor.js";
 
 interface CommandResult {
   stdout: string;
@@ -65,7 +69,9 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "id",
     ]);
     if (!taskId)
-      throw new Error("Orca task-create response did not contain a task ID");
+      throw new TaskExecutorError(
+        "Orca task-create response did not contain a task ID",
+      );
     const workerReceipt = await command([
       "orchestration",
       "worker-start",
@@ -90,7 +96,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "handle",
     ]);
     if (!dispatchId)
-      throw new Error(
+      throw new TaskExecutorError(
         "Orca worker-start response did not contain a dispatch ID",
       );
     const references: ExecutorReferences = {
@@ -111,10 +117,48 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--json",
     ]);
     if (!this.hasCompletion(completion.json, dispatchId))
-      throw new Error(
+      throw new TaskExecutorError(
         "Orca did not return a successful worker_done event for the attempt",
       );
     return { references, logs };
+  }
+
+  async cancel(
+    references: ExecutorReferences,
+    projectWorkspace: string,
+  ): Promise<void> {
+    await this.run(
+      [
+        "orchestration",
+        "worker-stop",
+        "--dispatch",
+        references.dispatchId,
+        "--json",
+      ],
+      projectWorkspace,
+    );
+  }
+
+  async reconcile(
+    references: ExecutorReferences,
+    projectWorkspace: string,
+  ): Promise<ExternalExecutionStatus> {
+    const result = await this.run(
+      [
+        "orchestration",
+        "worker-show",
+        "--dispatch",
+        references.dispatchId,
+        "--json",
+      ],
+      projectWorkspace,
+    );
+    const state = this.findString(result.json, ["workerState", "state"]);
+    if (["failed", "succeeded", "stopped"].includes(state ?? ""))
+      return "stopped";
+    if (["starting", "ready", "stopping"].includes(state ?? ""))
+      return "active";
+    return "unknown";
   }
 
   private run(args: string[], cwd: string): Promise<CommandResult> {
@@ -128,16 +172,20 @@ export class OrcaTaskExecutor implements TaskExecutor {
       child.stderr.on("data", (chunk) => {
         stderr += String(chunk);
       });
-      child.on("error", reject);
+      child.on("error", (error) =>
+        reject(new TaskExecutorError(error.message)),
+      );
       child.on("close", (code) => {
         if (code !== 0)
           return reject(
-            new Error(`Orca command failed (${code}): ${stderr.trim()}`),
+            new TaskExecutorError(
+              `Orca command failed (${code}): ${stderr.trim()}`,
+            ),
           );
         try {
           resolve({ stdout, stderr, json: JSON.parse(stdout) });
         } catch {
-          reject(new Error("Orca command returned invalid JSON"));
+          reject(new TaskExecutorError("Orca command returned invalid JSON"));
         }
       });
     });

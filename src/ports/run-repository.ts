@@ -34,6 +34,18 @@ export interface ValidatedNormalResult {
   error?: JsonValue;
 }
 
+export type ResultValidationCode =
+  "result_missing_or_invalid" | "outcome_invalid" | "documents_invalid";
+
+export class ResultValidationError extends Error {
+  constructor(
+    readonly code: ResultValidationCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export interface RunRepository {
   createSnapshot(
     request: SnapshotCreationRequest,

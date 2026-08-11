@@ -1,4 +1,7 @@
-import type { ExecutorReferences } from "../domain/execution/run.js";
+import type {
+  ExecutorReferences,
+  ExternalExecutionStatus,
+} from "../domain/execution/run.js";
 
 export interface TaskLaunch {
   identity: string;
@@ -23,4 +26,16 @@ export interface TaskExecutor {
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,
   ): Promise<TaskExecution>;
+  cancel(
+    references: ExecutorReferences,
+    projectWorkspace: string,
+  ): Promise<void>;
+  reconcile(
+    references: ExecutorReferences,
+    projectWorkspace: string,
+  ): Promise<ExternalExecutionStatus>;
+}
+
+export class TaskExecutorError extends Error {
+  readonly code = "executor_failed";
 }

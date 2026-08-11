@@ -139,6 +139,17 @@ if (operation === "orchestration run-create") {
     ],
     log: "misleading stdout outcome: rejected",
   };
+} else if (operation === "orchestration worker-stop") {
+  response = { dispatch: { state: "stopping" } };
+} else if (operation === "orchestration worker-show") {
+  const stateFile = path.join(process.cwd(), ".fake-worker-state");
+  response = {
+    dispatch: {
+      workerState: existsSync(stateFile)
+        ? readFileSync(stateFile, "utf8").trim()
+        : "stopped",
+    },
+  };
 } else {
   process.stderr.write(`unexpected fake Orca operation: ${operation}\n`);
   process.exit(2);

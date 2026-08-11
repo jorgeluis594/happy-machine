@@ -17,6 +17,7 @@ import type {
   DocumentRecord,
   RunRecord,
 } from "../../../../domain/execution/run.js";
+import { ResultValidationError } from "../../../../ports/run-repository.js";
 import type {
   AttemptPaths,
   RunRepository,
@@ -207,24 +208,39 @@ export class FilesystemRunRepository implements RunRepository {
     try {
       value = JSON.parse(await readFile(resultPath, "utf8"));
     } catch {
-      throw new Error(`Missing or invalid result.json: ${resultPath}`);
+      throw new ResultValidationError(
+        "result_missing_or_invalid",
+        `Missing or invalid result.json: ${resultPath}`,
+      );
     }
     if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error("result.json must contain an object");
+      throw new ResultValidationError(
+        "result_missing_or_invalid",
+        "result.json must contain an object",
+      );
     const result = value as Record<string, unknown>;
     if (
       typeof result.outcome !== "string" ||
       !allowedOutcomes.includes(result.outcome)
     )
-      throw new Error("result.json contains an unknown outcome");
+      throw new ResultValidationError(
+        "outcome_invalid",
+        "result.json contains an unknown outcome",
+      );
     if (
       !Array.isArray(result.documents) ||
       result.documents.some((item) => typeof item !== "string")
     )
-      throw new Error("result.json documents must be an array of paths");
+      throw new ResultValidationError(
+        "documents_invalid",
+        "result.json documents must be an array of paths",
+      );
     await this.validateDocuments(outputDirectory, result.documents as string[]);
     if ("error" in result && !this.isJsonValue(result.error))
-      throw new Error("result.json error must be serializable diagnostic data");
+      throw new ResultValidationError(
+        "result_missing_or_invalid",
+        "result.json error must be serializable diagnostic data",
+      );
     return {
       outcome: result.outcome,
       documents: result.documents as string[],
@@ -254,7 +270,10 @@ export class FilesystemRunRepository implements RunRepository {
       if (
         run.documents.some((document) => document.internalPath === internalPath)
       )
-        throw new Error(`Document provenance collision: ${internalPath}`);
+        throw new ResultValidationError(
+          "documents_invalid",
+          `Document provenance collision: ${internalPath}`,
+        );
       const durablePath = this.durablePath(
         this.runDirectory(run),
         internalPath,
@@ -265,7 +284,10 @@ export class FilesystemRunRepository implements RunRepository {
       new Set(planned.map((document) => document.internalPath)).size !==
       planned.length
     )
-      throw new Error("Result documents contain a provenance collision");
+      throw new ResultValidationError(
+        "documents_invalid",
+        "Result documents contain a provenance collision",
+      );
     for (const { source, relative, internalPath, durablePath } of planned) {
       await mkdir(path.dirname(durablePath), { recursive: true });
       await copyFile(source, durablePath, constants.COPYFILE_EXCL);
@@ -291,7 +313,10 @@ export class FilesystemRunRepository implements RunRepository {
     return Promise.all(
       names.map(async (name) => {
         if (!name || path.isAbsolute(name))
-          throw new Error(`Invalid result document: ${name}`);
+          throw new ResultValidationError(
+            "documents_invalid",
+            `Invalid result document: ${name}`,
+          );
         const candidate = path.resolve(outputRoot, name);
         const relative = path.relative(outputRoot, candidate);
         if (
@@ -300,7 +325,10 @@ export class FilesystemRunRepository implements RunRepository {
           path.isAbsolute(relative) ||
           path.extname(candidate).toLowerCase() !== ".md"
         )
-          throw new Error(`Invalid result document: ${name}`);
+          throw new ResultValidationError(
+            "documents_invalid",
+            `Invalid result document: ${name}`,
+          );
         try {
           const [entry, resolved, file] = await Promise.all([
             lstat(candidate),
@@ -319,7 +347,10 @@ export class FilesystemRunRepository implements RunRepository {
             throw new Error();
           return { source: resolved, relative };
         } catch {
-          throw new Error(`Invalid result document: ${name}`);
+          throw new ResultValidationError(
+            "documents_invalid",
+            `Invalid result document: ${name}`,
+          );
         }
       }),
     );

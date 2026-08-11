@@ -135,6 +135,7 @@ function cli(projectRoot?: string) {
     new OrcaTaskExecutor(fixture),
     () => new Date("2026-08-11T12:00:00.000Z"),
     () => `id-${++id}`,
+    () => new Promise(() => {}),
   );
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -272,6 +273,14 @@ describe("happy-machine execute", () => {
         calls.push("executor.execute");
         return Promise.reject(new Error("must not execute"));
       },
+      cancel: () => {
+        calls.push("executor.cancel");
+        return Promise.reject(new Error("must not cancel"));
+      },
+      reconcile: () => {
+        calls.push("executor.reconcile");
+        return Promise.reject(new Error("must not reconcile"));
+      },
     } as TaskExecutor;
     const useCase = new ExecuteWorkflow(
       definitions,
@@ -284,6 +293,10 @@ describe("happy-machine execute", () => {
       () => {
         calls.push("makeId");
         return "forbidden";
+      },
+      () => {
+        calls.push("wait");
+        return new Promise(() => {});
       },
     );
     await expect(
@@ -520,6 +533,7 @@ describe("happy-machine execute", () => {
       new OrcaTaskExecutor(fixture),
       () => new Date("2026-08-11T12:00:00.000Z"),
       () => `blocked-${++id}`,
+      () => new Promise(() => {}),
     );
     await expect(
       useCase.execute({

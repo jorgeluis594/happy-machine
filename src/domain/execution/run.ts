@@ -1,5 +1,19 @@
 export type RunStatus = "running" | "succeeded" | "failed";
-export type AttemptStatus = "launching" | "running" | "succeeded" | "failed";
+export type AttemptStatus =
+  "launching" | "running" | "timing_out" | "succeeded" | "failed";
+
+export interface AttemptFailure {
+  code: string;
+  message: string;
+}
+
+export type ExternalExecutionStatus = "active" | "stopped" | "unknown";
+
+export interface AttemptReconciliation {
+  cancellationRequestedAt: string;
+  observations: Array<{ status: ExternalExecutionStatus; at: string }>;
+  confirmedStoppedAt?: string;
+}
 
 export interface ExecutorReferences {
   runId?: string;
@@ -20,6 +34,9 @@ export interface AttemptRecord {
   logs: { stdout: string; stderr: string };
   outcome?: string;
   error?: JsonValue;
+  failure?: AttemptFailure;
+  externalStatus?: ExternalExecutionStatus;
+  reconciliation?: AttemptReconciliation;
   documents: DocumentRecord[];
 }
 
@@ -74,6 +91,7 @@ export interface RunRecord {
   status: RunStatus;
   createdAt: string;
   terminalTarget?: "$succeeded" | "$failed";
+  failure?: AttemptFailure;
   visits: VisitRecord[];
   documents: DocumentRecord[];
   events: Array<{

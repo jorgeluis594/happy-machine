@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as wait } from "node:timers/promises";
 import { ExecuteWorkflow } from "./application/use-cases/execute-workflow.js";
 import { Cli } from "./infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
@@ -15,6 +16,7 @@ export function createProcessEntryPoint(): (
     new OrcaTaskExecutor(),
     () => new Date(),
     randomUUID,
+    (milliseconds, signal) => wait(milliseconds, undefined, { signal }),
   );
   const cli = new Cli(useCase, {
     stdout: (message) => process.stdout.write(`${message}\n`),
