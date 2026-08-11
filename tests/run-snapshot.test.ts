@@ -193,6 +193,8 @@ describe("filesystem run snapshots", () => {
       definitionSnapshot: first.record,
       status: "running",
       createdAt: "2026-08-11T12:00:00.000Z",
+      deadlineAt: "2026-08-12T12:00:00.000Z",
+      transitionCount: 0,
       documents: [],
       visits: [
         {

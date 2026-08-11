@@ -743,10 +743,15 @@ describe("happy-machine execute", () => {
     );
     expect(run.events.map((event: { type: string }) => event.type)).toEqual([
       "run_created",
+      "limit_evaluated",
+      "limit_evaluated",
       "state_entered",
+      "limit_evaluated",
       "attempt_launching",
       "attempt_started",
       "attempt_succeeded",
+      "limit_evaluated",
+      "limit_evaluated",
       "transition_committed",
       "run_terminal",
     ]);

@@ -1,6 +1,7 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  GlobalLimitEvaluation,
   NormalVisitRecord,
   ParallelVisitRecord,
   RunRecord,
@@ -9,6 +10,9 @@ import type {
 } from "../../domain/execution/run.js";
 import {
   calculateParallelOutcome,
+  evaluateStateVisitLimit,
+  evaluateTransitionLimit,
+  evaluateWorkflowDeadline,
   terminalStatus,
 } from "../../domain/execution/run.js";
 import type {
@@ -41,7 +45,13 @@ export type Wait = (
 type AttemptResult =
   | { kind: "completed"; execution: TaskExecution }
   | { kind: "failed"; failure: AttemptFailure }
-  | { kind: "unsafe"; failure: AttemptFailure };
+  | { kind: "unsafe"; failure: AttemptFailure }
+  | { kind: "global_limit"; failure: AttemptFailure };
+
+type TaskFailureResult = {
+  kind: "failed" | "unsafe" | "global_limit";
+  failure: AttemptFailure;
+};
 
 const reconciliationPollMs = 100;
 
@@ -69,6 +79,7 @@ export class ExecuteWorkflow {
       workflowId: definition.workflowId,
       source: definition.snapshotSource,
     });
+    const createdAt = timestamp();
     let run: RunRecord = {
       id: runId,
       workflowId: definition.workflowId,
@@ -76,7 +87,12 @@ export class ExecuteWorkflow {
       projectRoot: definition.projectRoot,
       definitionSnapshot: createdSnapshot.record,
       status: "running",
-      createdAt: timestamp(),
+      createdAt,
+      deadlineAt: new Date(
+        Date.parse(createdAt) +
+          createdSnapshot.definition.policies.workflowTimeoutMs,
+      ).toISOString(),
+      transitionCount: 0,
       visits: [],
       documents: [],
       events: [],
@@ -95,6 +111,17 @@ export class ExecuteWorkflow {
         const visitNumber =
           run.visits.filter((candidate) => candidate.stateId === state.id)
             .length + 1;
+        const entryFailure = await this.evaluateStateEntryLimits(
+          run,
+          state.id,
+          visitNumber,
+          createdSnapshot.definition.policies.maxStateVisits,
+          timestamp,
+        );
+        if (entryFailure) {
+          await this.terminateRun(run, entryFailure, timestamp);
+          return run;
+        }
         const visit: VisitRecord =
           state.type === "agent"
             ? {
@@ -142,17 +169,36 @@ export class ExecuteWorkflow {
                 timestamp,
               );
         if (result.kind !== "completed") {
-          run.status = "failed";
-          run.failure = result.failure;
-          this.event(run, "run_terminal", timestamp(), {
-            status: "failed",
-            failure: result.failure,
-          });
-          await this.runs.save(run);
+          await this.terminateRun(run, result.failure, timestamp);
           return run;
         }
 
         const { outcome, target, documents } = result;
+        if (visit.type === "agent") {
+          const attempt = visit.task.attempts.at(-1)!;
+          attempt.outcome = outcome;
+          attempt.status = "succeeded";
+          if (result.diagnostic !== undefined)
+            attempt.error = result.diagnostic;
+          this.event(run, "attempt_succeeded", timestamp(), {
+            identity: result.attempt!.id,
+            outcome,
+            documents: documents.map((document) => document.internalPath),
+          });
+          await this.runs.save(run);
+        }
+        const transitionFailure = await this.evaluateTransitionLimits(
+          run,
+          createdSnapshot.definition.policies.maxTransitions,
+          state.id,
+          visitNumber,
+          target,
+          timestamp,
+        );
+        if (transitionFailure) {
+          await this.terminateRun(run, transitionFailure, timestamp);
+          return run;
+        }
         const committed = structuredClone(run);
         const committedVisit = committed.visits.at(-1)!;
         committedVisit.outcome = outcome;
@@ -161,15 +207,7 @@ export class ExecuteWorkflow {
         if (committedVisit.type === "agent") {
           const committedAttempt = committedVisit.task.attempts.at(-1)!;
           committedAttempt.outcome = outcome;
-          committedAttempt.status = "succeeded";
           committedAttempt.documents = documents;
-          if (result.diagnostic !== undefined)
-            committedAttempt.error = result.diagnostic;
-          this.event(committed, "attempt_succeeded", timestamp(), {
-            identity: result.attempt!.id,
-            outcome,
-            documents: documents.map((document) => document.internalPath),
-          });
         } else {
           this.event(committed, "parallel_join_committed", timestamp(), {
             stateId: state.id,
@@ -190,7 +228,9 @@ export class ExecuteWorkflow {
           visitNumber,
           outcome,
           target,
+          transitionNumber: committed.transitionCount + 1,
         });
+        committed.transitionCount += 1;
         if (target === "$succeeded" || target === "$failed") {
           committed.terminalTarget = target;
           committed.status = terminalStatus(target);
@@ -232,7 +272,7 @@ export class ExecuteWorkflow {
         documents: RunRecord["documents"];
         diagnostic?: AttemptRecord["error"];
       }
-    | { kind: "failed" | "unsafe"; failure: AttemptFailure }
+    | TaskFailureResult
   > {
     const result = await this.executeTask(
       run,
@@ -269,14 +309,31 @@ export class ExecuteWorkflow {
         attempt?: AttemptRecord;
         diagnostic?: AttemptRecord["error"];
       }
-    | { kind: "failed" | "unsafe"; failure: AttemptFailure }
+    | TaskFailureResult
   > {
     let nextIndex = 0;
     const unsafeFailures: AttemptFailure[] = [];
+    const globalFailures: AttemptFailure[] = [];
+    let stopScheduling = false;
     const workers = Array.from(
       { length: state.effectiveMaxConcurrency },
       async () => {
         while (true) {
+          if (stopScheduling) return;
+          const schedulingFailure = await this.evaluateDeadline(
+            run,
+            timestamp,
+            {
+              phase: "parallel_scheduling",
+              stateId: state.id,
+              visitNumber: visit.number,
+            },
+          );
+          if (schedulingFailure) {
+            stopScheduling = true;
+            globalFailures.push(schedulingFailure);
+            return;
+          }
           const index = nextIndex;
           nextIndex += 1;
           if (index >= visit.tasks.length) return;
@@ -322,6 +379,10 @@ export class ExecuteWorkflow {
               task.status = "failed";
               task.failure = result.failure;
               if (result.kind === "unsafe") unsafeFailures.push(result.failure);
+              if (result.kind === "global_limit") {
+                stopScheduling = true;
+                globalFailures.push(result.failure);
+              }
               this.event(run, "parallel_task_settled", timestamp(), {
                 taskId: task.id,
                 status: "failed",
@@ -347,6 +408,8 @@ export class ExecuteWorkflow {
     );
     await Promise.all(workers);
 
+    if (globalFailures.length)
+      return { kind: "global_limit", failure: globalFailures[0] };
     if (unsafeFailures.length)
       return { kind: "unsafe", failure: unsafeFailures[0] };
     const outcome = calculateParallelOutcome(visit.tasks);
@@ -372,13 +435,22 @@ export class ExecuteWorkflow {
         documents: RunRecord["documents"];
         diagnostic?: AttemptRecord["error"];
       }
-    | { kind: "failed" | "unsafe"; failure: AttemptFailure }
+    | TaskFailureResult
   > {
     for (
       let attemptNumber = 1;
       attemptNumber <= work.policies.maxAttempts;
       attemptNumber += 1
     ) {
+      const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
+        phase: "attempt_launch",
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        taskId: task.id,
+        attemptNumber,
+      });
+      if (deadlineFailure)
+        return { kind: "global_limit", failure: deadlineFailure };
       const identity = `${run.id}:${visit.stateId}:${visit.number}:${task.id}:${attemptNumber}`;
       const attempt: AttemptRecord = {
         id: identity,
@@ -481,6 +553,15 @@ export class ExecuteWorkflow {
       }
 
       await this.recordFailure(run, attempt, attemptResult.failure, timestamp);
+      if (attemptResult.kind === "global_limit") {
+        this.event(run, "retry_suppressed", timestamp(), {
+          failedAttemptNumber: attemptNumber,
+          reason: "workflow_timeout",
+          failure: attemptResult.failure,
+        });
+        await this.runs.save(run);
+        return attemptResult;
+      }
       if (attemptResult.kind === "unsafe") {
         this.event(run, "retry_suppressed", timestamp(), {
           failedAttemptNumber: attemptNumber,
@@ -529,8 +610,26 @@ export class ExecuteWorkflow {
         return { kind: "failed", failure: this.failure(error) } as const;
       },
     );
-    const timeout = this.wait(launch.timeoutMs, timeoutController.signal).then(
-      () => ({ kind: "timeout" }) as const,
+    const workflowRemainingMs = Math.max(
+      0,
+      Date.parse(run.deadlineAt) - this.now().getTime(),
+    );
+    const workflowDeadlineControls = workflowRemainingMs <= launch.timeoutMs;
+    const controllingTimeoutMs = Math.min(
+      launch.timeoutMs,
+      workflowRemainingMs,
+    );
+    const timeout = this.wait(
+      controllingTimeoutMs,
+      timeoutController.signal,
+    ).then(
+      () =>
+        ({
+          kind: "timeout",
+          cause: workflowDeadlineControls
+            ? ("workflow_timeout" as const)
+            : ("attempt_timeout" as const),
+        }) as const,
     );
     const result = await Promise.race([settled, timeout]);
     if (result.kind !== "timeout") {
@@ -542,32 +641,61 @@ export class ExecuteWorkflow {
     void settled;
     attempt.status = "timing_out";
     if (startedPersistence) await startedPersistence;
+    if (result.cause === "workflow_timeout") {
+      const clockAt = timestamp();
+      const observedAt =
+        Date.parse(clockAt) < Date.parse(run.deadlineAt)
+          ? run.deadlineAt
+          : clockAt;
+      const evaluation = evaluateWorkflowDeadline(run.deadlineAt, observedAt);
+      this.limitEvent(run, evaluation, observedAt, {
+        phase: "active_attempt",
+        identity: attempt.id,
+      });
+    }
     this.event(run, "attempt_timing_out", timestamp(), {
       identity: attempt.id,
-      timeoutMs: launch.timeoutMs,
+      timeoutMs: controllingTimeoutMs,
+      cause: result.cause,
     });
     await this.runs.save(run);
-    return this.cancelAndReconcile(run, attempt, launch, timestamp);
+    return this.cancelAndReconcile(
+      run,
+      attempt,
+      launch,
+      result.cause,
+      timestamp,
+    );
   }
 
   private async cancelAndReconcile(
     run: RunRecord,
     attempt: AttemptRecord,
     launch: TaskLaunch,
+    cause: "attempt_timeout" | "workflow_timeout",
     timestamp: () => string,
   ): Promise<AttemptResult> {
-    const timeoutFailure = {
-      code: "attempt_timeout",
-      message: `Attempt exceeded its ${launch.timeoutMs}ms timeout`,
-    };
+    const timeoutFailure =
+      cause === "workflow_timeout"
+        ? {
+            code: "workflow_timeout",
+            message: `Workflow deadline ${run.deadlineAt} expired during attempt ${attempt.id}`,
+          }
+        : {
+            code: "attempt_timeout",
+            message: `Attempt exceeded its ${launch.timeoutMs}ms timeout`,
+          };
     if (!attempt.executor)
       return {
-        kind: "unsafe",
-        failure: {
-          code: "external_execution_uncertain",
-          message:
-            "Attempt timed out before its external identity was confirmed",
-        },
+        kind: cause === "workflow_timeout" ? "global_limit" : "unsafe",
+        failure:
+          cause === "workflow_timeout"
+            ? timeoutFailure
+            : {
+                code: "external_execution_uncertain",
+                message:
+                  "Attempt timed out before its external identity was confirmed",
+              },
       };
 
     const references = attempt.executor;
@@ -613,7 +741,10 @@ export class ExecuteWorkflow {
       if (status === "stopped") {
         attempt.reconciliation.confirmedStoppedAt = observedAt;
         await this.runs.save(run);
-        return { kind: "failed", failure: timeoutFailure };
+        return {
+          kind: cause === "workflow_timeout" ? "global_limit" : "failed",
+          failure: timeoutFailure,
+        };
       }
       await this.runs.save(run);
       if (elapsedMs >= launch.timeoutMs) break;
@@ -636,13 +767,16 @@ export class ExecuteWorkflow {
       });
       await this.runs.save(run);
     }
-    return {
-      kind: "unsafe",
-      failure: {
-        code: "external_execution_uncertain",
-        message: "Orca could not confirm that the timed-out execution stopped",
-      },
-    };
+    return cause === "workflow_timeout"
+      ? { kind: "global_limit", failure: timeoutFailure }
+      : {
+          kind: "unsafe",
+          failure: {
+            code: "external_execution_uncertain",
+            message:
+              "Orca could not confirm that the timed-out execution stopped",
+          },
+        };
   }
 
   private async recordFailure(
@@ -667,7 +801,15 @@ export class ExecuteWorkflow {
     state: AgentWorkDefinition,
     failure: AttemptFailure,
     timestamp: () => string,
-  ): Promise<{ kind: "failed"; failure: AttemptFailure } | undefined> {
+  ): Promise<
+    { kind: "failed" | "global_limit"; failure: AttemptFailure } | undefined
+  > {
+    const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
+      phase: "retry_decision",
+      failedAttemptNumber: attemptNumber,
+    });
+    if (deadlineFailure)
+      return { kind: "global_limit", failure: deadlineFailure };
     if (attemptNumber >= state.policies.maxAttempts) {
       this.event(run, "retry_exhausted", timestamp(), {
         failedAttemptNumber: attemptNumber,
@@ -684,14 +826,158 @@ export class ExecuteWorkflow {
       failure,
     });
     await this.runs.save(run);
-    await this.wait(state.policies.retryDelayMs);
+    const remainingMs = Math.max(
+      0,
+      Date.parse(run.deadlineAt) - this.now().getTime(),
+    );
+    const deadlineController = new AbortController();
+    const delay = this.wait(state.policies.retryDelayMs).then(
+      () => ({ kind: "delay" }) as const,
+    );
+    const deadline = this.wait(remainingMs, deadlineController.signal).then(
+      () => ({ kind: "deadline" }) as const,
+    );
+    const settled = await Promise.race([delay, deadline]);
+    if (settled.kind === "deadline") {
+      const clockAt = timestamp();
+      const observedAt =
+        Date.parse(clockAt) < Date.parse(run.deadlineAt)
+          ? run.deadlineAt
+          : clockAt;
+      const evaluation = evaluateWorkflowDeadline(run.deadlineAt, observedAt);
+      this.limitEvent(run, evaluation, observedAt, {
+        phase: "retry_delay",
+        failedAttemptNumber: attemptNumber,
+        nextAttemptNumber: attemptNumber + 1,
+      });
+      await this.runs.save(run);
+      return {
+        kind: "global_limit",
+        failure: this.limitFailure(evaluation)!,
+      };
+    }
+    deadlineController.abort();
     this.event(run, "retry_delay_completed", timestamp(), {
       failedAttemptNumber: attemptNumber,
       nextAttemptNumber: attemptNumber + 1,
       delayMs: state.policies.retryDelayMs,
     });
     await this.runs.save(run);
+    const afterDelayFailure = await this.evaluateDeadline(run, timestamp, {
+      phase: "retry_delay_completed",
+      failedAttemptNumber: attemptNumber,
+      nextAttemptNumber: attemptNumber + 1,
+    });
+    if (afterDelayFailure)
+      return { kind: "global_limit", failure: afterDelayFailure };
     return undefined;
+  }
+
+  private async evaluateStateEntryLimits(
+    run: RunRecord,
+    stateId: string,
+    proposedVisit: number,
+    maxStateVisits: number,
+    timestamp: () => string,
+  ): Promise<AttemptFailure | undefined> {
+    const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
+      phase: "state_entry",
+      stateId,
+      proposedVisit,
+    });
+    if (deadlineFailure) return deadlineFailure;
+    const evaluation = evaluateStateVisitLimit(maxStateVisits, proposedVisit);
+    this.limitEvent(run, evaluation, timestamp(), {
+      phase: "state_entry",
+      stateId,
+    });
+    await this.runs.save(run);
+    return this.limitFailure(evaluation);
+  }
+
+  private async evaluateTransitionLimits(
+    run: RunRecord,
+    maxTransitions: number,
+    stateId: string,
+    visitNumber: number,
+    target: string,
+    timestamp: () => string,
+  ): Promise<AttemptFailure | undefined> {
+    const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
+      phase: "transition",
+      stateId,
+      visitNumber,
+      target,
+    });
+    if (deadlineFailure) return deadlineFailure;
+    const evaluation = evaluateTransitionLimit(
+      maxTransitions,
+      run.transitionCount + 1,
+    );
+    this.limitEvent(run, evaluation, timestamp(), {
+      phase: "transition",
+      stateId,
+      visitNumber,
+      target,
+    });
+    await this.runs.save(run);
+    return this.limitFailure(evaluation);
+  }
+
+  private async evaluateDeadline(
+    run: RunRecord,
+    timestamp: () => string,
+    context: Record<string, unknown>,
+  ): Promise<AttemptFailure | undefined> {
+    const observedAt = timestamp();
+    const evaluation = evaluateWorkflowDeadline(run.deadlineAt, observedAt);
+    this.limitEvent(run, evaluation, observedAt, context);
+    await this.runs.save(run);
+    return this.limitFailure(evaluation);
+  }
+
+  private limitEvent(
+    run: RunRecord,
+    evaluation: GlobalLimitEvaluation,
+    at: string,
+    context: Record<string, unknown>,
+  ): void {
+    this.event(run, "limit_evaluated", at, {
+      ...context,
+      ...evaluation,
+      decision: evaluation.allowed ? "allowed" : "exceeded",
+    });
+  }
+
+  private limitFailure(
+    evaluation: GlobalLimitEvaluation,
+  ): AttemptFailure | undefined {
+    if (evaluation.allowed) return undefined;
+    let message: string;
+    if (evaluation.limit === "workflow_timeout")
+      message = `Workflow deadline ${evaluation.effectiveDeadline} was reached at ${evaluation.observedAt}`;
+    else if (evaluation.limit === "max_state_visits")
+      message = `State visit limit ${evaluation.effectiveValue} was exceeded by visit ${evaluation.observedValue}`;
+    else
+      message = `Transition limit ${evaluation.effectiveValue} was exceeded by transition ${evaluation.observedValue}`;
+    return {
+      code: evaluation.terminalCause,
+      message,
+    };
+  }
+
+  private async terminateRun(
+    run: RunRecord,
+    failure: AttemptFailure,
+    timestamp: () => string,
+  ): Promise<void> {
+    run.status = "failed";
+    run.failure = failure;
+    this.event(run, "run_terminal", timestamp(), {
+      status: "failed",
+      failure,
+    });
+    await this.runs.save(run);
   }
 
   private failure(error: unknown): AttemptFailure {

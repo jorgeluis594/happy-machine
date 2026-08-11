@@ -127,6 +127,8 @@ export interface RunRecord {
   definitionSnapshot: DefinitionSnapshotRecord;
   status: RunStatus;
   createdAt: string;
+  deadlineAt: string;
+  transitionCount: number;
   terminalTarget?: "$succeeded" | "$failed";
   failure?: AttemptFailure;
   visits: VisitRecord[];
@@ -137,6 +139,86 @@ export interface RunRecord {
     at: string;
     data: Record<string, unknown>;
   }>;
+}
+
+export type GlobalLimitFailureCode =
+  "workflow_timeout" | "max_state_visits_exceeded" | "max_transitions_exceeded";
+
+export type GlobalLimitEvaluation =
+  | {
+      allowed: true;
+      limit: "workflow_timeout";
+      effectiveDeadline: string;
+      observedAt: string;
+    }
+  | {
+      allowed: false;
+      limit: "workflow_timeout";
+      effectiveDeadline: string;
+      observedAt: string;
+      terminalCause: "workflow_timeout";
+    }
+  | {
+      allowed: true;
+      limit: "max_state_visits" | "max_transitions";
+      effectiveValue: number;
+      observedValue: number;
+    }
+  | {
+      allowed: false;
+      limit: "max_state_visits";
+      effectiveValue: number;
+      observedValue: number;
+      terminalCause: "max_state_visits_exceeded";
+    }
+  | {
+      allowed: false;
+      limit: "max_transitions";
+      effectiveValue: number;
+      observedValue: number;
+      terminalCause: "max_transitions_exceeded";
+    };
+
+export function evaluateWorkflowDeadline(
+  deadlineAt: string,
+  observedAt: string,
+): GlobalLimitEvaluation {
+  const allowed = Date.parse(observedAt) < Date.parse(deadlineAt);
+  return {
+    allowed,
+    limit: "workflow_timeout",
+    effectiveDeadline: deadlineAt,
+    observedAt,
+    ...(allowed ? {} : { terminalCause: "workflow_timeout" as const }),
+  } as GlobalLimitEvaluation;
+}
+
+export function evaluateStateVisitLimit(
+  effectiveValue: number,
+  proposedVisit: number,
+): GlobalLimitEvaluation {
+  const allowed = proposedVisit <= effectiveValue;
+  return {
+    allowed,
+    limit: "max_state_visits",
+    effectiveValue,
+    observedValue: proposedVisit,
+    ...(allowed ? {} : { terminalCause: "max_state_visits_exceeded" as const }),
+  } as GlobalLimitEvaluation;
+}
+
+export function evaluateTransitionLimit(
+  effectiveValue: number,
+  proposedTransition: number,
+): GlobalLimitEvaluation {
+  const allowed = proposedTransition <= effectiveValue;
+  return {
+    allowed,
+    limit: "max_transitions",
+    effectiveValue,
+    observedValue: proposedTransition,
+    ...(allowed ? {} : { terminalCause: "max_transitions_exceeded" as const }),
+  } as GlobalLimitEvaluation;
 }
 
 export function terminalStatus(target: string): RunStatus {
