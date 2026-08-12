@@ -7,12 +7,21 @@ import type {
   TaskRecord,
   VisitRecord,
 } from "../../domain/execution/run.js";
+import {
+  projectWorkspaceForTask,
+  workspaceMode,
+} from "../../domain/execution/run.js";
 import type { RunRepository } from "../../ports/run-repository.js";
 import type {
   RecoveryObservation,
   TaskExecutor,
 } from "../../ports/task-executor.js";
 import { throwIfDetached } from "../services/controller-detachment.js";
+import {
+  type ProjectWorkspaceCoordinator,
+  requireWorkspaceCoordinator,
+  workspaceFailure,
+} from "../services/project-workspace-coordinator.js";
 
 export interface CancelWorkflowRequest {
   currentDirectory: string;
@@ -47,6 +56,7 @@ export class CancelWorkflow {
     private readonly executor: TaskExecutor,
     private readonly now: () => Date,
     private readonly wait: CancellationWait,
+    private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
   ) {}
 
   async cancel(request: CancelWorkflowRequest): Promise<RunRecord> {
@@ -71,6 +81,21 @@ export class CancelWorkflow {
     };
     try {
       await this.reconcileActiveAttempts(controlled);
+      if (workspaceMode(controlled.run) === "worktree")
+        try {
+          await this.coordinator().observeAll(
+            controlled.run,
+            () => this.timestamp(),
+            "run_canceled",
+          );
+        } catch (error) {
+          this.event(
+            controlled.run,
+            "worktree_observation_failed",
+            this.timestamp(),
+            { phase: "run_canceled", failure: workspaceFailure(error) },
+          );
+        }
       const completedAt = this.timestamp();
       controlled.run.status = "canceled";
       controlled.run.cancellation ??= {
@@ -123,7 +148,12 @@ export class CancelWorkflow {
     item: ActiveAttempt,
   ): Promise<void> {
     const { attempt } = item;
-    const observation = await this.recover(attempt, controlled.run.projectRoot);
+    const projectWorkspace = projectWorkspaceForTask(
+      controlled.run,
+      item.visit,
+      item.task,
+    );
+    const observation = await this.recover(attempt, projectWorkspace);
     if (observation && observation.status !== "not_found") {
       attempt.executor = observation.references;
       attempt.logs = {
@@ -159,11 +189,13 @@ export class CancelWorkflow {
 
     while (true) {
       throwIfDetached(controlled.signal);
-      await this.ensureCancellationRequested(controlled, item, references);
-      const status = await this.reconcile(
+      await this.ensureCancellationRequested(
+        controlled,
+        item,
         references,
-        controlled.run.projectRoot,
+        projectWorkspace,
       );
+      const status = await this.reconcile(references, projectWorkspace);
       this.recordObservation(controlled.run, item, status);
       await this.persist(controlled);
       if (status !== "active") {
@@ -178,6 +210,7 @@ export class CancelWorkflow {
     controlled: ControlledCancellation,
     item: ActiveAttempt,
     references: ExecutorReferences,
+    projectWorkspace: string,
   ): Promise<void> {
     const { attempt } = item;
     if (!attempt.reconciliation) {
@@ -201,7 +234,7 @@ export class CancelWorkflow {
     }
     if (attempt.reconciliation.cancellationCommandCompletedAt) return;
     try {
-      await this.executor.cancel(references, controlled.run.projectRoot);
+      await this.executor.cancel(references, projectWorkspace);
       const completedAt = this.timestamp();
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(
@@ -365,5 +398,9 @@ export class CancelWorkflow {
 
   private timestamp(): string {
     return this.now().toISOString();
+  }
+
+  private coordinator(): ProjectWorkspaceCoordinator {
+    return requireWorkspaceCoordinator(this.workspaceCoordinator);
   }
 }

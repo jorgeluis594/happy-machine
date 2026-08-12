@@ -36,6 +36,9 @@ export class RunPresenter {
       `Current: ${current ? `${current.stateId} visit ${current.number} (${current.type})` : "none"}`,
       `Last outcome: ${transition?.data.outcome === undefined ? "none" : this.value(transition.data.outcome)}`,
       `Last transition: ${transition?.data.target === undefined ? "none" : this.value(transition.data.target)}`,
+      ...(run.workspace?.mode === "worktree"
+        ? ["Managed worktrees:", ...this.worktrees(run)]
+        : []),
       "Tasks:",
       ...this.tasks(run, current),
       "Pending external events:",
@@ -46,6 +49,14 @@ export class RunPresenter {
       ...this.logs(run),
     ];
     return lines.join("\n");
+  }
+
+  private worktrees(run: RunRecord): string[] {
+    const lines = (run.workspace?.worktrees ?? []).map(
+      (worktree) =>
+        `  ${worktree.id}: role=${worktree.role}${worktree.provenance ? ` state=${worktree.provenance.stateId} visit=${worktree.provenance.visitNumber} task=${worktree.provenance.taskId}` : ""} path=${worktree.path} branch=${worktree.branch} starting_head=${worktree.startingHead} ending_head=${worktree.endingHead} dirty=${String(worktree.dirty)}`,
+    );
+    return lines.length ? lines : ["  none"];
   }
 
   history(result: ProjectHistoryResult | RunHistoryResult): string {

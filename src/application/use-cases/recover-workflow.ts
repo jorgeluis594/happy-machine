@@ -11,7 +11,9 @@ import type {
 import {
   calculateParallelOutcome,
   evaluateWorkflowDeadline,
+  projectWorkspaceForTask,
   terminalStatus,
+  workspaceMode,
 } from "../../domain/execution/run.js";
 import type {
   AgentWorkDefinition,
@@ -19,6 +21,7 @@ import type {
   NormalStateDefinition,
   ParallelStateDefinition,
 } from "../../ports/project-definitions.js";
+import { ProjectWorkspaceError } from "../../ports/project-workspaces.js";
 import type {
   ControllerSession,
   RunRepository,
@@ -39,6 +42,11 @@ import {
   detached,
   throwIfDetached,
 } from "../services/controller-detachment.js";
+import {
+  type ProjectWorkspaceCoordinator,
+  requireWorkspaceCoordinator,
+  workspaceFailure,
+} from "../services/project-workspace-coordinator.js";
 
 export interface RecoverWorkflowRequest {
   projectRoot: string;
@@ -72,6 +80,7 @@ export class RecoverWorkflow {
     private readonly executor: TaskExecutor,
     private readonly now: () => Date,
     private readonly wait: RecoveryWait,
+    private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
   ) {}
 
   async recover(request: RecoverWorkflowRequest): Promise<RunRecord> {
@@ -103,11 +112,28 @@ export class RecoverWorkflow {
       fencingToken: acquired.fencingToken,
       signal: request.signal,
     };
+    controlled.run.workspace ??= {
+      mode: recovered.definition.workspaceMode,
+      worktrees: [],
+    };
     try {
+      if (workspaceMode(controlled.run) === "worktree")
+        try {
+          await this.coordinator().prepareMain(
+            controlled.run,
+            () => this.timestamp(),
+            () => this.persist(controlled),
+          );
+        } catch (error) {
+          await this.failRun(controlled, workspaceFailure(error));
+          return controlled.run;
+        }
       controlled.run = await this.continue(controlled);
     } catch (error) {
       if (error instanceof RunCancellationRequestedError)
         controlled.run = error.run;
+      else if (error instanceof ProjectWorkspaceError)
+        await this.failRun(controlled, workspaceFailure(error));
       else throw error;
     }
     if (this.runs.releaseControl && controlled.run.controllerLease)
@@ -137,8 +163,13 @@ export class RecoverWorkflow {
         return controlled.run;
       }
       const visit = await this.currentVisit(controlled);
+      if (controlled.run.status !== "running") return controlled.run;
       if (visit.outcome !== undefined && visit.target !== undefined) {
         if (this.terminal(visit.target)) {
+          if (workspaceMode(controlled.run) === "worktree")
+            await this.coordinator().observeAll(controlled.run, () =>
+              this.timestamp(),
+            );
           controlled.run.terminalTarget = visit.target;
           controlled.run.status = terminalStatus(visit.target);
           await this.persist(controlled);
@@ -148,6 +179,27 @@ export class RecoverWorkflow {
         continue;
       }
       const state = controlled.definition.states[visit.stateId];
+      if (
+        visit.type === "parallel" &&
+        state.type === "parallel" &&
+        !visit.contextPath &&
+        workspaceMode(controlled.run) === "worktree"
+      )
+        try {
+          await this.coordinator().prepareParallel(
+            controlled.run,
+            visit,
+            () => this.timestamp(),
+            () => this.persist(controlled),
+          );
+        } catch (error) {
+          await this.failRun(controlled, workspaceFailure(error));
+          return controlled.run;
+        }
+      if (!visit.contextPath) {
+        visit.contextPath = await this.runs.prepareVisitContext(controlled.run);
+        await this.persist(controlled);
+      }
       if (visit.type === "agent" && state.type === "agent")
         await this.recoverNormal(controlled, visit, state);
       else if (visit.type === "parallel" && state.type === "parallel")
@@ -192,7 +244,10 @@ export class RecoverWorkflow {
               status: "queued",
               attempts: [],
               documents: [],
-              workspace: { mode: "direct", path: controlled.run.projectRoot },
+              workspace:
+                workspaceMode(controlled.run) === "worktree"
+                  ? { mode: "worktree", path: "" }
+                  : { mode: "direct", path: controlled.run.projectRoot },
             })),
           };
     controlled.run.visits.push(visit);
@@ -208,6 +263,21 @@ export class RecoverWorkflow {
         taskId: task.id,
         recovered: true,
       });
+    if (
+      visit.type === "parallel" &&
+      workspaceMode(controlled.run) === "worktree"
+    )
+      try {
+        await this.coordinator().prepareParallel(
+          controlled.run,
+          visit,
+          () => this.timestamp(),
+          () => this.persist(controlled),
+        );
+      } catch (error) {
+        await this.failRun(controlled, workspaceFailure(error));
+        return visit;
+      }
     visit.contextPath = await this.runs.prepareVisitContext(controlled.run);
     await this.persist(controlled);
     return visit;
@@ -244,6 +314,14 @@ export class RecoverWorkflow {
     recovered.attempt.documents = documents;
     if (recovered.result.error !== undefined)
       recovered.attempt.error = recovered.result.error;
+    if (workspaceMode(controlled.run) === "worktree")
+      await this.coordinator().observeTask(
+        controlled.run,
+        visit,
+        visit.task,
+        () => this.timestamp(),
+        "recovered_task_settled",
+      );
     this.event(controlled.run, "attempt_succeeded", {
       stateId: visit.stateId,
       visitNumber: visit.number,
@@ -325,6 +403,14 @@ export class RecoverWorkflow {
           recovered: true,
         });
       }
+      if (workspaceMode(controlled.run) === "worktree")
+        await this.coordinator().observeTask(
+          controlled.run,
+          visit,
+          task,
+          () => this.timestamp(),
+          "recovered_task_settled",
+        );
       await this.persist(controlled);
     }
     const outcome = calculateParallelOutcome(visit.tasks);
@@ -362,6 +448,11 @@ export class RecoverWorkflow {
     allowedOutcomes: readonly string[],
   ): Promise<RecoveredTaskResult> {
     throwIfDetached(controlled.signal);
+    const projectWorkspace = projectWorkspaceForTask(
+      controlled.run,
+      visit,
+      task,
+    );
     let attempt = task.attempts.at(-1);
     if (attempt && !attempt.deadlineAt) {
       const startedEvent = controlled.run.events.find(
@@ -424,8 +515,12 @@ export class RecoverWorkflow {
       attempt.deadlineAt &&
       Date.parse(this.timestamp()) >= Date.parse(attempt.deadlineAt)
     )
-      return this.expireAttempt(controlled, attempt);
-    const observation = await this.observe(controlled, attempt);
+      return this.expireAttempt(controlled, attempt, projectWorkspace);
+    const observation = await this.observe(
+      controlled,
+      attempt,
+      projectWorkspace,
+    );
     for (const externalEvent of observation.status === "not_found"
       ? []
       : (observation.events ?? []))
@@ -440,6 +535,7 @@ export class RecoverWorkflow {
         attempt,
         work,
         allowedOutcomes,
+        projectWorkspace,
       );
     if (
       observation.status === "start_unknown" ||
@@ -470,7 +566,12 @@ export class RecoverWorkflow {
       observation.status === "active" ? "running" : attempt.status;
     await this.persist(controlled);
     if (observation.status === "active") {
-      const settled = await this.waitForExisting(controlled, attempt, work);
+      const settled = await this.waitForExisting(
+        controlled,
+        attempt,
+        work,
+        projectWorkspace,
+      );
       if (settled.status !== "completed") return settled;
     }
     const result = await this.runs.readResult(
@@ -488,8 +589,9 @@ export class RecoverWorkflow {
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
+    projectWorkspace: string,
   ): Promise<RecoveredTaskResult> {
-    const launch = this.launch(controlled, attempt, work);
+    const launch = this.launch(controlled, attempt, work, projectWorkspace);
     let execution: TaskExecution;
     try {
       const launched = this.executor.execute(launch, async (references) => {
@@ -526,6 +628,7 @@ export class RecoverWorkflow {
     controlled: ControlledRun,
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
+    projectWorkspace: string,
   ): Promise<RecoveredTaskResult | { status: "completed" }> {
     while (true) {
       const remaining = Math.min(
@@ -543,7 +646,7 @@ export class RecoverWorkflow {
             attempt,
           };
         }
-        return this.expireAttempt(controlled, attempt);
+        return this.expireAttempt(controlled, attempt, projectWorkspace);
       }
       const leaseHeartbeatMs = Math.max(
         1,
@@ -552,7 +655,11 @@ export class RecoverWorkflow {
       const delay = Math.min(100, leaseHeartbeatMs, remaining);
       await this.wait(delay);
       throwIfDetached(controlled.signal);
-      const observation = await this.observe(controlled, attempt);
+      const observation = await this.observe(
+        controlled,
+        attempt,
+        projectWorkspace,
+      );
       for (const externalEvent of observation.status === "not_found"
         ? []
         : (observation.events ?? []))
@@ -589,13 +696,14 @@ export class RecoverWorkflow {
   private async observe(
     controlled: ControlledRun,
     attempt: AttemptRecord,
+    projectWorkspace: string,
   ): Promise<RecoveryObservation> {
     if (!this.executor.recover)
       throw new Error("Configured task executor does not support recovery");
     return this.executor.recover(
       attempt.id,
       attempt.executor,
-      controlled.run.projectRoot,
+      projectWorkspace,
     );
   }
 
@@ -645,6 +753,7 @@ export class RecoverWorkflow {
   private async expireAttempt(
     controlled: ControlledRun,
     attempt: AttemptRecord,
+    projectWorkspace: string,
   ): Promise<RecoveredTaskResult> {
     attempt.status = "timing_out";
     const failure = {
@@ -666,7 +775,7 @@ export class RecoverWorkflow {
     };
     await this.persist(controlled);
     try {
-      await this.executor.cancel(attempt.executor, controlled.run.projectRoot);
+      await this.executor.cancel(attempt.executor, projectWorkspace);
       const completedAt = this.timestamp();
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(controlled.run, "attempt_cancellation_command_completed", {
@@ -680,7 +789,7 @@ export class RecoverWorkflow {
     }
     const status = await this.executor.reconcile(
       attempt.executor,
-      controlled.run.projectRoot,
+      projectWorkspace,
     );
     const observedAt = this.timestamp();
     attempt.reconciliation.observations.push({ status, at: observedAt });
@@ -711,18 +820,20 @@ export class RecoverWorkflow {
           attempt.status === "failed"
         )
           continue;
+        const projectWorkspace = projectWorkspaceForTask(
+          controlled.run,
+          visit,
+          task,
+        );
         try {
-          await this.executor.cancel(
-            attempt.executor,
-            controlled.run.projectRoot,
-          );
+          await this.executor.cancel(attempt.executor, projectWorkspace);
         } catch {
           // The run still ends for the expired global deadline.
         }
         try {
           attempt.externalStatus = await this.executor.reconcile(
             attempt.executor,
-            controlled.run.projectRoot,
+            projectWorkspace,
           );
         } catch {
           attempt.externalStatus = "unknown";
@@ -757,8 +868,17 @@ export class RecoverWorkflow {
 
   private async failRun(
     controlled: ControlledRun,
-    failure: AttemptFailure,
+    requestedFailure: AttemptFailure,
   ): Promise<void> {
+    let failure = requestedFailure;
+    try {
+      if (workspaceMode(controlled.run) === "worktree")
+        await this.coordinator().observeAll(controlled.run, () =>
+          this.timestamp(),
+        );
+    } catch (error) {
+      failure = workspaceFailure(error);
+    }
     controlled.run.status = "failed";
     controlled.run.failure = failure;
     this.event(controlled.run, "run_terminal", { status: "failed", failure });
@@ -849,10 +969,11 @@ export class RecoverWorkflow {
     controlled: ControlledRun,
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
+    projectWorkspace: string,
   ): TaskLaunch {
     return {
       identity: attempt.id,
-      projectWorkspace: controlled.run.projectRoot,
+      projectWorkspace,
       contextPath: attempt.contextPath,
       outputDirectory: attempt.outputDirectory,
       resultPath: attempt.resultPath,
@@ -867,6 +988,10 @@ export class RecoverWorkflow {
 
   private terminal(target: string): target is "$succeeded" | "$failed" {
     return target === "$succeeded" || target === "$failed";
+  }
+
+  private coordinator(): ProjectWorkspaceCoordinator {
+    return requireWorkspaceCoordinator(this.workspaceCoordinator);
   }
 
   private event(

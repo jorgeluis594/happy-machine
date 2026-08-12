@@ -14,7 +14,9 @@ import {
   evaluateStateVisitLimit,
   evaluateTransitionLimit,
   evaluateWorkflowDeadline,
+  projectWorkspaceForTask,
   terminalStatus,
+  workspaceMode,
 } from "../../domain/execution/run.js";
 import type {
   AgentWorkDefinition,
@@ -38,6 +40,11 @@ import {
   detached,
   throwIfDetached,
 } from "../services/controller-detachment.js";
+import {
+  type ProjectWorkspaceCoordinator,
+  requireWorkspaceCoordinator,
+  workspaceFailure,
+} from "../services/project-workspace-coordinator.js";
 
 export interface ExecuteWorkflowRequest {
   workflowPath: string;
@@ -73,6 +80,7 @@ export class ExecuteWorkflow {
     private readonly now: () => Date,
     private readonly makeId: () => string,
     private readonly wait: Wait,
+    private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
   ) {}
 
   async execute(request: ExecuteWorkflowRequest): Promise<RunRecord> {
@@ -95,6 +103,7 @@ export class ExecuteWorkflow {
       workflowId: definition.workflowId,
       workflowPath: definition.workflowPath,
       projectRoot: definition.projectRoot,
+      workspace: { mode: definition.workspaceMode, worktrees: [] },
       definitionSnapshot: createdSnapshot.record,
       status: "running",
       controllerStatus: "detached",
@@ -114,6 +123,27 @@ export class ExecuteWorkflow {
     });
     await this.runs.save(run);
     request.onRunAllocated(run.id);
+    if (workspaceMode(run) === "worktree") {
+      try {
+        await this.coordinator().prepareMain(run, timestamp, () =>
+          this.runs.save(run),
+        );
+      } catch (error) {
+        const failure = workspaceFailure(error);
+        run.status = "failed";
+        run.failure = failure;
+        this.event(run, "workspace_preparation_failed", timestamp(), {
+          phase: "main",
+          failure,
+        });
+        this.event(run, "run_terminal", timestamp(), {
+          status: "failed",
+          failure,
+        });
+        await this.runs.save(run);
+        return run;
+      }
+    }
     let controllerId: string | undefined;
     let fencingToken: number | undefined;
     if (this.runs.acquireControl) {
@@ -171,7 +201,10 @@ export class ExecuteWorkflow {
                   status: "queued",
                   attempts: [],
                   documents: [],
-                  workspace: { mode: "direct", path: definition.projectRoot },
+                  workspace:
+                    workspaceMode(run) === "worktree"
+                      ? { mode: "worktree", path: "" }
+                      : { mode: "direct", path: definition.projectRoot },
                 })),
               };
         run.visits.push(visit);
@@ -186,6 +219,18 @@ export class ExecuteWorkflow {
             visitNumber,
             taskId: task.id,
           });
+        if (visit.type === "parallel" && workspaceMode(run) === "worktree")
+          try {
+            await this.coordinator().prepareParallel(
+              run,
+              visit,
+              timestamp,
+              () => this.runs.save(run),
+            );
+          } catch (error) {
+            await this.terminateRun(run, workspaceFailure(error), timestamp);
+            return run;
+          }
         visit.contextPath = await this.runs.prepareVisitContext(run);
         await this.runs.save(run);
 
@@ -195,7 +240,6 @@ export class ExecuteWorkflow {
                 run,
                 visit as NormalVisitRecord,
                 state,
-                definition.projectRoot,
                 timestamp,
                 request.signal,
               )
@@ -203,7 +247,6 @@ export class ExecuteWorkflow {
                 run,
                 visit as ParallelVisitRecord,
                 state,
-                definition.projectRoot,
                 timestamp,
                 request.signal,
               );
@@ -280,6 +323,8 @@ export class ExecuteWorkflow {
         });
         committed.transitionCount += 1;
         if (target === "$succeeded" || target === "$failed") {
+          if (workspaceMode(committed) === "worktree")
+            await this.coordinator().observeAll(committed, timestamp);
           committed.terminalTarget = target;
           committed.status = terminalStatus(target);
           this.event(committed, "run_terminal", timestamp(), {
@@ -315,7 +360,13 @@ export class ExecuteWorkflow {
         throw error;
       }
       run.status = "failed";
-      const failure = this.failure(error);
+      let failure = this.failure(error);
+      try {
+        if (workspaceMode(run) === "worktree")
+          await this.coordinator().observeAll(run, timestamp);
+      } catch (observationError) {
+        failure = workspaceFailure(observationError);
+      }
       run.failure = failure;
       this.event(run, "run_terminal", timestamp(), {
         status: "failed",
@@ -330,7 +381,6 @@ export class ExecuteWorkflow {
     run: RunRecord,
     visit: NormalVisitRecord,
     state: NormalStateDefinition,
-    projectWorkspace: string,
     timestamp: () => string,
     signal?: AbortSignal,
   ): Promise<
@@ -351,10 +401,12 @@ export class ExecuteWorkflow {
       state,
       Object.keys(state.outcomes),
       false,
-      projectWorkspace,
+      projectWorkspaceForTask(run, visit, visit.task),
       timestamp,
       signal,
     );
+    if (workspaceMode(run) === "worktree")
+      await this.coordinator().observeTask(run, visit, visit.task, timestamp);
     if (result.kind !== "completed") return result;
     const target = state.outcomes[result.outcome];
     if (!target)
@@ -369,7 +421,6 @@ export class ExecuteWorkflow {
     run: RunRecord,
     visit: ParallelVisitRecord,
     state: ParallelStateDefinition,
-    projectWorkspace: string,
     timestamp: () => string,
     signal?: AbortSignal,
   ): Promise<
@@ -426,7 +477,7 @@ export class ExecuteWorkflow {
               definition,
               ["succeeded", "failed"],
               true,
-              projectWorkspace,
+              projectWorkspaceForTask(run, visit, task),
               timestamp,
               signal,
             );
@@ -476,6 +527,8 @@ export class ExecuteWorkflow {
               finalError: failure,
             });
           }
+          if (workspaceMode(run) === "worktree")
+            await this.coordinator().observeTask(run, visit, task, timestamp);
           await this.runs.save(run);
         }
       },
@@ -1109,9 +1162,16 @@ export class ExecuteWorkflow {
 
   private async terminateRun(
     run: RunRecord,
-    failure: AttemptFailure,
+    requestedFailure: AttemptFailure,
     timestamp: () => string,
   ): Promise<void> {
+    let failure = requestedFailure;
+    try {
+      if (workspaceMode(run) === "worktree")
+        await this.coordinator().observeAll(run, timestamp);
+    } catch (error) {
+      failure = workspaceFailure(error);
+    }
     run.status = "failed";
     run.failure = failure;
     this.event(run, "run_terminal", timestamp(), {
@@ -1130,6 +1190,10 @@ export class ExecuteWorkflow {
       code: "engine_failure",
       message: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  private coordinator(): ProjectWorkspaceCoordinator {
+    return requireWorkspaceCoordinator(this.workspaceCoordinator);
   }
 
   private recordExternalEvent(

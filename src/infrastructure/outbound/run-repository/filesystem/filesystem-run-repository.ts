@@ -510,6 +510,24 @@ export class FilesystemRunRepository implements RunRepository {
       `- SHA-256: \`${document.sha256}\``,
       "",
     ]);
+    const worktreeIndex = run.workspace?.worktrees.flatMap((worktree) => [
+      `### ${worktree.id}`,
+      "",
+      `- Role: ${worktree.role}`,
+      ...(worktree.provenance
+        ? [
+            `- State: ${JSON.stringify(worktree.provenance.stateId)}`,
+            `- Visit: ${worktree.provenance.visitNumber}`,
+            `- Task: ${JSON.stringify(worktree.provenance.taskId)}`,
+          ]
+        : []),
+      `- Path: ${JSON.stringify(worktree.path)}`,
+      `- Branch: ${JSON.stringify(worktree.branch)}`,
+      `- Starting HEAD: \`${worktree.startingHead}\``,
+      `- Ending HEAD: \`${worktree.endingHead}\``,
+      `- Dirty: ${String(worktree.dirty)}`,
+      "",
+    ]);
     const parallelIndex = run.visits.flatMap((candidate) =>
       candidate.type !== "parallel" || candidate.outcome === undefined
         ? []
@@ -554,6 +572,15 @@ export class FilesystemRunRepository implements RunRepository {
       ...(documentIndex.length
         ? documentIndex
         : ["No workflow documents have been committed yet.", ""]),
+      "## Project workspace",
+      "",
+      `Mode: ${run.workspace?.mode ?? "direct"}`,
+      "",
+      ...(run.workspace?.mode === "worktree"
+        ? worktreeIndex?.length
+          ? worktreeIndex
+          : ["No managed worktrees have been registered yet.", ""]
+        : [`Original project path: ${JSON.stringify(run.projectRoot)}`, ""]),
       "## Completed parallel states",
       "",
       ...(parallelIndex.length
