@@ -1,4 +1,5 @@
 import type { ExecuteWorkflow } from "../../../application/use-cases/execute-workflow.js";
+import type { CancelWorkflow } from "../../../application/use-cases/cancel-workflow.js";
 import type { RecoverWorkflow } from "../../../application/use-cases/recover-workflow.js";
 import { ControllerDetachedError } from "../../../application/services/controller-detachment.js";
 import type { InspectRuns } from "../../../application/use-cases/inspect-runs.js";
@@ -13,6 +14,7 @@ export class Cli {
   constructor(
     private readonly executeWorkflow: ExecuteWorkflow,
     private readonly recoverWorkflow: RecoverWorkflow,
+    private readonly cancelWorkflow: CancelWorkflow,
     private readonly inspectRuns: InspectRuns,
     private readonly streams: CliStreams,
     private readonly presenter = new RunPresenter(),
@@ -26,7 +28,7 @@ export class Cli {
     const request = this.request(argv);
     if (!request) {
       this.streams.stderr(
-        "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
+        "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine cancel RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
       );
       return 1;
     }
@@ -56,12 +58,19 @@ export class Cli {
               onRunAllocated: (id) => this.streams.stdout(id),
               signal,
             })
-          : await this.recoverWorkflow.recover({
-              projectRoot: currentDirectory,
-              runId: request.runId,
-              controllerId: `${request.runId}:resume:${process.pid}`,
-              signal,
-            });
+          : request.command === "resume"
+            ? await this.recoverWorkflow.recover({
+                projectRoot: currentDirectory,
+                runId: request.runId,
+                controllerId: `${request.runId}:resume:${process.pid}`,
+                signal,
+              })
+            : await this.cancelWorkflow.cancel({
+                currentDirectory,
+                runId: request.runId,
+                controllerId: `${request.runId}:cancel:${process.pid}`,
+                signal,
+              });
       this.streams.stdout(`Run ${run.id}: ${run.status}`);
       return run.status === "succeeded" ? 0 : run.status === "canceled" ? 2 : 1;
     } catch (error) {
@@ -78,11 +87,14 @@ export class Cli {
   ):
     | { command: "execute"; workflowPath: string; inputPaths: string[] }
     | { command: "resume"; runId: string }
+    | { command: "cancel"; runId: string }
     | { command: "status"; runId: string }
     | { command: "history"; runId?: string }
     | undefined {
     if (argv[0] === "resume" && argv.length === 2 && argv[1])
       return { command: "resume", runId: argv[1] };
+    if (argv[0] === "cancel" && argv.length === 2 && argv[1])
+      return { command: "cancel", runId: argv[1] };
     if (argv[0] === "status" && argv.length === 2 && argv[1])
       return { command: "status", runId: argv[1] };
     if (argv[0] === "history" && argv.length <= 2)

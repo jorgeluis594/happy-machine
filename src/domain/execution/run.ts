@@ -1,7 +1,8 @@
-export type RunStatus = "running" | "succeeded" | "failed" | "canceled";
+export type RunStatus =
+  "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type ControllerStatus = "attached" | "detached";
 export type AttemptStatus =
-  "launching" | "running" | "timing_out" | "succeeded" | "failed";
+  "launching" | "running" | "timing_out" | "succeeded" | "failed" | "canceled";
 
 export interface AttemptFailure {
   code: string;
@@ -12,6 +13,7 @@ export type ExternalExecutionStatus = "active" | "stopped" | "unknown";
 
 export interface AttemptReconciliation {
   cancellationRequestedAt: string;
+  cancellationCommandCompletedAt?: string;
   observations: Array<{ status: ExternalExecutionStatus; at: string }>;
   confirmedStoppedAt?: string;
 }
@@ -74,7 +76,8 @@ export interface NormalVisitRecord {
   target?: string;
 }
 
-export type ParallelTaskStatus = "queued" | "running" | "succeeded" | "failed";
+export type ParallelTaskStatus =
+  "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export interface ParallelTaskRecord extends TaskRecord {
   status: ParallelTaskStatus;
@@ -140,6 +143,11 @@ export interface DefinitionSnapshotRecord {
   inputs: SnapshotInputRecord[];
 }
 
+export interface RunCancellationRecord {
+  requestedAt: string;
+  completedAt?: string;
+}
+
 export interface RunRecord {
   id: string;
   workflowId: string;
@@ -152,6 +160,7 @@ export interface RunRecord {
   deadlineAt: string;
   transitionCount: number;
   controllerLease?: ControllerLease;
+  cancellation?: RunCancellationRecord;
   terminalTarget?: "$succeeded" | "$failed";
   failure?: AttemptFailure;
   visits: VisitRecord[];
@@ -294,4 +303,8 @@ export function terminalStatus(target: string): RunStatus {
   if (target === "$succeeded") return "succeeded";
   if (target === "$failed") return "failed";
   throw new Error(`Unsupported transition target: ${target}`);
+}
+
+export function runIsTerminal(status: RunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "canceled";
 }

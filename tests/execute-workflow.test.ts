@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ExecuteWorkflow } from "../src/application/use-cases/execute-workflow.js";
+import { CancelWorkflow } from "../src/application/use-cases/cancel-workflow.js";
 import { RecoverWorkflow } from "../src/application/use-cases/recover-workflow.js";
 import { InspectRuns } from "../src/application/use-cases/inspect-runs.js";
 import type {
@@ -157,6 +158,7 @@ function cli(projectRoot?: string) {
     cli: new Cli(
       useCase,
       new RecoverWorkflow(repository, executor, now, () => Promise.resolve()),
+      new CancelWorkflow(repository, executor, now, () => Promise.resolve()),
       new InspectRuns(repository, now),
       {
         stdout: (line) => {
@@ -1025,7 +1027,7 @@ describe("happy-machine execute", () => {
     const app = cli();
     expect(await app.cli.run(argv, "/project")).toBe(1);
     expect(app.stderr).toEqual([
-      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
+      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine cancel RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
     ]);
   });
 

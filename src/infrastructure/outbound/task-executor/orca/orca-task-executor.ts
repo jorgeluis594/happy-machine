@@ -269,7 +269,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       projectWorkspace,
     );
     const state = this.findString(result.json, ["workerState", "state"]);
-    if (["failed", "succeeded", "stopped"].includes(state ?? ""))
+    if (["failed", "succeeded", "stopped", "abandoned"].includes(state ?? ""))
       return "stopped";
     if (["starting", "ready", "stopping"].includes(state ?? ""))
       return "active";

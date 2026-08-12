@@ -20,10 +20,14 @@ import type {
   ParallelStateDefinition,
 } from "../../ports/project-definitions.js";
 import type {
+  ControllerSession,
   RunRepository,
   ValidatedNormalResult,
 } from "../../ports/run-repository.js";
-import { RunNotResumableError } from "../../ports/run-repository.js";
+import {
+  RunCancellationRequestedError,
+  RunNotResumableError,
+} from "../../ports/run-repository.js";
 import type {
   RecoveryObservation,
   TaskExecution,
@@ -80,12 +84,18 @@ export class RecoverWorkflow {
       throw new RunNotResumableError(
         `Run ${request.runId} is already ${recovered.run.status}`,
       );
-    const acquired = await this.runs.acquireControl(
-      request.projectRoot,
-      request.runId,
-      request.controllerId,
-      this.timestamp(),
-    );
+    let acquired: ControllerSession;
+    try {
+      acquired = await this.runs.acquireControl(
+        request.projectRoot,
+        request.runId,
+        request.controllerId,
+        this.timestamp(),
+      );
+    } catch (error) {
+      if (error instanceof RunCancellationRequestedError) return error.run;
+      throw error;
+    }
     const controlled: ControlledRun = {
       run: acquired.run,
       definition: recovered.definition,
@@ -94,16 +104,26 @@ export class RecoverWorkflow {
       signal: request.signal,
     };
     try {
-      return await this.continue(controlled);
-    } finally {
-      if (this.runs.releaseControl && controlled.run.controllerLease)
+      controlled.run = await this.continue(controlled);
+    } catch (error) {
+      if (error instanceof RunCancellationRequestedError)
+        controlled.run = error.run;
+      else throw error;
+    }
+    if (this.runs.releaseControl && controlled.run.controllerLease)
+      try {
         controlled.run = await this.runs.releaseControl(
           controlled.run,
           controlled.controllerId,
           controlled.fencingToken,
           this.timestamp(),
         );
-    }
+      } catch (error) {
+        if (error instanceof RunCancellationRequestedError)
+          controlled.run = error.run;
+        else throw error;
+      }
+    return controlled.run;
   }
 
   private async continue(controlled: ControlledRun): Promise<RunRecord> {
@@ -647,6 +667,14 @@ export class RecoverWorkflow {
     await this.persist(controlled);
     try {
       await this.executor.cancel(attempt.executor, controlled.run.projectRoot);
+      const completedAt = this.timestamp();
+      attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
+      this.event(controlled.run, "attempt_cancellation_command_completed", {
+        identity: attempt.id,
+        dispatchId: attempt.executor.dispatchId,
+        cause: "attempt_timeout",
+      });
+      await this.persist(controlled);
     } catch {
       // Reconciliation below is authoritative.
     }

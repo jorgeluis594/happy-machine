@@ -23,7 +23,10 @@ import type {
   ProjectDefinitions,
 } from "../../ports/project-definitions.js";
 import type { RunRepository } from "../../ports/run-repository.js";
-import { ResultValidationError } from "../../ports/run-repository.js";
+import {
+  ResultValidationError,
+  RunCancellationRequestedError,
+} from "../../ports/run-repository.js";
 import type {
   TaskExecution,
   TaskExecutor,
@@ -115,14 +118,19 @@ export class ExecuteWorkflow {
     let fencingToken: number | undefined;
     if (this.runs.acquireControl) {
       controllerId = `${run.id}:initial-controller`;
-      const session = await this.runs.acquireControl(
-        run.projectRoot,
-        run.id,
-        controllerId,
-        timestamp(),
-      );
-      run = session.run;
-      fencingToken = session.fencingToken;
+      try {
+        const session = await this.runs.acquireControl(
+          run.projectRoot,
+          run.id,
+          controllerId,
+          timestamp(),
+        );
+        run = session.run;
+        fencingToken = session.fencingToken;
+      } catch (error) {
+        if (error instanceof RunCancellationRequestedError) return error.run;
+        throw error;
+      }
     }
 
     try {
@@ -285,18 +293,25 @@ export class ExecuteWorkflow {
         stateId = target;
       }
     } catch (error) {
+      if (error instanceof RunCancellationRequestedError) return error.run;
       if (error instanceof ControllerDetachedError) {
         if (
           controllerId &&
           fencingToken !== undefined &&
           this.runs.releaseControl
         )
-          await this.runs.releaseControl(
-            run,
-            controllerId,
-            fencingToken,
-            timestamp(),
-          );
+          try {
+            await this.runs.releaseControl(
+              run,
+              controllerId,
+              fencingToken,
+              timestamp(),
+            );
+          } catch (releaseError) {
+            if (releaseError instanceof RunCancellationRequestedError)
+              return releaseError.run;
+            throw releaseError;
+          }
         throw error;
       }
       run.status = "failed";
@@ -822,6 +837,14 @@ export class ExecuteWorkflow {
     await this.runs.save(run);
     try {
       await this.executor.cancel(references, launch.projectWorkspace);
+      const completedAt = timestamp();
+      attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
+      this.event(run, "attempt_cancellation_command_completed", completedAt, {
+        identity: attempt.id,
+        dispatchId: references.dispatchId,
+        cause,
+      });
+      await this.runs.save(run);
     } catch (error) {
       // A failed cancellation request is reconciled through authoritative status.
       this.event(run, "attempt_cancellation_request_failed", timestamp(), {

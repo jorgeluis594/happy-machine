@@ -26,14 +26,18 @@ import {
   acquireControllerLease,
   leaseIsValid,
   renewControllerLease,
+  runIsTerminal,
 } from "../../../../domain/execution/run.js";
 import {
   ControllerLeaseLostError,
   ResultValidationError,
   RunAlreadyControlledError,
+  RunCancellationRequestedError,
+  RunNotResumableError,
 } from "../../../../ports/run-repository.js";
 import type {
   AttemptPaths,
+  CancellationRequestResult,
   ControllerSession,
   RecoveredRun,
   RunRepository,
@@ -211,6 +215,15 @@ export class FilesystemRunRepository implements RunRepository {
   ): Promise<ControllerSession> {
     return this.withRunLock(projectRoot, runId, async () => {
       const recovered = await this.load(projectRoot, runId);
+      if (
+        recovered.run.status === "canceling" ||
+        recovered.run.status === "canceled"
+      )
+        throw new RunCancellationRequestedError(recovered.run);
+      if (recovered.run.status !== "running")
+        throw new RunNotResumableError(
+          `Run ${runId} is already ${recovered.run.status}`,
+        );
       const current = recovered.run.controllerLease;
       if (
         leaseIsValid(current, observedAt) &&
@@ -238,6 +251,60 @@ export class FilesystemRunRepository implements RunRepository {
     });
   }
 
+  async requestCancellation(
+    projectRoot: string,
+    runId: string,
+    controllerId: string,
+    requestedAt: string,
+  ): Promise<CancellationRequestResult> {
+    return this.withRunLock(projectRoot, runId, async () => {
+      const recovered = await this.load(projectRoot, runId);
+      if (runIsTerminal(recovered.run.status))
+        return { accepted: false, run: recovered.run };
+
+      const previousStatus = recovered.run.status;
+      const previousLease = recovered.run.controllerLease;
+      const lease = acquireControllerLease(
+        previousLease,
+        controllerId,
+        recovered.definition.policies.controllerLeaseMs,
+        requestedAt,
+      );
+      recovered.run.controllerLease = lease;
+      recovered.run.controllerStatus = "attached";
+      if (previousStatus === "running") {
+        recovered.run.status = "canceling";
+        recovered.run.cancellation = { requestedAt };
+        recovered.run.events.push({
+          sequence: recovered.run.events.length + 1,
+          type: "run_cancellation_requested",
+          at: requestedAt,
+          data: { previousStatus },
+        });
+        recovered.run.events.push({
+          sequence: recovered.run.events.length + 1,
+          type: "run_status_changed",
+          at: requestedAt,
+          data: { from: previousStatus, to: "canceling" },
+        });
+      }
+      this.appendLeaseEvent(
+        recovered.run,
+        previousLease
+          ? "controller_lease_recovered"
+          : "controller_lease_acquired",
+        requestedAt,
+        lease,
+      );
+      await this.writeRun(recovered.run);
+      return {
+        accepted: true,
+        run: recovered.run,
+        fencingToken: lease.fencingToken,
+      };
+    });
+  }
+
   async renewControl(
     run: RunRecord,
     controllerId: string,
@@ -246,11 +313,7 @@ export class FilesystemRunRepository implements RunRepository {
   ): Promise<ControllerSession> {
     return this.withRunLock(run.projectRoot, run.id, async () => {
       const current = (await this.load(run.projectRoot, run.id)).run;
-      const lease = this.requireLease(
-        current.controllerLease,
-        controllerId,
-        fencingToken,
-      );
+      const lease = this.requireLease(current, controllerId, fencingToken);
       if (!leaseIsValid(lease, observedAt))
         throw new ControllerLeaseLostError(
           "Controller lease expired before it could be renewed",
@@ -274,7 +337,7 @@ export class FilesystemRunRepository implements RunRepository {
   ): Promise<void> {
     await this.withRunLock(run.projectRoot, run.id, async () => {
       const current = (await this.load(run.projectRoot, run.id)).run;
-      this.requireLease(current.controllerLease, controllerId, fencingToken);
+      this.requireLease(current, controllerId, fencingToken);
       run.controllerLease = current.controllerLease;
       await this.writeRun(run);
     });
@@ -288,11 +351,7 @@ export class FilesystemRunRepository implements RunRepository {
   ): Promise<RunRecord> {
     return this.withRunLock(run.projectRoot, run.id, async () => {
       const current = (await this.load(run.projectRoot, run.id)).run;
-      const lease = this.requireLease(
-        current.controllerLease,
-        controllerId,
-        fencingToken,
-      );
+      const lease = this.requireLease(current, controllerId, fencingToken);
       current.controllerLease = undefined;
       current.controllerStatus = "detached";
       this.appendLeaseEvent(
@@ -385,16 +444,20 @@ export class FilesystemRunRepository implements RunRepository {
   }
 
   private requireLease(
-    lease: ControllerLease | undefined,
+    run: RunRecord,
     controllerId: string,
     fencingToken: number,
   ): ControllerLease {
+    const lease = run.controllerLease;
     if (
       !lease ||
       lease.controllerId !== controllerId ||
       lease.fencingToken !== fencingToken
-    )
+    ) {
+      if (run.status === "canceling" || run.status === "canceled")
+        throw new RunCancellationRequestedError(run);
       throw new ControllerLeaseLostError("Controller fencing token is stale");
+    }
     return lease;
   }
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import { ExecuteWorkflow } from "./application/use-cases/execute-workflow.js";
+import { CancelWorkflow } from "./application/use-cases/cancel-workflow.js";
 import { RecoverWorkflow } from "./application/use-cases/recover-workflow.js";
 import { InspectRuns } from "./application/use-cases/inspect-runs.js";
 import { Cli } from "./infrastructure/inbound/cli/cli.js";
@@ -29,7 +30,8 @@ export function createProcessEntryPoint(): (
   const recover = new RecoverWorkflow(runs, executor, now, (milliseconds) =>
     sleeper(milliseconds),
   );
-  const cli = new Cli(useCase, recover, new InspectRuns(runs, now), {
+  const cancel = new CancelWorkflow(runs, executor, now, sleeper);
+  const cli = new Cli(useCase, recover, cancel, new InspectRuns(runs, now), {
     stdout: (message) => process.stdout.write(`${message}\n`),
     stderr: (message) => process.stderr.write(`${message}\n`),
   });

@@ -87,7 +87,7 @@ describe("Orca timeout reconciliation adapter", () => {
     ["succeeded", "stopped"],
     ["start_unknown", "unknown"],
     ["stop_unknown", "unknown"],
-    ["abandoned", "unknown"],
+    ["abandoned", "stopped"],
   ] as const)("maps Orca worker state %s to %s", async (state, expected) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-state-"));
     await writeFile(path.join(root, ".fake-worker-state"), state);

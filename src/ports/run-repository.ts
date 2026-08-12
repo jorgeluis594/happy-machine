@@ -21,6 +21,10 @@ export interface ControllerSession {
   fencingToken: number;
 }
 
+export type CancellationRequestResult =
+  | { accepted: false; run: RunRecord }
+  | { accepted: true; run: RunRecord; fencingToken: number };
+
 export class RunAlreadyControlledError extends Error {
   readonly code = "run_already_controlled";
 }
@@ -31,6 +35,14 @@ export class ControllerLeaseLostError extends Error {
 
 export class RunNotResumableError extends Error {
   readonly code = "run_not_resumable";
+}
+
+export class RunCancellationRequestedError extends Error {
+  readonly code = "run_cancellation_requested";
+
+  constructor(readonly run: RunRecord) {
+    super(`Run ${run.id} is ${run.status}`);
+  }
 }
 
 export interface AttemptPaths {
@@ -83,6 +95,12 @@ export interface RunRepository {
     controllerId: string,
     observedAt: string,
   ): Promise<ControllerSession>;
+  requestCancellation?(
+    projectRoot: string,
+    runId: string,
+    controllerId: string,
+    requestedAt: string,
+  ): Promise<CancellationRequestResult>;
   renewControl?(
     run: RunRecord,
     controllerId: string,

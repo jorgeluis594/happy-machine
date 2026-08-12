@@ -30,6 +30,7 @@ export class RunPresenter {
       `Snapshot: ${run.definitionSnapshot.identity}`,
       `Status: ${this.visibleStatus(result)}`,
       `Terminal reason: ${this.terminalReason(run)}`,
+      `Cancellation: ${this.cancellation(run)}`,
       `Controller: ${result.leaseValid ? "attached" : "detached"}`,
       `Lease: ${this.lease(result)}`,
       `Current: ${current ? `${current.stateId} visit ${current.number} (${current.type})` : "none"}`,
@@ -39,6 +40,8 @@ export class RunPresenter {
       ...this.tasks(run, current),
       "Pending external events:",
       ...this.pendingEvents(run),
+      "Cancellation executions:",
+      ...this.cancellationExecutions(run),
       "Logs:",
       ...this.logs(run),
     ];
@@ -84,10 +87,7 @@ export class RunPresenter {
     return tasks.flatMap(({ task, status }) => [
       `  ${status}: ${task.id}${"workspace" in task ? ` workspace=${task.workspace.path} mode=${task.workspace.mode}${task.workspace.head ? ` head=${task.workspace.head}` : ""}${task.workspace.dirty === undefined ? "" : ` dirty=${String(task.workspace.dirty)}`}` : ""}`,
       ...(task.attempts.length
-        ? task.attempts.map(
-            (attempt) =>
-              `    attempt ${attempt.number}: ${attempt.status}; deadline=${attempt.deadlineAt ?? "unknown"}; retry=${this.retry(run, task, attempt)}; workspace=${attempt.controlWorkspace}`,
-          )
+        ? task.attempts.map((attempt) => this.attempt(run, task, attempt))
         : ["    attempts: none"]),
     ]);
   }
@@ -182,7 +182,44 @@ export class RunPresenter {
   private terminalReason(run: RunRecord): string {
     if (run.failure) return `${run.failure.code}: ${run.failure.message}`;
     if (run.terminalTarget) return run.terminalTarget;
+    if (run.status === "canceled") return "explicit_cancellation";
     return "none";
+  }
+
+  private cancellation(run: RunRecord): string {
+    if (!run.cancellation) return "none";
+    return `requested=${run.cancellation.requestedAt} completed=${run.cancellation.completedAt ?? "pending"}`;
+  }
+
+  private attempt(
+    run: RunRecord,
+    task: TaskRecord,
+    attempt: AttemptRecord,
+  ): string {
+    return `    attempt ${attempt.number}: ${attempt.status}; deadline=${attempt.deadlineAt ?? "unknown"}; retry=${this.retry(run, task, attempt)}; external=${attempt.externalStatus ?? "unknown"}; executor=${this.executor(attempt)}; cancellation=${this.attemptCancellation(attempt)}; workspace=${attempt.controlWorkspace}`;
+  }
+
+  private cancellationExecutions(run: RunRecord): string[] {
+    const lines = this.attempts(run)
+      .filter(({ attempt }) => attempt.executor || attempt.reconciliation)
+      .map(
+        ({ visit, task, attempt }) =>
+          `  state=${visit.stateId} visit=${visit.number} task=${task.id} attempt=${attempt.number} external=${attempt.externalStatus ?? "unknown"} executor=${this.executor(attempt)} cancellation=${this.attemptCancellation(attempt)}`,
+      );
+    return lines.length ? lines : ["  none"];
+  }
+
+  private executor(attempt: AttemptRecord): string {
+    return attempt.executor
+      ? `task=${attempt.executor.taskId},dispatch=${attempt.executor.dispatchId}${attempt.executor.terminalHandle ? `,terminal=${attempt.executor.terminalHandle}` : ""}`
+      : "none";
+  }
+
+  private attemptCancellation(attempt: AttemptRecord): string {
+    const lastObservation = attempt.reconciliation?.observations.at(-1);
+    return attempt.reconciliation
+      ? `requested=${attempt.reconciliation.cancellationRequestedAt},command_completed=${attempt.reconciliation.cancellationCommandCompletedAt ?? "pending"},status=${lastObservation?.status ?? "pending"},observed=${lastObservation?.at ?? "none"},confirmed_stopped=${attempt.reconciliation.confirmedStoppedAt ?? "none"}`
+      : "none";
   }
 
   private lease(result: RunStatusResult): string {
