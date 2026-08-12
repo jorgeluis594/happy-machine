@@ -332,6 +332,11 @@ describe("retries and timeouts", () => {
       "Immutable prompt",
       "Immutable prompt",
     ]);
+    expect(executor.launches.map((launch) => launch.allowedOutcomes)).toEqual([
+      ["approved"],
+      ["approved"],
+      ["approved"],
+    ]);
     expect(await readFile(path.join(setup.root, "source.ts"), "utf8")).toBe(
       "preserved\n",
     );

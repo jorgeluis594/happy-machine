@@ -495,6 +495,12 @@ Before launching an attempt, Happy Machine materializes:
 - The merged agent instructions and task prompt.
 - The effective model, timeout, and attempt number.
 
+Happy Machine automatically appends the required structured-result contract to
+the effective task prompt. The generated block includes the exact output and
+`result.json` paths, the permitted semantic outcomes without their destination
+states, and the required result shape. Workflow authors provide only the task
+prompt and do not repeat this protocol.
+
 The Orca adapter MUST communicate these paths unambiguously to the agent. The project workspace and control workspace are logically separate even if an adapter chooses a particular physical layout.
 
 The attempt identity is stable and consists of:
@@ -515,7 +521,7 @@ A successful normal task MUST create:
 {
   "outcome": "approved",
   "documents": [
-    "output/review.md"
+    "review.md"
   ]
 }
 ```
@@ -530,7 +536,7 @@ A parallel task MUST use exactly one of the fixed outcomes:
 {
   "outcome": "succeeded",
   "documents": [
-    "output/test-report.md"
+    "test-report.md"
   ]
 }
 ```

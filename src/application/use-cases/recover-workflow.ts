@@ -591,7 +591,13 @@ export class RecoverWorkflow {
     allowedOutcomes: readonly string[],
     projectWorkspace: string,
   ): Promise<RecoveredTaskResult> {
-    const launch = this.launch(controlled, attempt, work, projectWorkspace);
+    const launch = this.launch(
+      controlled,
+      attempt,
+      work,
+      allowedOutcomes,
+      projectWorkspace,
+    );
     let execution: TaskExecution;
     try {
       const launched = this.executor.execute(launch, async (references) => {
@@ -969,6 +975,7 @@ export class RecoverWorkflow {
     controlled: ControlledRun,
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
+    allowedOutcomes: readonly string[],
     projectWorkspace: string,
   ): TaskLaunch {
     return {
@@ -979,6 +986,7 @@ export class RecoverWorkflow {
       resultPath: attempt.resultPath,
       instructions: work.agent.instructions,
       prompt: work.prompt,
+      allowedOutcomes,
       model: work.agent.model,
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,

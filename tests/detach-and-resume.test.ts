@@ -146,10 +146,10 @@ states:
       .split("\n")
       .map((line): unknown => JSON.parse(line) as unknown);
     expect(contracts).toHaveLength(2);
-    expect(contracts[1]).toMatchObject({
-      model: "original-model",
-      prompt: "Second original prompt",
-    });
+    expect(contracts[1]).toMatchObject({ model: "original-model" });
+    expect((contracts[1] as { prompt: string }).prompt).toContain(
+      "Second original prompt\n\n---\nHappy Machine result contract (required)",
+    );
     expect(
       await readFile(path.join(root, ".fake-agent-input-content"), "utf8"),
     ).toBe("original input\n");

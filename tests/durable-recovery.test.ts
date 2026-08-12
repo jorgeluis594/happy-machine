@@ -435,6 +435,7 @@ describe("durable recovery", () => {
 
     expect(run.status).toBe("succeeded");
     expect(executor.launches).toHaveLength(1);
+    expect(executor.launches[0].allowedOutcomes).toEqual(["done"]);
     expect(executor.recoveries).toHaveLength(1);
   });
 
@@ -762,6 +763,9 @@ describe("durable recovery", () => {
     ]);
     expect(executor.launches.map((launch) => launch.prompt)).toEqual([
       "queued",
+    ]);
+    expect(executor.launches.map((launch) => launch.allowedOutcomes)).toEqual([
+      ["succeeded", "failed"],
     ]);
   });
 

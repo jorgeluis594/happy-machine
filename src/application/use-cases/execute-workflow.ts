@@ -631,6 +631,7 @@ export class ExecuteWorkflow {
           ...paths,
           instructions: work.agent.instructions,
           prompt: work.prompt,
+          allowedOutcomes,
           model: work.agent.model,
           timeoutMs: work.policies.attemptTimeoutMs,
           attemptNumber,

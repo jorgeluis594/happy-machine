@@ -12,6 +12,7 @@ export interface TaskLaunch {
   resultPath: string;
   instructions: string;
   prompt: string;
+  allowedOutcomes: readonly string[];
   model: string;
   timeoutMs: number;
   attemptNumber: number;

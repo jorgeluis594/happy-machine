@@ -711,17 +711,19 @@ describe("happy-machine execute", () => {
           },
       );
     expect(contracts).toMatchObject([
-      {
-        model: "review-model",
-        prompt: "Review snapshot prompt",
-        timeoutMs: 5000,
-      },
-      {
-        model: "publish-model",
-        prompt: "Publish snapshot prompt",
-        timeoutMs: 2000,
-      },
+      { model: "review-model", timeoutMs: 5000 },
+      { model: "publish-model", timeoutMs: 2000 },
     ]);
+    expect(contracts[0].prompt).toContain(
+      "Review snapshot prompt\n\n---\nHappy Machine result contract (required)",
+    );
+    expect(contracts[0].prompt).toContain('- "approved"');
+    expect(contracts[0].prompt).not.toContain("publish");
+    expect(contracts[1].prompt).toContain(
+      "Publish snapshot prompt\n\n---\nHappy Machine result contract (required)",
+    );
+    expect(contracts[1].prompt).toContain('- "published"');
+    expect(contracts[1].prompt).not.toContain("$succeeded");
   });
 
   it("uses only result.json for routing and durably attributes the launch, logs, and outcome", async () => {

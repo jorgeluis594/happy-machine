@@ -60,6 +60,7 @@ describe("Orca timeout reconciliation adapter", () => {
         resultPath: path.join(output, "result.json"),
         instructions: "instructions",
         prompt: "prompt",
+        allowedOutcomes: ["approved", "needs_revision"],
         model: "model",
         timeoutMs: 5_000,
         attemptNumber: 1,
@@ -70,6 +71,26 @@ describe("Orca timeout reconciliation adapter", () => {
         return Promise.resolve();
       },
     );
+
+    const contract = JSON.parse(
+      await readFile(path.join(root, ".fake-contract.json"), "utf8"),
+    ) as { instructions: string; prompt: string };
+    expect(contract.instructions).toBe("instructions");
+    expect(contract.prompt).toContain(
+      `prompt\n\n---\nHappy Machine result contract (required)`,
+    );
+    expect(contract.prompt).toContain(
+      JSON.stringify(path.join(output, "result.json")),
+    );
+    expect(contract.prompt).toContain(JSON.stringify(output));
+    expect(contract.prompt).toContain('- "approved"\n- "needs_revision"');
+    expect(contract.prompt).toContain(
+      '"documents": ["relative/path/to/document.md"]',
+    );
+    expect(contract.prompt).toContain(
+      "Only result.json controls the workflow transition",
+    );
+    expect(contract.prompt).not.toContain("destination-state");
 
     expect(observed).toMatchObject([
       { id: "q-1", type: "question", status: "pending" },

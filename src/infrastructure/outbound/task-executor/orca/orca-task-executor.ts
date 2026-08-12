@@ -141,7 +141,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       outputDirectory: launch.outputDirectory,
       resultPath: launch.resultPath,
       instructions: launch.instructions,
-      prompt: launch.prompt,
+      prompt: this.effectivePrompt(launch),
       model: launch.model,
       timeoutMs: launch.timeoutMs,
       attemptNumber: launch.attemptNumber,
@@ -318,6 +318,13 @@ export class OrcaTaskExecutor implements TaskExecutor {
         }
       });
     });
+  }
+
+  private effectivePrompt(launch: TaskLaunch): string {
+    const outcomes = launch.allowedOutcomes
+      .map((outcome) => `- ${JSON.stringify(outcome)}`)
+      .join("\n");
+    return `${launch.prompt}\n\n---\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
   }
 
   private findString(value: unknown, keys: string[]): string | undefined {

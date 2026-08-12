@@ -344,6 +344,12 @@ describe("parallel states", () => {
         "parsed-model",
         "parsed-model",
       ]);
+      expect(executor.launches.map((launch) => launch.allowedOutcomes)).toEqual(
+        [
+          ["succeeded", "failed"],
+          ["succeeded", "failed"],
+        ],
+      );
       expect(run.visits[0]).toMatchObject({
         type: "parallel",
         outcome: expected,
