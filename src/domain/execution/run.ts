@@ -1,4 +1,5 @@
-export type RunStatus = "running" | "succeeded" | "failed";
+export type RunStatus = "running" | "succeeded" | "failed" | "canceled";
+export type ControllerStatus = "attached" | "detached";
 export type AttemptStatus =
   "launching" | "running" | "timing_out" | "succeeded" | "failed";
 
@@ -25,6 +26,8 @@ export interface ExecutorReferences {
 export interface AttemptRecord {
   id: string;
   number: number;
+  startedAt?: string;
+  deadlineAt?: string;
   status: AttemptStatus;
   controlWorkspace: string;
   contextPath: string;
@@ -126,6 +129,7 @@ export interface RunRecord {
   projectRoot: string;
   definitionSnapshot: DefinitionSnapshotRecord;
   status: RunStatus;
+  controllerStatus?: ControllerStatus;
   createdAt: string;
   deadlineAt: string;
   transitionCount: number;

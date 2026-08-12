@@ -93,7 +93,11 @@ export class OrcaTaskExecutor implements TaskExecutor {
     const logs = { stdout: "", stderr: "" };
     const command = async (args: string[]): Promise<CommandResult> => {
       try {
-        const result = await this.run(args, launch.projectWorkspace);
+        const result = await this.run(
+          args,
+          launch.projectWorkspace,
+          launch.signal,
+        );
         logs.stdout += result.stdout;
         logs.stderr += result.stderr;
         return result;
@@ -238,9 +242,16 @@ export class OrcaTaskExecutor implements TaskExecutor {
     return "unknown";
   }
 
-  private run(args: string[], cwd: string): Promise<CommandResult> {
+  private run(
+    args: string[],
+    cwd: string,
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.executable, args, { cwd, env: process.env });
+      const stopObserving = () => child.kill("SIGTERM");
+      if (signal?.aborted) stopObserving();
+      else signal?.addEventListener("abort", stopObserving, { once: true });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (chunk) => {
@@ -253,6 +264,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
         reject(new TaskExecutorError(error.message, { stdout, stderr })),
       );
       child.on("close", (code) => {
+        signal?.removeEventListener("abort", stopObserving);
         if (code !== 0)
           return reject(
             new TaskExecutorError(

@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ExecuteWorkflow } from "../src/application/use-cases/execute-workflow.js";
+import { RecoverWorkflow } from "../src/application/use-cases/recover-workflow.js";
 import type {
   NormalVisitRecord,
   RunRecord,
@@ -138,25 +139,32 @@ ${states}
 
 function cli(projectRoot?: string) {
   let id = 0;
+  const repository = new FilesystemRunRepository();
+  const executor = new OrcaTaskExecutor(fixture);
+  const now = () => new Date("2026-08-11T12:00:00.000Z");
   const useCase = new ExecuteWorkflow(
     new FilesystemProjectDefinitions(),
-    new FilesystemRunRepository(),
-    new OrcaTaskExecutor(fixture),
-    () => new Date("2026-08-11T12:00:00.000Z"),
+    repository,
+    executor,
+    now,
     () => `id-${++id}`,
     () => new Promise(() => {}),
   );
   const stdout: string[] = [];
   const stderr: string[] = [];
   return {
-    cli: new Cli(useCase, {
-      stdout: (line) => {
-        stdout.push(line);
-        if (projectRoot && line.startsWith("run_"))
-          writeFileSync(path.join(projectRoot, ".run-id-printed"), line);
+    cli: new Cli(
+      useCase,
+      new RecoverWorkflow(repository, executor, now, () => Promise.resolve()),
+      {
+        stdout: (line) => {
+          stdout.push(line);
+          if (projectRoot && line.startsWith("run_"))
+            writeFileSync(path.join(projectRoot, ".run-id-printed"), line);
+        },
+        stderr: (line) => stderr.push(line),
       },
-      stderr: (line) => stderr.push(line),
-    }),
+    ),
     stdout,
     stderr,
   };
@@ -932,7 +940,7 @@ describe("happy-machine execute", () => {
     const app = cli();
     expect(await app.cli.run(argv, "/project")).toBe(1);
     expect(app.stderr).toEqual([
-      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...]",
+      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID",
     ]);
   });
 

@@ -226,6 +226,8 @@ const references = (identity: string): ExecutorReferences => ({
 class RecoveryExecutor implements TaskExecutor {
   readonly launches: TaskLaunch[] = [];
   readonly recoveries: string[] = [];
+  readonly cancellations: ExecutorReferences[] = [];
+  readonly reconciliations: ExecutorReferences[] = [];
 
   constructor(
     private readonly observe: (
@@ -259,11 +261,13 @@ class RecoveryExecutor implements TaskExecutor {
     return { references: external, logs: { stdout: "launched", stderr: "" } };
   }
 
-  cancel(): Promise<void> {
+  cancel(external: ExecutorReferences): Promise<void> {
+    this.cancellations.push(external);
     return Promise.resolve();
   }
 
-  reconcile(): Promise<"stopped"> {
+  reconcile(external: ExecutorReferences): Promise<"stopped"> {
+    this.reconciliations.push(external);
     return Promise.resolve("stopped");
   }
 }
@@ -351,6 +355,69 @@ describe("durable controller leases", () => {
 });
 
 describe("durable recovery", () => {
+  it("fails an expired detached workflow before launching and safely stops active work", async () => {
+    const setup = await durableSetup(normalState());
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const attempt = await addAttempt(setup, visit, visit.task);
+    attempt.status = "running";
+    attempt.executor = references(attempt.id);
+    await setup.repository.save(setup.run);
+    const executor = new RecoveryExecutor(() =>
+      Promise.resolve({ status: "not_found" }),
+    );
+
+    const run = await recoverer(
+      setup.repository,
+      executor,
+      () => new Date("2026-08-12T00:00:00.000Z"),
+    ).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "expired-workflow-controller",
+    });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      failure: { code: "workflow_timeout" },
+    });
+    expect(executor.cancellations).toEqual([references(attempt.id)]);
+    expect(executor.launches).toHaveLength(0);
+  });
+
+  it("cancels and confirms an attempt whose absolute deadline expired while detached before retrying", async () => {
+    const setup = await durableSetup(normalState());
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const attempt = await addAttempt(setup, visit, visit.task);
+    attempt.status = "running";
+    attempt.startedAt = "2026-08-11T00:00:00.000Z";
+    attempt.deadlineAt = "2026-08-11T00:00:00.500Z";
+    attempt.executor = references(attempt.id);
+    await setup.repository.save(setup.run);
+    const executor = new RecoveryExecutor(() =>
+      Promise.resolve({ status: "not_found" }),
+    );
+
+    const run = await recoverer(
+      setup.repository,
+      executor,
+      () => new Date("2026-08-11T00:00:00.501Z"),
+    ).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "expired-attempt-controller",
+    });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      failure: { code: "attempt_timeout" },
+    });
+    expect(executor.cancellations).toEqual([references(attempt.id)]);
+    expect(executor.reconciliations).toEqual([references(attempt.id)]);
+    expect(executor.launches).toHaveLength(0);
+  });
+
   it("launches exactly once after a crash before external launch", async () => {
     const setup = await durableSetup(normalState());
     const visit = await addVisit(setup);
@@ -399,6 +466,35 @@ describe("durable recovery", () => {
     );
   });
 
+  it("records a failed recovered external execution without relaunching it", async () => {
+    const setup = await durableSetup(normalState());
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const attempt = await addAttempt(setup, visit, visit.task);
+    attempt.status = "running";
+    attempt.executor = references(attempt.id);
+    await setup.repository.save(setup.run);
+    const executor = new RecoveryExecutor((identity) =>
+      Promise.resolve({
+        status: "failed",
+        references: references(identity),
+        logs: { stdout: "failed externally", stderr: "" },
+      }),
+    );
+
+    const run = await recoverer(setup.repository, executor).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "failed-external-controller",
+    });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      failure: { code: "executor_failed" },
+    });
+    expect(executor.launches).toHaveLength(0);
+  });
+
   it("commits recovered documents and remains idempotent on repeated recovery", async () => {
     const setup = await durableSetup(normalState());
     const visit = await addVisit(setup);
@@ -415,21 +511,26 @@ describe("durable recovery", () => {
       }),
     );
     const useCase = recoverer(setup.repository, executor);
-    const first = await useCase.recover({
+    await useCase.recover({
       projectRoot: setup.root,
       runId: setup.run.id,
       controllerId: "recovery-one",
     });
-    const firstEvents = first.events.length;
-    const second = await useCase.recover({
-      projectRoot: setup.root,
-      runId: setup.run.id,
-      controllerId: "recovery-two",
-    });
+    const beforeTerminalResume = JSON.stringify(
+      (await setup.repository.load(setup.root, setup.run.id)).run,
+    );
+    await expect(
+      useCase.recover({
+        projectRoot: setup.root,
+        runId: setup.run.id,
+        controllerId: "recovery-two",
+      }),
+    ).rejects.toMatchObject({ code: "run_not_resumable" });
+    const second = (await setup.repository.load(setup.root, setup.run.id)).run;
 
     expect(second.documents).toHaveLength(1);
     expect(second.transitionCount).toBe(1);
-    expect(second.events).toHaveLength(firstEvents);
+    expect(JSON.stringify(second)).toBe(beforeTerminalResume);
     expect(executor.launches).toHaveLength(0);
   });
 

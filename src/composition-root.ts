@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import { ExecuteWorkflow } from "./application/use-cases/execute-workflow.js";
+import { RecoverWorkflow } from "./application/use-cases/recover-workflow.js";
 import { Cli } from "./infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { FilesystemRunRepository } from "./infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
@@ -10,17 +11,37 @@ export function createProcessEntryPoint(): (
   argv: string[],
   currentDirectory: string,
 ) => Promise<number> {
+  const definitions = new FilesystemProjectDefinitions();
+  const runs = new FilesystemRunRepository();
+  const executor = new OrcaTaskExecutor();
+  const now = () => new Date();
+  const sleeper = (milliseconds: number, signal?: AbortSignal) =>
+    wait(milliseconds, undefined, { signal });
   const useCase = new ExecuteWorkflow(
-    new FilesystemProjectDefinitions(),
-    new FilesystemRunRepository(),
-    new OrcaTaskExecutor(),
-    () => new Date(),
+    definitions,
+    runs,
+    executor,
+    now,
     randomUUID,
-    (milliseconds, signal) => wait(milliseconds, undefined, { signal }),
+    sleeper,
   );
-  const cli = new Cli(useCase, {
+  const recover = new RecoverWorkflow(runs, executor, now, (milliseconds) =>
+    sleeper(milliseconds),
+  );
+  const cli = new Cli(useCase, recover, {
     stdout: (message) => process.stdout.write(`${message}\n`),
     stderr: (message) => process.stderr.write(`${message}\n`),
   });
-  return (argv, currentDirectory) => cli.run(argv, currentDirectory);
+  return async (argv, currentDirectory) => {
+    const controller = new AbortController();
+    const detach = () => controller.abort();
+    process.once("SIGINT", detach);
+    process.once("SIGHUP", detach);
+    try {
+      return await cli.run(argv, currentDirectory, controller.signal);
+    } finally {
+      process.off("SIGINT", detach);
+      process.off("SIGHUP", detach);
+    }
+  };
 }

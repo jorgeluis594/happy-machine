@@ -14,6 +14,7 @@ export interface TaskLaunch {
   model: string;
   timeoutMs: number;
   attemptNumber: number;
+  signal?: AbortSignal;
 }
 
 export interface TaskExecution {

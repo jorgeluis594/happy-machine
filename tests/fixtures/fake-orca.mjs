@@ -157,6 +157,11 @@ if (operation === "orchestration run-create") {
     worker: { agentTerminalHandle: "terminal-1" },
   };
 } else if (operation === "orchestration check") {
+  if (existsSync(path.join(process.cwd(), ".fake-block-check"))) {
+    writeFileSync(path.join(process.cwd(), ".fake-check-waiting"), "waiting\n");
+    while (!existsSync(path.join(process.cwd(), ".fake-release-check")))
+      await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   process.stderr.write("misleading stderr outcome: rejected\n");
   response = {
     messages: [

@@ -154,7 +154,7 @@ export class FilesystemRunRepository implements RunRepository {
     }
     if (
       run.id !== runId ||
-      run.projectRoot !== projectRoot ||
+      (await realpath(run.projectRoot)) !== (await realpath(projectRoot)) ||
       !definition ||
       typeof definition !== "object" ||
       definition.workflowId !== run.workflowId
@@ -186,6 +186,7 @@ export class FilesystemRunRepository implements RunRepository {
         observedAt,
       );
       recovered.run.controllerLease = lease;
+      recovered.run.controllerStatus = "attached";
       this.appendLeaseEvent(
         recovered.run,
         current ? "controller_lease_recovered" : "controller_lease_acquired",
@@ -253,6 +254,7 @@ export class FilesystemRunRepository implements RunRepository {
         fencingToken,
       );
       current.controllerLease = undefined;
+      current.controllerStatus = "detached";
       this.appendLeaseEvent(
         current,
         "controller_lease_released",

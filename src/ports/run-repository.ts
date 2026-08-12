@@ -29,6 +29,10 @@ export class ControllerLeaseLostError extends Error {
   readonly code = "controller_lease_lost";
 }
 
+export class RunNotResumableError extends Error {
+  readonly code = "run_not_resumable";
+}
+
 export interface AttemptPaths {
   controlWorkspace: string;
   contextPath: string;

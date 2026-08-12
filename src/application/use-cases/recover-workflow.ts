@@ -9,6 +9,7 @@ import type {
 } from "../../domain/execution/run.js";
 import {
   calculateParallelOutcome,
+  evaluateWorkflowDeadline,
   terminalStatus,
 } from "../../domain/execution/run.js";
 import type {
@@ -21,17 +22,24 @@ import type {
   RunRepository,
   ValidatedNormalResult,
 } from "../../ports/run-repository.js";
+import { RunNotResumableError } from "../../ports/run-repository.js";
 import type {
   RecoveryObservation,
   TaskExecution,
   TaskExecutor,
   TaskLaunch,
 } from "../../ports/task-executor.js";
+import {
+  ControllerDetachedError,
+  detached,
+  throwIfDetached,
+} from "../services/controller-detachment.js";
 
 export interface RecoverWorkflowRequest {
   projectRoot: string;
   runId: string;
   controllerId: string;
+  signal?: AbortSignal;
 }
 
 export type RecoveryWait = (milliseconds: number) => Promise<void>;
@@ -41,6 +49,7 @@ interface ControlledRun {
   definition: EffectiveExecutionDefinition;
   controllerId: string;
   fencingToken: number;
+  signal?: AbortSignal;
 }
 
 type RecoveredTaskResult =
@@ -66,7 +75,10 @@ export class RecoverWorkflow {
     if (!this.runs.acquireControl)
       throw new Error("Run repository does not support lease acquisition");
     const recovered = await this.runs.load(request.projectRoot, request.runId);
-    if (recovered.run.status !== "running") return recovered.run;
+    if (recovered.run.status !== "running")
+      throw new RunNotResumableError(
+        `Run ${request.runId} is already ${recovered.run.status}`,
+      );
     const acquired = await this.runs.acquireControl(
       request.projectRoot,
       request.runId,
@@ -78,12 +90,31 @@ export class RecoverWorkflow {
       definition: recovered.definition,
       controllerId: request.controllerId,
       fencingToken: acquired.fencingToken,
+      signal: request.signal,
     };
-    return this.continue(controlled);
+    try {
+      return await this.continue(controlled);
+    } finally {
+      if (this.runs.releaseControl && controlled.run.controllerLease)
+        controlled.run = await this.runs.releaseControl(
+          controlled.run,
+          controlled.controllerId,
+          controlled.fencingToken,
+          this.timestamp(),
+        );
+    }
   }
 
   private async continue(controlled: ControlledRun): Promise<RunRecord> {
     while (controlled.run.status === "running") {
+      throwIfDetached(controlled.signal);
+      if (
+        !evaluateWorkflowDeadline(controlled.run.deadlineAt, this.timestamp())
+          .allowed
+      ) {
+        await this.expireWorkflow(controlled);
+        return controlled.run;
+      }
       const visit = await this.currentVisit(controlled);
       if (visit.outcome !== undefined && visit.target !== undefined) {
         if (this.terminal(visit.target)) {
@@ -255,7 +286,21 @@ export class RecoverWorkflow {
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
   ): Promise<RecoveredTaskResult> {
+    throwIfDetached(controlled.signal);
     let attempt = task.attempts.at(-1);
+    if (attempt && !attempt.deadlineAt) {
+      const startedEvent = controlled.run.events.find(
+        (event) =>
+          (event.type === "attempt_started" ||
+            event.type === "attempt_launching") &&
+          event.data.identity === attempt?.id,
+      );
+      attempt.startedAt ??= startedEvent?.at;
+      if (attempt.startedAt)
+        attempt.deadlineAt = new Date(
+          Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
+        ).toISOString();
+    }
     if (attempt?.status === "succeeded") {
       const result = await this.runs.readResult(
         attempt.resultPath,
@@ -276,6 +321,10 @@ export class RecoverWorkflow {
         };
       const number = (attempt?.number ?? 0) + 1;
       attempt = this.newAttempt(controlled.run, visit, task, number);
+      attempt.startedAt = this.timestamp();
+      attempt.deadlineAt = new Date(
+        Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
+      ).toISOString();
       task.attempts.push(attempt);
       Object.assign(
         attempt,
@@ -288,6 +337,11 @@ export class RecoverWorkflow {
       });
       await this.persist(controlled);
     }
+    if (
+      attempt.deadlineAt &&
+      Date.parse(this.timestamp()) >= Date.parse(attempt.deadlineAt)
+    )
+      return this.expireAttempt(controlled, attempt);
     const observation = await this.observe(controlled, attempt);
     if (observation.status === "not_found")
       return this.launchRecovered(
@@ -346,15 +400,20 @@ export class RecoverWorkflow {
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
   ): Promise<RecoveredTaskResult> {
-    const launch = this.launch(controlled.run, attempt, work);
+    const launch = this.launch(controlled, attempt, work);
     let execution: TaskExecution;
     try {
-      execution = await this.executor.execute(launch, async (references) => {
+      const launched = this.executor.execute(launch, async (references) => {
         attempt.executor = references;
         attempt.status = "running";
         await this.persist(controlled);
       });
+      execution = await Promise.race([
+        launched,
+        ...(controlled.signal ? [detached(controlled.signal)] : []),
+      ]);
     } catch (error) {
+      if (error instanceof ControllerDetachedError) throw error;
       attempt.status = "failed";
       attempt.failure = {
         code: "executor_failed",
@@ -379,19 +438,31 @@ export class RecoverWorkflow {
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
   ): Promise<RecoveredTaskResult | { status: "completed" }> {
-    let elapsed = 0;
-    while (elapsed < work.policies.attemptTimeoutMs) {
+    while (true) {
+      const remaining = Math.min(
+        Date.parse(controlled.run.deadlineAt) - this.now().getTime(),
+        attempt.deadlineAt
+          ? Date.parse(attempt.deadlineAt) - this.now().getTime()
+          : work.policies.attemptTimeoutMs,
+      );
+      if (remaining <= 0) {
+        if (this.now().getTime() >= Date.parse(controlled.run.deadlineAt)) {
+          await this.expireWorkflow(controlled);
+          return {
+            status: "failed",
+            failure: controlled.run.failure!,
+            attempt,
+          };
+        }
+        return this.expireAttempt(controlled, attempt);
+      }
       const leaseHeartbeatMs = Math.max(
         1,
         Math.floor((controlled.run.controllerLease?.durationMs ?? 200) / 2),
       );
-      const delay = Math.min(
-        100,
-        leaseHeartbeatMs,
-        work.policies.attemptTimeoutMs - elapsed,
-      );
+      const delay = Math.min(100, leaseHeartbeatMs, remaining);
       await this.wait(delay);
-      elapsed += delay;
+      throwIfDetached(controlled.signal);
       const observation = await this.observe(controlled, attempt);
       if (observation.status === "completed") {
         attempt.executor = observation.references;
@@ -416,7 +487,7 @@ export class RecoverWorkflow {
     attempt.status = "failed";
     attempt.failure = {
       code: "external_execution_uncertain",
-      message: "Recovered external execution could not be confirmed safely",
+      message: "Previously active external execution disappeared",
     };
     await this.persist(controlled);
     return { status: "unsafe", failure: attempt.failure, attempt };
@@ -433,6 +504,91 @@ export class RecoverWorkflow {
       attempt.executor,
       controlled.run.projectRoot,
     );
+  }
+
+  private async expireAttempt(
+    controlled: ControlledRun,
+    attempt: AttemptRecord,
+  ): Promise<RecoveredTaskResult> {
+    attempt.status = "timing_out";
+    const failure = {
+      code: "attempt_timeout",
+      message: `Attempt deadline ${attempt.deadlineAt} expired while detached`,
+    };
+    if (!attempt.executor) {
+      attempt.status = "failed";
+      attempt.failure = {
+        code: "external_execution_uncertain",
+        message: "Expired attempt has no confirmed external identity",
+      };
+      await this.persist(controlled);
+      return { status: "unsafe", failure: attempt.failure, attempt };
+    }
+    attempt.reconciliation = {
+      cancellationRequestedAt: this.timestamp(),
+      observations: [],
+    };
+    await this.persist(controlled);
+    try {
+      await this.executor.cancel(attempt.executor, controlled.run.projectRoot);
+    } catch {
+      // Reconciliation below is authoritative.
+    }
+    const status = await this.executor.reconcile(
+      attempt.executor,
+      controlled.run.projectRoot,
+    );
+    const observedAt = this.timestamp();
+    attempt.reconciliation.observations.push({ status, at: observedAt });
+    attempt.externalStatus = status;
+    if (status !== "stopped") {
+      attempt.failure = {
+        code: "external_execution_uncertain",
+        message: "Timed-out external execution is not confirmed stopped",
+      };
+      await this.persist(controlled);
+      return { status: "unsafe", failure: attempt.failure, attempt };
+    }
+    attempt.reconciliation.confirmedStoppedAt = observedAt;
+    attempt.status = "failed";
+    attempt.failure = failure;
+    await this.persist(controlled);
+    return { status: "failed", failure, attempt };
+  }
+
+  private async expireWorkflow(controlled: ControlledRun): Promise<void> {
+    for (const visit of controlled.run.visits) {
+      const tasks = visit.type === "agent" ? [visit.task] : visit.tasks;
+      for (const task of tasks) {
+        const attempt = task.attempts.at(-1);
+        if (
+          !attempt?.executor ||
+          attempt.status === "succeeded" ||
+          attempt.status === "failed"
+        )
+          continue;
+        try {
+          await this.executor.cancel(
+            attempt.executor,
+            controlled.run.projectRoot,
+          );
+        } catch {
+          // The run still ends for the expired global deadline.
+        }
+        try {
+          attempt.externalStatus = await this.executor.reconcile(
+            attempt.executor,
+            controlled.run.projectRoot,
+          );
+        } catch {
+          attempt.externalStatus = "unknown";
+        }
+      }
+    }
+    await this.failRun(controlled, {
+      code: "workflow_timeout",
+      message: `Workflow deadline ${controlled.run.deadlineAt} expired while detached`,
+    });
   }
 
   private async persist(controlled: ControlledRun): Promise<void> {
@@ -523,13 +679,13 @@ export class RecoverWorkflow {
   }
 
   private launch(
-    run: RunRecord,
+    controlled: ControlledRun,
     attempt: AttemptRecord,
     work: AgentWorkDefinition,
   ): TaskLaunch {
     return {
       identity: attempt.id,
-      projectWorkspace: run.projectRoot,
+      projectWorkspace: controlled.run.projectRoot,
       contextPath: attempt.contextPath,
       outputDirectory: attempt.outputDirectory,
       resultPath: attempt.resultPath,
@@ -538,6 +694,7 @@ export class RecoverWorkflow {
       model: work.agent.model,
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,
+      signal: controlled.signal,
     };
   }
 

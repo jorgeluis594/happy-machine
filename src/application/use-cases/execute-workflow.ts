@@ -29,12 +29,18 @@ import type {
   TaskLaunch,
 } from "../../ports/task-executor.js";
 import { TaskExecutorError } from "../../ports/task-executor.js";
+import {
+  ControllerDetachedError,
+  detached,
+  throwIfDetached,
+} from "../services/controller-detachment.js";
 
 export interface ExecuteWorkflowRequest {
   workflowPath: string;
   currentDirectory: string;
   inputPaths?: readonly string[];
   onRunAllocated(runId: string): void;
+  signal?: AbortSignal;
 }
 
 export type Wait = (
@@ -87,6 +93,7 @@ export class ExecuteWorkflow {
       projectRoot: definition.projectRoot,
       definitionSnapshot: createdSnapshot.record,
       status: "running",
+      controllerStatus: "detached",
       createdAt,
       deadlineAt: new Date(
         Date.parse(createdAt) +
@@ -103,8 +110,10 @@ export class ExecuteWorkflow {
     });
     await this.runs.save(run);
     request.onRunAllocated(run.id);
+    let controllerId: string | undefined;
+    let fencingToken: number | undefined;
     if (this.runs.acquireControl) {
-      const controllerId = `${run.id}:initial-controller`;
+      controllerId = `${run.id}:initial-controller`;
       const session = await this.runs.acquireControl(
         run.projectRoot,
         run.id,
@@ -112,11 +121,13 @@ export class ExecuteWorkflow {
         timestamp(),
       );
       run = session.run;
+      fencingToken = session.fencingToken;
     }
 
     try {
       let stateId = createdSnapshot.definition.initialState;
       while (true) {
+        throwIfDetached(request.signal);
         const state = createdSnapshot.definition.states[stateId];
         const visitNumber =
           run.visits.filter((candidate) => candidate.stateId === state.id)
@@ -170,6 +181,7 @@ export class ExecuteWorkflow {
                 state,
                 definition.projectRoot,
                 timestamp,
+                request.signal,
               )
             : await this.executeParallelVisit(
                 run,
@@ -177,6 +189,7 @@ export class ExecuteWorkflow {
                 state,
                 definition.projectRoot,
                 timestamp,
+                request.signal,
               );
         if (result.kind !== "completed") {
           await this.terminateRun(run, result.failure, timestamp);
@@ -255,6 +268,20 @@ export class ExecuteWorkflow {
         stateId = target;
       }
     } catch (error) {
+      if (error instanceof ControllerDetachedError) {
+        if (
+          controllerId &&
+          fencingToken !== undefined &&
+          this.runs.releaseControl
+        )
+          await this.runs.releaseControl(
+            run,
+            controllerId,
+            fencingToken,
+            timestamp(),
+          );
+        throw error;
+      }
       run.status = "failed";
       const failure = this.failure(error);
       run.failure = failure;
@@ -273,6 +300,7 @@ export class ExecuteWorkflow {
     state: NormalStateDefinition,
     projectWorkspace: string,
     timestamp: () => string,
+    signal?: AbortSignal,
   ): Promise<
     | {
         kind: "completed";
@@ -293,6 +321,7 @@ export class ExecuteWorkflow {
       false,
       projectWorkspace,
       timestamp,
+      signal,
     );
     if (result.kind !== "completed") return result;
     const target = state.outcomes[result.outcome];
@@ -310,6 +339,7 @@ export class ExecuteWorkflow {
     state: ParallelStateDefinition,
     projectWorkspace: string,
     timestamp: () => string,
+    signal?: AbortSignal,
   ): Promise<
     | {
         kind: "completed";
@@ -366,6 +396,7 @@ export class ExecuteWorkflow {
               true,
               projectWorkspace,
               timestamp,
+              signal,
             );
             if (result.kind === "completed") {
               const attempt = task.attempts.at(-1)!;
@@ -401,6 +432,7 @@ export class ExecuteWorkflow {
               });
             }
           } catch (error) {
+            if (error instanceof ControllerDetachedError) throw error;
             const failure = this.failure(error);
             task.status = "failed";
             task.failure = failure;
@@ -437,6 +469,7 @@ export class ExecuteWorkflow {
     declaredFailedRetryable: boolean,
     projectWorkspace: string,
     timestamp: () => string,
+    signal?: AbortSignal,
   ): Promise<
     | {
         kind: "completed";
@@ -452,6 +485,7 @@ export class ExecuteWorkflow {
       attemptNumber <= work.policies.maxAttempts;
       attemptNumber += 1
     ) {
+      throwIfDetached(signal);
       const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
         phase: "attempt_launch",
         stateId: visit.stateId,
@@ -465,6 +499,7 @@ export class ExecuteWorkflow {
       const attempt: AttemptRecord = {
         id: identity,
         number: attemptNumber,
+        startedAt: timestamp(),
         status: "launching",
         controlWorkspace: "",
         contextPath: "",
@@ -473,6 +508,9 @@ export class ExecuteWorkflow {
         logs: { stdout: "", stderr: "" },
         documents: [],
       };
+      attempt.deadlineAt = new Date(
+        Date.parse(attempt.startedAt!) + work.policies.attemptTimeoutMs,
+      ).toISOString();
       task.attempts.push(attempt);
       const paths = await this.runs.prepareAttempt(
         run,
@@ -499,8 +537,10 @@ export class ExecuteWorkflow {
           model: work.agent.model,
           timeoutMs: work.policies.attemptTimeoutMs,
           attemptNumber,
+          signal,
         },
         timestamp,
+        signal,
       );
 
       if (attemptResult.kind === "completed") {
@@ -598,6 +638,7 @@ export class ExecuteWorkflow {
     attempt: AttemptRecord,
     launch: TaskLaunch,
     timestamp: () => string,
+    signal?: AbortSignal,
   ): Promise<AttemptResult> {
     const timeoutController = new AbortController();
     let startedPersistence: Promise<void> | undefined;
@@ -641,7 +682,19 @@ export class ExecuteWorkflow {
             : ("attempt_timeout" as const),
         }) as const,
     );
-    const result = await Promise.race([settled, timeout]);
+    let result:
+      | Awaited<typeof settled>
+      | { kind: "timeout"; cause: "attempt_timeout" | "workflow_timeout" };
+    try {
+      result = await Promise.race([
+        settled,
+        timeout,
+        ...(signal ? [detached(signal)] : []),
+      ]);
+    } catch (error) {
+      timeoutController.abort();
+      throw error;
+    }
     if (result.kind !== "timeout") {
       timeoutController.abort();
       attempt.externalStatus = "stopped";
