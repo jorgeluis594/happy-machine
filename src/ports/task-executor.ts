@@ -1,4 +1,5 @@
 import type {
+  ExternalEventRecord,
   ExecutorReferences,
   ExternalExecutionStatus,
 } from "../domain/execution/run.js";
@@ -29,6 +30,7 @@ export type RecoveryObservation =
         "active" | "completed" | "failed" | "start_unknown" | "stop_unknown";
       references: ExecutorReferences;
       logs: { stdout: string; stderr: string };
+      events?: ExternalEventRecord[];
     };
 
 export interface TaskExecutor {
@@ -40,6 +42,7 @@ export interface TaskExecutor {
   execute(
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,
+    onEvent?: (event: ExternalEventRecord) => Promise<void>,
   ): Promise<TaskExecution>;
   cancel(
     references: ExecutorReferences,

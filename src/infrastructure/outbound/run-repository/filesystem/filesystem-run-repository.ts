@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  access,
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   realpath,
   rm,
@@ -163,6 +165,44 @@ export class FilesystemRunRepository implements RunRepository {
     return { run, definition };
   }
 
+  async discoverProjectRoot(currentDirectory: string): Promise<string> {
+    let candidate = await realpath(currentDirectory);
+    while (true) {
+      if (
+        (await this.exists(path.join(candidate, "happy-machine.yaml"))) ||
+        (await this.exists(path.join(candidate, ".happy-machine")))
+      )
+        return candidate;
+      const parent = path.dirname(candidate);
+      if (parent === candidate)
+        throw new Error("Happy Machine project not found");
+      candidate = parent;
+    }
+  }
+
+  async list(projectRoot: string): Promise<RunRecord[]> {
+    const runsDirectory = path.join(projectRoot, ".happy-machine", "runs");
+    const entries = await readdir(runsDirectory, {
+      withFileTypes: true,
+      encoding: "utf8",
+    }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    const runs = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) =>
+          this.load(projectRoot, entry.name).then(({ run }) => run),
+        ),
+    );
+    return runs.sort(
+      (left, right) =>
+        Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+        right.id.localeCompare(left.id),
+    );
+  }
+
   async acquireControl(
     projectRoot: string,
     runId: string,
@@ -304,6 +344,15 @@ export class FilesystemRunRepository implements RunRepository {
     const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, "utf8");
     await rename(temporary, target);
+  }
+
+  private async exists(candidate: string): Promise<boolean> {
+    try {
+      await access(candidate, constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async withRunLock<T>(

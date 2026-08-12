@@ -162,17 +162,28 @@ if (operation === "orchestration run-create") {
     while (!existsSync(path.join(process.cwd(), ".fake-release-check")))
       await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  process.stderr.write("misleading stderr outcome: rejected\n");
-  response = {
-    messages: [
-      {
-        type: "worker_done",
-        outcome: "succeeded",
-        dispatchId: "orca-dispatch-1",
-      },
-    ],
-    log: "misleading stdout outcome: rejected",
-  };
+  const sequenceFile = path.join(process.cwd(), ".fake-check-sequence.json");
+  if (existsSync(sequenceFile)) {
+    const sequence = JSON.parse(readFileSync(sequenceFile, "utf8"));
+    const indexFile = path.join(process.cwd(), ".fake-check-index");
+    const index = existsSync(indexFile)
+      ? Number(readFileSync(indexFile, "utf8"))
+      : 0;
+    writeFileSync(indexFile, String(index + 1));
+    response = sequence[Math.min(index, sequence.length - 1)];
+  } else {
+    process.stderr.write("misleading stderr outcome: rejected\n");
+    response = {
+      messages: [
+        {
+          type: "worker_done",
+          outcome: "succeeded",
+          dispatchId: "orca-dispatch-1",
+        },
+      ],
+      log: "misleading stdout outcome: rejected",
+    };
+  }
 } else if (operation === "orchestration worker-stop") {
   response = { dispatch: { state: "stopping" } };
 } else if (operation === "orchestration worker-show") {

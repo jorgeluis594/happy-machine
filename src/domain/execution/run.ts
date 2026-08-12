@@ -23,6 +23,18 @@ export interface ExecutorReferences {
   terminalHandle?: string;
 }
 
+export type ExternalEventType = "question" | "escalation";
+export type ExternalEventStatus = "pending" | "resolved";
+
+export interface ExternalEventRecord {
+  id: string;
+  type: ExternalEventType;
+  status: ExternalEventStatus;
+  observedAt: string;
+  resolvedAt?: string;
+  message?: string;
+}
+
 export interface AttemptRecord {
   id: string;
   number: number;
@@ -40,6 +52,7 @@ export interface AttemptRecord {
   failure?: AttemptFailure;
   externalStatus?: ExternalExecutionStatus;
   reconciliation?: AttemptReconciliation;
+  externalEvents?: ExternalEventRecord[];
   documents: DocumentRecord[];
 }
 
@@ -68,7 +81,12 @@ export interface ParallelTaskRecord extends TaskRecord {
   outcome?: "succeeded";
   failure?: AttemptFailure;
   documents: DocumentRecord[];
-  workspace: { mode: "direct"; path: string };
+  workspace: {
+    mode: "direct" | "worktree";
+    path: string;
+    head?: string;
+    dirty?: boolean;
+  };
 }
 
 export interface ParallelVisitRecord {

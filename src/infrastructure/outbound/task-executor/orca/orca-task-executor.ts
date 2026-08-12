@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type {
+  ExternalEventRecord,
   ExecutorReferences,
   ExternalExecutionStatus,
 } from "../../../../domain/execution/run.js";
@@ -45,6 +46,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       ["orchestration", "dispatch-show", "--task", taskId, "--json"],
       projectWorkspace,
     );
+    const events = this.externalEvents(shown.json);
     const dispatchId =
       references?.dispatchId ??
       this.findString(shown.json, ["dispatchId", "dispatch_id"]);
@@ -60,6 +62,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
           stdout: lookupLogs.stdout + shown.stdout,
           stderr: lookupLogs.stderr + shown.stderr,
         },
+        events,
       };
     const recoveredReferences: ExecutorReferences = {
       taskId,
@@ -76,19 +79,40 @@ export class OrcaTaskExecutor implements TaskExecutor {
       stderr: lookupLogs.stderr + shown.stderr,
     };
     if (state === "start_unknown" || state === "stop_unknown")
-      return { status: state, references: recoveredReferences, logs };
+      return { status: state, references: recoveredReferences, logs, events };
     if (["succeeded", "stopped"].includes(state ?? ""))
-      return { status: "completed", references: recoveredReferences, logs };
+      return {
+        status: "completed",
+        references: recoveredReferences,
+        logs,
+        events,
+      };
     if (["failed", "abandoned"].includes(state ?? ""))
-      return { status: "failed", references: recoveredReferences, logs };
+      return {
+        status: "failed",
+        references: recoveredReferences,
+        logs,
+        events,
+      };
     if (["starting", "ready", "stopping"].includes(state ?? ""))
-      return { status: "active", references: recoveredReferences, logs };
-    return { status: "start_unknown", references: recoveredReferences, logs };
+      return {
+        status: "active",
+        references: recoveredReferences,
+        logs,
+        events,
+      };
+    return {
+      status: "start_unknown",
+      references: recoveredReferences,
+      logs,
+      events,
+    };
   }
 
   async execute(
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,
+    onEvent?: (event: ExternalEventRecord) => Promise<void>,
   ): Promise<TaskExecution> {
     const logs = { stdout: "", stderr: "" };
     const command = async (args: string[]): Promise<CommandResult> => {
@@ -186,21 +210,31 @@ export class OrcaTaskExecutor implements TaskExecutor {
       terminalHandle,
     };
     await onStarted(references);
-    const completion = await command([
-      "orchestration",
-      "check",
-      "--wait",
-      "--types",
-      "worker_done,escalation,question",
-      "--timeout-ms",
-      String(launch.timeoutMs),
-      "--json",
-    ]);
-    if (!this.hasCompletion(completion.json, dispatchId))
-      throw new TaskExecutorError(
-        "Orca did not return a successful worker_done event for the attempt",
-        logs,
-      );
+    const observedEvents = new Map<string, ExternalEventRecord>();
+    while (true) {
+      const completion = await command([
+        "orchestration",
+        "check",
+        "--wait",
+        "--types",
+        "worker_done,escalation,question",
+        "--timeout-ms",
+        String(launch.timeoutMs),
+        "--json",
+      ]);
+      for (const event of this.externalEvents(completion.json)) {
+        const previous = observedEvents.get(event.id);
+        if (previous?.status === event.status) continue;
+        observedEvents.set(event.id, event);
+        await onEvent?.(event);
+      }
+      if (this.hasCompletion(completion.json, dispatchId)) break;
+      if (!this.externalEvents(completion.json).length)
+        throw new TaskExecutorError(
+          "Orca check returned without completion or a structured intervention event",
+          logs,
+        );
+    }
     return { references, logs };
   }
 
@@ -327,5 +361,62 @@ export class OrcaTaskExecutor implements TaskExecutor {
       text.includes("worker_done") &&
       text.includes("succeeded")
     );
+  }
+
+  private externalEvents(value: unknown): ExternalEventRecord[] {
+    const objects: Array<Record<string, unknown>> = [];
+    const collect = (candidate: unknown): void => {
+      if (!candidate || typeof candidate !== "object") return;
+      if (!Array.isArray(candidate))
+        objects.push(candidate as Record<string, unknown>);
+      for (const child of Object.values(candidate)) collect(child);
+    };
+    collect(value);
+    const events = new Map<string, ExternalEventRecord>();
+    for (const object of objects) {
+      const rawType = typeof object.type === "string" ? object.type : undefined;
+      if (!rawType) continue;
+      const type = rawType.includes("question")
+        ? "question"
+        : rawType.includes("escalation")
+          ? "escalation"
+          : undefined;
+      if (!type) continue;
+      const id = this.findString(object, [
+        `${type}Id`,
+        `${type}_id`,
+        "eventId",
+        "event_id",
+        "id",
+      ]);
+      if (!id) continue;
+      const rawStatus = this.findString(object, ["status", "state"]);
+      const resolved =
+        rawType.includes("resolved") ||
+        ["answered", "approved", "resolved", "closed"].includes(
+          rawStatus ?? "",
+        );
+      const existing = events.get(id);
+      const observedAt = new Date().toISOString();
+      const event: ExternalEventRecord = {
+        id,
+        type,
+        status: resolved ? "resolved" : "pending",
+        observedAt,
+        ...(resolved ? { resolvedAt: observedAt } : {}),
+        ...(this.findString(object, ["message", "question", "reason", "text"])
+          ? {
+              message: this.findString(object, [
+                "message",
+                "question",
+                "reason",
+                "text",
+              ]),
+            }
+          : {}),
+      };
+      if (!existing || event.status === "resolved") events.set(id, event);
+    }
+    return [...events.values()];
   }
 }

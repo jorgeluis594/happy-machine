@@ -8,6 +8,7 @@ import {
 } from "../src/application/use-cases/execute-workflow.js";
 import type {
   ExecutorReferences,
+  ExternalEventRecord,
   ExternalExecutionStatus,
   NormalVisitRecord,
   RunRecord,
@@ -27,7 +28,10 @@ import type {
 import { TaskExecutorError } from "../src/ports/task-executor.js";
 
 interface Behavior {
-  run(launch: TaskLaunch): Promise<void>;
+  run(
+    launch: TaskLaunch,
+    onEvent?: (event: ExternalEventRecord) => Promise<void>,
+  ): Promise<void>;
 }
 
 function normalVisit(run: RunRecord, index = 0): NormalVisitRecord {
@@ -58,6 +62,7 @@ class ScriptedExecutor implements TaskExecutor {
   async execute(
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,
+    onEvent?: (event: ExternalEventRecord) => Promise<void>,
   ): Promise<TaskExecution> {
     this.launches.push(structuredClone(launch));
     this.active += 1;
@@ -65,7 +70,7 @@ class ScriptedExecutor implements TaskExecutor {
     const external = references(launch.attemptNumber);
     await onStarted(external);
     try {
-      await this.behaviors[launch.attemptNumber - 1].run(launch);
+      await this.behaviors[launch.attemptNumber - 1].run(launch, onEvent);
       this.active -= 1;
       return {
         references: external,
@@ -334,6 +339,50 @@ describe("retries and timeouts", () => {
     expect(context).not.toContain("partial-one.md");
     expect(context).not.toContain("partial-two.md");
     expect(context).not.toContain("source.ts");
+  });
+
+  it("keeps a pending question active until the ordinary attempt timeout", async () => {
+    const setup = await definition({
+      attemptTimeoutMs: 200,
+      maxAttempts: 1,
+      retryDelayMs: 0,
+    });
+    const wait: Wait = (milliseconds, signal) =>
+      signal
+        ? new Promise<void>((resolve) => setImmediate(resolve))
+        : Promise.resolve();
+    const executor = new ScriptedExecutor(
+      [
+        {
+          run: async (_launch, onEvent) => {
+            await onEvent?.({
+              id: "question-timeout",
+              type: "question",
+              status: "pending",
+              observedAt: "2026-08-11T00:00:00.100Z",
+              message: "Still waiting",
+            });
+            await new Promise(() => {});
+          },
+        },
+      ],
+      ["stopped"],
+    );
+
+    const run = await execute(executor, setup.definitions, wait);
+    const attempt = normalVisit(run).task.attempts[0];
+
+    expect(run).toMatchObject({
+      status: "failed",
+      failure: { code: "attempt_timeout" },
+    });
+    expect(attempt.externalEvents).toMatchObject([
+      { id: "question-timeout", status: "pending" },
+    ]);
+    expect(run.events.map((event) => event.type)).toContain(
+      "orca_question_observed",
+    );
+    expect(run.failure?.code).not.toBe("question_failed");
   });
 
   it.each([

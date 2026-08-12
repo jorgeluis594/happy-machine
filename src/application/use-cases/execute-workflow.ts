@@ -1,6 +1,7 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  ExternalEventRecord,
   GlobalLimitEvaluation,
   NormalVisitRecord,
   ParallelVisitRecord,
@@ -170,6 +171,13 @@ export class ExecuteWorkflow {
           stateId: state.id,
           visitNumber,
         });
+        const queuedTasks = visit.type === "agent" ? [visit.task] : visit.tasks;
+        for (const task of queuedTasks)
+          this.event(run, "task_queued", timestamp(), {
+            stateId: state.id,
+            visitNumber,
+            taskId: task.id,
+          });
         visit.contextPath = await this.runs.prepareVisitContext(run);
         await this.runs.save(run);
 
@@ -227,6 +235,15 @@ export class ExecuteWorkflow {
         committedVisit.outcome = outcome;
         committedVisit.target = target;
         committed.documents.push(...documents);
+        for (const document of documents)
+          this.event(committed, "document_committed", timestamp(), {
+            stateId: document.stateId,
+            visitNumber: document.visitNumber,
+            taskId: document.taskId,
+            name: document.name,
+            internalPath: document.internalPath,
+            sha256: document.sha256,
+          });
         if (committedVisit.type === "agent") {
           const committedAttempt = committedVisit.task.attempts.at(-1)!;
           committedAttempt.outcome = outcome;
@@ -480,6 +497,11 @@ export class ExecuteWorkflow {
       }
     | TaskFailureResult
   > {
+    const retryContext = {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: task.id,
+    };
     for (
       let attemptNumber = 1;
       attemptNumber <= work.policies.maxAttempts;
@@ -522,6 +544,13 @@ export class ExecuteWorkflow {
       this.event(run, "attempt_launching", timestamp(), {
         identity,
         attemptNumber,
+      });
+      this.event(run, "task_scheduled", timestamp(), {
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        taskId: task.id,
+        attemptNumber,
+        identity,
       });
       await this.runs.save(run);
 
@@ -567,6 +596,7 @@ export class ExecuteWorkflow {
               attemptNumber,
               work,
               failure,
+              retryContext,
               timestamp,
             );
             if (terminal) return terminal;
@@ -595,6 +625,7 @@ export class ExecuteWorkflow {
             attemptNumber,
             work,
             failure,
+            retryContext,
             timestamp,
           );
           if (terminal) return terminal;
@@ -605,6 +636,7 @@ export class ExecuteWorkflow {
       await this.recordFailure(run, attempt, attemptResult.failure, timestamp);
       if (attemptResult.kind === "global_limit") {
         this.event(run, "retry_suppressed", timestamp(), {
+          ...retryContext,
           failedAttemptNumber: attemptNumber,
           reason: "workflow_timeout",
           failure: attemptResult.failure,
@@ -614,6 +646,7 @@ export class ExecuteWorkflow {
       }
       if (attemptResult.kind === "unsafe") {
         this.event(run, "retry_suppressed", timestamp(), {
+          ...retryContext,
           failedAttemptNumber: attemptNumber,
           reason: "external_execution_uncertain",
           failure: attemptResult.failure,
@@ -626,6 +659,7 @@ export class ExecuteWorkflow {
         attemptNumber,
         work,
         attemptResult.failure,
+        retryContext,
         timestamp,
       );
       if (terminal) return terminal;
@@ -641,18 +675,29 @@ export class ExecuteWorkflow {
     signal?: AbortSignal,
   ): Promise<AttemptResult> {
     const timeoutController = new AbortController();
+    const observationController = new AbortController();
+    const observationSignal = launch.signal
+      ? AbortSignal.any([launch.signal, observationController.signal])
+      : observationController.signal;
     let startedPersistence: Promise<void> | undefined;
-    const execution = this.executor.execute(launch, async (references) => {
-      if (attempt.status !== "launching") return;
-      attempt.executor = references;
-      attempt.status = "running";
-      this.event(run, "attempt_started", timestamp(), {
-        identity: attempt.id,
-        ...references,
-      });
-      startedPersistence = this.runs.save(run);
-      await startedPersistence;
-    });
+    const execution = this.executor.execute(
+      { ...launch, signal: observationSignal },
+      async (references) => {
+        if (attempt.status !== "launching") return;
+        attempt.executor = references;
+        attempt.status = "running";
+        this.event(run, "attempt_started", timestamp(), {
+          identity: attempt.id,
+          ...references,
+        });
+        startedPersistence = this.runs.save(run);
+        await startedPersistence;
+      },
+      async (externalEvent) => {
+        this.recordExternalEvent(run, attempt, externalEvent, timestamp());
+        await this.runs.save(run);
+      },
+    );
     const settled = execution.then(
       (value) => ({ kind: "completed", execution: value }) as const,
       (error: unknown) => {
@@ -693,15 +738,18 @@ export class ExecuteWorkflow {
       ]);
     } catch (error) {
       timeoutController.abort();
+      observationController.abort();
       throw error;
     }
     if (result.kind !== "timeout") {
       timeoutController.abort();
+      observationController.abort();
       attempt.externalStatus = "stopped";
       return result;
     }
 
     void settled;
+    observationController.abort();
     attempt.status = "timing_out";
     if (startedPersistence) await startedPersistence;
     if (result.cause === "workflow_timeout") {
@@ -863,18 +911,21 @@ export class ExecuteWorkflow {
     attemptNumber: number,
     state: AgentWorkDefinition,
     failure: AttemptFailure,
+    context: { stateId: string; visitNumber: number; taskId: string },
     timestamp: () => string,
   ): Promise<
     { kind: "failed" | "global_limit"; failure: AttemptFailure } | undefined
   > {
     const deadlineFailure = await this.evaluateDeadline(run, timestamp, {
       phase: "retry_decision",
+      ...context,
       failedAttemptNumber: attemptNumber,
     });
     if (deadlineFailure)
       return { kind: "global_limit", failure: deadlineFailure };
     if (attemptNumber >= state.policies.maxAttempts) {
       this.event(run, "retry_exhausted", timestamp(), {
+        ...context,
         failedAttemptNumber: attemptNumber,
         maxAttempts: state.policies.maxAttempts,
         failure,
@@ -883,6 +934,7 @@ export class ExecuteWorkflow {
       return { kind: "failed", failure };
     }
     this.event(run, "retry_scheduled", timestamp(), {
+      ...context,
       failedAttemptNumber: attemptNumber,
       nextAttemptNumber: attemptNumber + 1,
       delayMs: state.policies.retryDelayMs,
@@ -910,6 +962,7 @@ export class ExecuteWorkflow {
       const evaluation = evaluateWorkflowDeadline(run.deadlineAt, observedAt);
       this.limitEvent(run, evaluation, observedAt, {
         phase: "retry_delay",
+        ...context,
         failedAttemptNumber: attemptNumber,
         nextAttemptNumber: attemptNumber + 1,
       });
@@ -921,6 +974,7 @@ export class ExecuteWorkflow {
     }
     deadlineController.abort();
     this.event(run, "retry_delay_completed", timestamp(), {
+      ...context,
       failedAttemptNumber: attemptNumber,
       nextAttemptNumber: attemptNumber + 1,
       delayMs: state.policies.retryDelayMs,
@@ -928,6 +982,7 @@ export class ExecuteWorkflow {
     await this.runs.save(run);
     const afterDelayFailure = await this.evaluateDeadline(run, timestamp, {
       phase: "retry_delay_completed",
+      ...context,
       failedAttemptNumber: attemptNumber,
       nextAttemptNumber: attemptNumber + 1,
     });
@@ -1052,6 +1107,62 @@ export class ExecuteWorkflow {
       code: "engine_failure",
       message: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  private recordExternalEvent(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    externalEvent: ExternalEventRecord,
+    at: string,
+  ): void {
+    attempt.externalEvents ??= [];
+    const existing = attempt.externalEvents.find(
+      (candidate) => candidate.id === externalEvent.id,
+    );
+    if (existing?.status === externalEvent.status) {
+      Object.assign(existing, externalEvent);
+      return;
+    }
+    if (existing) Object.assign(existing, externalEvent);
+    else attempt.externalEvents.push(externalEvent);
+    const provenance = this.attemptProvenance(run, attempt);
+    this.event(
+      run,
+      `orca_${externalEvent.type}_${externalEvent.status === "resolved" ? "resolved" : "observed"}`,
+      at,
+      {
+        ...provenance,
+        identity: attempt.id,
+        externalEventId: externalEvent.id,
+        status: externalEvent.status,
+        ...(externalEvent.message === undefined
+          ? {}
+          : { message: externalEvent.message }),
+      },
+    );
+  }
+
+  private attemptProvenance(
+    run: RunRecord,
+    attempt: AttemptRecord,
+  ): {
+    stateId: string;
+    visitNumber: number;
+    taskId: string;
+    attemptNumber: number;
+  } {
+    for (const visit of run.visits) {
+      const tasks = visit.type === "agent" ? [visit.task] : visit.tasks;
+      for (const task of tasks)
+        if (task.attempts.includes(attempt))
+          return {
+            stateId: visit.stateId,
+            visitNumber: visit.number,
+            taskId: task.id,
+            attemptNumber: attempt.number,
+          };
+    }
+    throw new Error(`Attempt ${attempt.id} has no durable provenance`);
   }
 
   private event(

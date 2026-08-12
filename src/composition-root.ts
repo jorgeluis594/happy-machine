@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import { ExecuteWorkflow } from "./application/use-cases/execute-workflow.js";
 import { RecoverWorkflow } from "./application/use-cases/recover-workflow.js";
+import { InspectRuns } from "./application/use-cases/inspect-runs.js";
 import { Cli } from "./infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { FilesystemRunRepository } from "./infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
@@ -28,7 +29,7 @@ export function createProcessEntryPoint(): (
   const recover = new RecoverWorkflow(runs, executor, now, (milliseconds) =>
     sleeper(milliseconds),
   );
-  const cli = new Cli(useCase, recover, {
+  const cli = new Cli(useCase, recover, new InspectRuns(runs, now), {
     stdout: (message) => process.stdout.write(`${message}\n`),
     stderr: (message) => process.stderr.write(`${message}\n`),
   });

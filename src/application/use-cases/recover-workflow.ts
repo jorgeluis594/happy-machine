@@ -1,6 +1,7 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  ExternalEventRecord,
   NormalVisitRecord,
   ParallelVisitRecord,
   RunRecord,
@@ -179,6 +180,14 @@ export class RecoverWorkflow {
       stateId,
       visitNumber: number,
     });
+    const queuedTasks = visit.type === "agent" ? [visit.task] : visit.tasks;
+    for (const task of queuedTasks)
+      this.event(controlled.run, "task_queued", {
+        stateId,
+        visitNumber: number,
+        taskId: task.id,
+        recovered: true,
+      });
     visit.contextPath = await this.runs.prepareVisitContext(controlled.run);
     await this.persist(controlled);
     return visit;
@@ -215,9 +224,20 @@ export class RecoverWorkflow {
     recovered.attempt.documents = documents;
     if (recovered.result.error !== undefined)
       recovered.attempt.error = recovered.result.error;
+    this.event(controlled.run, "attempt_succeeded", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: visit.task.id,
+      identity: recovered.attempt.id,
+      attemptNumber: recovered.attempt.number,
+      outcome: recovered.result.outcome,
+      documents: documents.map((document) => document.internalPath),
+      recovered: true,
+    });
     visit.outcome = recovered.result.outcome;
     visit.target = target;
     this.appendDocuments(controlled.run, documents);
+    this.documentEvents(controlled.run, documents);
     this.commitTransition(controlled.run, visit, target);
     await this.persist(controlled);
   }
@@ -251,6 +271,15 @@ export class RecoverWorkflow {
                 code: "declared_failed",
                 message: "Parallel task declared failed",
               };
+        this.event(controlled.run, "attempt_failed", {
+          stateId: visit.stateId,
+          visitNumber: visit.number,
+          taskId: task.id,
+          identity: result.attempt.id,
+          attemptNumber: result.attempt.number,
+          failure: task.failure,
+          recovered: true,
+        });
       } else {
         const documents = await this.runs.stageDocuments(
           controlled.run,
@@ -265,6 +294,16 @@ export class RecoverWorkflow {
         task.status = "succeeded";
         task.outcome = "succeeded";
         task.documents = documents;
+        this.event(controlled.run, "attempt_succeeded", {
+          stateId: visit.stateId,
+          visitNumber: visit.number,
+          taskId: task.id,
+          identity: result.attempt.id,
+          attemptNumber: result.attempt.number,
+          outcome: "succeeded",
+          documents: documents.map((document) => document.internalPath),
+          recovered: true,
+        });
       }
       await this.persist(controlled);
     }
@@ -275,6 +314,22 @@ export class RecoverWorkflow {
       controlled.run,
       visit.tasks.flatMap((task) => task.documents),
     );
+    this.documentEvents(
+      controlled.run,
+      visit.tasks.flatMap((task) => task.documents),
+    );
+    this.event(controlled.run, "parallel_join_committed", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      outcome,
+      tasks: visit.tasks.map((task) => ({
+        id: task.id,
+        status: task.status,
+        attempts: task.attempts.length,
+        ...(task.failure ? { finalError: task.failure } : {}),
+      })),
+      recovered: true,
+    });
     this.commitTransition(controlled.run, visit, visit.target);
     await this.persist(controlled);
   }
@@ -335,6 +390,14 @@ export class RecoverWorkflow {
         attemptNumber: number,
         recovered: true,
       });
+      this.event(controlled.run, "task_scheduled", {
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        taskId: task.id,
+        attemptNumber: number,
+        identity: attempt.id,
+        recovered: true,
+      });
       await this.persist(controlled);
     }
     if (
@@ -343,6 +406,12 @@ export class RecoverWorkflow {
     )
       return this.expireAttempt(controlled, attempt);
     const observation = await this.observe(controlled, attempt);
+    for (const externalEvent of observation.status === "not_found"
+      ? []
+      : (observation.events ?? []))
+      this.recordExternalEvent(controlled.run, attempt, externalEvent);
+    if (observation.status !== "not_found" && observation.events?.length)
+      await this.persist(controlled);
     if (observation.status === "not_found")
       return this.launchRecovered(
         controlled,
@@ -464,6 +533,10 @@ export class RecoverWorkflow {
       await this.wait(delay);
       throwIfDetached(controlled.signal);
       const observation = await this.observe(controlled, attempt);
+      for (const externalEvent of observation.status === "not_found"
+        ? []
+        : (observation.events ?? []))
+        this.recordExternalEvent(controlled.run, attempt, externalEvent);
       if (observation.status === "completed") {
         attempt.executor = observation.references;
         attempt.logs = observation.logs;
@@ -503,6 +576,49 @@ export class RecoverWorkflow {
       attempt.id,
       attempt.executor,
       controlled.run.projectRoot,
+    );
+  }
+
+  private recordExternalEvent(
+    run: RunRecord,
+    attempt: AttemptRecord,
+    externalEvent: ExternalEventRecord,
+  ): void {
+    attempt.externalEvents ??= [];
+    const existing = attempt.externalEvents.find(
+      (candidate) => candidate.id === externalEvent.id,
+    );
+    if (existing?.status === externalEvent.status) {
+      Object.assign(existing, externalEvent);
+      return;
+    }
+    if (existing) Object.assign(existing, externalEvent);
+    else attempt.externalEvents.push(externalEvent);
+    const visit = run.visits.find((candidate) =>
+      (candidate.type === "agent" ? [candidate.task] : candidate.tasks).some(
+        (task) => task.attempts.includes(attempt),
+      ),
+    );
+    const task = visit
+      ? (visit.type === "agent" ? [visit.task] : visit.tasks).find(
+          (candidate) => candidate.attempts.includes(attempt),
+        )
+      : undefined;
+    this.event(
+      run,
+      `orca_${externalEvent.type}_${externalEvent.status === "resolved" ? "resolved" : "observed"}`,
+      {
+        stateId: visit?.stateId,
+        visitNumber: visit?.number,
+        taskId: task?.id,
+        attemptNumber: attempt.number,
+        identity: attempt.id,
+        externalEventId: externalEvent.id,
+        status: externalEvent.status,
+        ...(externalEvent.message === undefined
+          ? {}
+          : { message: externalEvent.message }),
+      },
     );
   }
 
@@ -657,6 +773,29 @@ export class RecoverWorkflow {
         )
       )
         run.documents.push(document);
+  }
+
+  private documentEvents(
+    run: RunRecord,
+    documents: RunRecord["documents"],
+  ): void {
+    for (const document of documents)
+      if (
+        !run.events.some(
+          (event) =>
+            event.type === "document_committed" &&
+            event.data.internalPath === document.internalPath,
+        )
+      )
+        this.event(run, "document_committed", {
+          stateId: document.stateId,
+          visitNumber: document.visitNumber,
+          taskId: document.taskId,
+          name: document.name,
+          internalPath: document.internalPath,
+          sha256: document.sha256,
+          recovered: true,
+        });
   }
 
   private newAttempt(

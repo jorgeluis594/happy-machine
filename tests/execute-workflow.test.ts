@@ -12,6 +12,7 @@ import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ExecuteWorkflow } from "../src/application/use-cases/execute-workflow.js";
 import { RecoverWorkflow } from "../src/application/use-cases/recover-workflow.js";
+import { InspectRuns } from "../src/application/use-cases/inspect-runs.js";
 import type {
   NormalVisitRecord,
   RunRecord,
@@ -156,6 +157,7 @@ function cli(projectRoot?: string) {
     cli: new Cli(
       useCase,
       new RecoverWorkflow(repository, executor, now, () => Promise.resolve()),
+      new InspectRuns(repository, now),
       {
         stdout: (line) => {
           stdout.push(line);
@@ -755,8 +757,10 @@ describe("happy-machine execute", () => {
       "limit_evaluated",
       "limit_evaluated",
       "state_entered",
+      "task_queued",
       "limit_evaluated",
       "attempt_launching",
+      "task_scheduled",
       "attempt_started",
       "attempt_succeeded",
       "limit_evaluated",
@@ -793,6 +797,87 @@ describe("happy-machine execute", () => {
     });
     expect(contract.instructions).toContain("Follow the task");
     expect(contract.prompt).toContain("Choose an outcome");
+  });
+
+  it("persists structured Orca questions, escalations, and external resolution without changing routing", async () => {
+    const setup = await project("approved");
+    await writeFile(
+      path.join(setup.root, ".fake-check-sequence.json"),
+      JSON.stringify([
+        {
+          messages: [
+            { type: "question", questionId: "q-1", message: "Approve?" },
+          ],
+        },
+        {
+          messages: [
+            {
+              type: "escalation",
+              escalationId: "e-1",
+              reason: "External review",
+            },
+          ],
+        },
+        {
+          messages: [
+            {
+              type: "question_resolved",
+              questionId: "q-1",
+              status: "answered",
+            },
+          ],
+        },
+        {
+          messages: [
+            {
+              type: "worker_done",
+              outcome: "succeeded",
+              dispatchId: "orca-dispatch-1",
+            },
+          ],
+        },
+      ]),
+    );
+    const app = cli(setup.root);
+
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const run = await storedRun(setup.root);
+    const attempt = normalVisit(run).task.attempts[0];
+
+    expect(run.status).toBe("succeeded");
+    expect(attempt.outcome).toBe("approved");
+    expect(attempt.externalEvents).toMatchObject([
+      { id: "q-1", type: "question", status: "resolved" },
+      { id: "e-1", type: "escalation", status: "pending" },
+    ]);
+    expect(run.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "orca_question_observed",
+        "orca_escalation_observed",
+        "orca_question_resolved",
+        "attempt_succeeded",
+        "transition_committed",
+      ]),
+    );
+  });
+
+  it("exposes read-only status and history commands with successful exit codes", async () => {
+    const setup = await project("approved");
+    const app = cli(setup.root);
+    expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
+    const runId = app.stdout[0];
+
+    expect(await app.cli.run(["status", runId], setup.root)).toBe(0);
+    expect(app.stdout.at(-1)).toContain(`Run: ${runId}`);
+    expect(app.stdout.at(-1)).toContain("Status: succeeded");
+    expect(app.stdout.at(-1)).toContain(
+      `run=${runId} state=review visit=1 task=review-task attempt=1`,
+    );
+    expect(await app.cli.run(["history", runId], setup.root)).toBe(0);
+    expect(app.stdout.at(-1)).toContain("Events:");
+    expect(await app.cli.run(["history"], setup.root)).toBe(0);
+    expect(app.stdout.at(-1)).toContain("Runs (newest first):");
+    expect(await app.cli.run(["status", "unknown-run"], setup.root)).toBe(1);
   });
 
   it("copies external and duplicate-basename inputs into the initial context", async () => {
@@ -940,7 +1025,7 @@ describe("happy-machine execute", () => {
     const app = cli();
     expect(await app.cli.run(argv, "/project")).toBe(1);
     expect(app.stderr).toEqual([
-      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID",
+      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
     ]);
   });
 

@@ -466,6 +466,48 @@ describe("durable recovery", () => {
     );
   });
 
+  it("persists structured intervention events discovered during reconciliation", async () => {
+    const setup = await durableSetup(normalState());
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const attempt = await addAttempt(setup, visit, visit.task);
+    attempt.status = "running";
+    attempt.executor = references(attempt.id);
+    await writeResult(attempt);
+    await setup.repository.save(setup.run);
+    const executor = new RecoveryExecutor((identity) =>
+      Promise.resolve({
+        status: "completed",
+        references: references(identity),
+        logs: { stdout: "reconciled", stderr: "" },
+        events: [
+          {
+            id: "escalation-recovered",
+            type: "escalation",
+            status: "resolved",
+            observedAt: "2026-08-11T00:00:00.000Z",
+            resolvedAt: "2026-08-11T00:00:01.000Z",
+          },
+        ],
+      }),
+    );
+
+    const run = await recoverer(setup.repository, executor).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "event-recovery-controller",
+    });
+    const recoveredVisit = run.visits[0];
+    if (recoveredVisit.type !== "agent") throw new Error("expected agent");
+
+    expect(recoveredVisit.task.attempts[0].externalEvents).toMatchObject([
+      { id: "escalation-recovered", status: "resolved" },
+    ]);
+    expect(run.events.map((event) => event.type)).toContain(
+      "orca_escalation_resolved",
+    );
+  });
+
   it("records a failed recovered external execution without relaunching it", async () => {
     const setup = await durableSetup(normalState());
     const visit = await addVisit(setup);

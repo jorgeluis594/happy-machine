@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -9,6 +9,75 @@ const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 beforeAll(async () => chmod(fixture, 0o755));
 
 describe("Orca timeout reconciliation adapter", () => {
+  it("consumes questions, escalations, and external resolutions before ordinary completion", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-events-"));
+    const output = path.join(root, "output");
+    await mkdir(output);
+    const contextPath = path.join(root, "context.md");
+    await writeFile(contextPath, "context\n");
+    await writeFile(
+      path.join(root, ".fake-check-sequence.json"),
+      JSON.stringify([
+        {
+          messages: [
+            { type: "question", questionId: "q-1", message: "Approve?" },
+          ],
+        },
+        {
+          messages: [
+            { type: "escalation", escalationId: "e-1", reason: "Review" },
+          ],
+        },
+        {
+          messages: [
+            {
+              type: "question_resolved",
+              questionId: "q-1",
+              status: "answered",
+            },
+          ],
+        },
+        {
+          messages: [
+            {
+              type: "worker_done",
+              outcome: "succeeded",
+              dispatchId: "orca-dispatch-1",
+            },
+          ],
+        },
+      ]),
+    );
+    const observed: Array<{ id: string; status: string; type: string }> = [];
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await executor.execute(
+      {
+        identity: "run:state:1:task:1",
+        projectWorkspace: root,
+        contextPath,
+        outputDirectory: output,
+        resultPath: path.join(output, "result.json"),
+        instructions: "instructions",
+        prompt: "prompt",
+        model: "model",
+        timeoutMs: 5_000,
+        attemptNumber: 1,
+      },
+      () => Promise.resolve(),
+      (event) => {
+        observed.push(event);
+        return Promise.resolve();
+      },
+    );
+
+    expect(observed).toMatchObject([
+      { id: "q-1", type: "question", status: "pending" },
+      { id: "e-1", type: "escalation", status: "pending" },
+      { id: "q-1", type: "question", status: "resolved" },
+    ]);
+  });
+
   it.each([
     ["starting", "active"],
     ["ready", "active"],

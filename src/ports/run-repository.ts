@@ -75,6 +75,8 @@ export interface RunRepository {
     request: SnapshotCreationRequest,
   ): Promise<SnapshotCreationResult>;
   load?(projectRoot: string, runId: string): Promise<RecoveredRun>;
+  discoverProjectRoot?(currentDirectory: string): Promise<string>;
+  list?(projectRoot: string): Promise<RunRecord[]>;
   acquireControl?(
     projectRoot: string,
     runId: string,
