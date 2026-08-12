@@ -11,6 +11,24 @@ import type {
   EffectiveExecutionDefinition,
 } from "./project-definitions.js";
 
+export interface RecoveredRun {
+  run: RunRecord;
+  definition: EffectiveExecutionDefinition;
+}
+
+export interface ControllerSession {
+  run: RunRecord;
+  fencingToken: number;
+}
+
+export class RunAlreadyControlledError extends Error {
+  readonly code = "run_already_controlled";
+}
+
+export class ControllerLeaseLostError extends Error {
+  readonly code = "controller_lease_lost";
+}
+
 export interface AttemptPaths {
   controlWorkspace: string;
   contextPath: string;
@@ -52,6 +70,30 @@ export interface RunRepository {
   createSnapshot(
     request: SnapshotCreationRequest,
   ): Promise<SnapshotCreationResult>;
+  load?(projectRoot: string, runId: string): Promise<RecoveredRun>;
+  acquireControl?(
+    projectRoot: string,
+    runId: string,
+    controllerId: string,
+    observedAt: string,
+  ): Promise<ControllerSession>;
+  renewControl?(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+    observedAt: string,
+  ): Promise<ControllerSession>;
+  saveControlled?(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+  ): Promise<void>;
+  releaseControl?(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+    observedAt: string,
+  ): Promise<RunRecord>;
   save(run: RunRecord): Promise<void>;
   prepareVisitContext(run: RunRecord): Promise<string>;
   prepareAttempt(

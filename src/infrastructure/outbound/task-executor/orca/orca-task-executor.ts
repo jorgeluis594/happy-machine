@@ -4,6 +4,7 @@ import type {
   ExternalExecutionStatus,
 } from "../../../../domain/execution/run.js";
 import type {
+  RecoveryObservation,
   TaskExecution,
   TaskExecutor,
   TaskLaunch,
@@ -20,6 +21,70 @@ export class OrcaTaskExecutor implements TaskExecutor {
   constructor(
     private readonly executable = process.env.ORCA_CLI_COMMAND || "orca",
   ) {}
+
+  async recover(
+    identity: string,
+    references: ExecutorReferences | undefined,
+    projectWorkspace: string,
+  ): Promise<RecoveryObservation> {
+    let taskId = references?.taskId;
+    let lookupLogs = { stdout: "", stderr: "" };
+    if (!taskId) {
+      const listed = await this.run(
+        ["orchestration", "task-list", "--json"],
+        projectWorkspace,
+      );
+      lookupLogs = { stdout: listed.stdout, stderr: listed.stderr };
+      const task = this.findObjectContaining(listed.json, identity);
+      taskId = task
+        ? this.findString(task, ["taskId", "task_id", "id"])
+        : undefined;
+      if (!taskId) return { status: "not_found" };
+    }
+    const shown = await this.run(
+      ["orchestration", "dispatch-show", "--task", taskId, "--json"],
+      projectWorkspace,
+    );
+    const dispatchId =
+      references?.dispatchId ??
+      this.findString(shown.json, ["dispatchId", "dispatch_id"]);
+    if (!dispatchId)
+      return {
+        status: "start_unknown",
+        references: {
+          taskId,
+          dispatchId: `unknown:${identity}`,
+          runId: references?.runId,
+        },
+        logs: {
+          stdout: lookupLogs.stdout + shown.stdout,
+          stderr: lookupLogs.stderr + shown.stderr,
+        },
+      };
+    const recoveredReferences: ExecutorReferences = {
+      taskId,
+      dispatchId,
+      runId:
+        references?.runId ?? this.findString(shown.json, ["runId", "run_id"]),
+      terminalHandle:
+        references?.terminalHandle ??
+        this.findString(shown.json, ["agentTerminalHandle", "terminalHandle"]),
+    };
+    const state = this.findString(shown.json, ["workerState", "state"]);
+    const logs = {
+      stdout: lookupLogs.stdout + shown.stdout,
+      stderr: lookupLogs.stderr + shown.stderr,
+    };
+    if (state === "start_unknown" || state === "stop_unknown")
+      return { status: state, references: recoveredReferences, logs };
+    if (["succeeded", "stopped"].includes(state ?? ""))
+      return { status: "completed", references: recoveredReferences, logs };
+    if (["failed", "abandoned"].includes(state ?? ""))
+      return { status: "failed", references: recoveredReferences, logs };
+    if (["starting", "ready", "stopping"].includes(state ?? ""))
+      return { status: "active", references: recoveredReferences, logs };
+    return { status: "start_unknown", references: recoveredReferences, logs };
+  }
 
   async execute(
     launch: TaskLaunch,
@@ -225,6 +290,20 @@ export class OrcaTaskExecutor implements TaskExecutor {
         const found = this.findString(child, keys);
         if (found) return found;
       }
+    }
+    return undefined;
+  }
+
+  private findObjectContaining(
+    value: unknown,
+    text: string,
+  ): Record<string, unknown> | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    if (!Array.isArray(value) && JSON.stringify(value).includes(text))
+      return value as Record<string, unknown>;
+    for (const child of Object.values(value)) {
+      const found = this.findObjectContaining(child, text);
+      if (found) return found;
     }
     return undefined;
   }

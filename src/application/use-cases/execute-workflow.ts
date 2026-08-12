@@ -103,6 +103,16 @@ export class ExecuteWorkflow {
     });
     await this.runs.save(run);
     request.onRunAllocated(run.id);
+    if (this.runs.acquireControl) {
+      const controllerId = `${run.id}:initial-controller`;
+      const session = await this.runs.acquireControl(
+        run.projectRoot,
+        run.id,
+        controllerId,
+        timestamp(),
+      );
+      run = session.run;
+    }
 
     try {
       let stateId = createdSnapshot.definition.initialState;

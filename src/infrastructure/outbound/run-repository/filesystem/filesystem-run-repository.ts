@@ -14,14 +14,26 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import type {
+  ControllerLease,
   DocumentRecord,
   RunRecord,
   TaskRecord,
   VisitRecord,
 } from "../../../../domain/execution/run.js";
-import { ResultValidationError } from "../../../../ports/run-repository.js";
+import {
+  acquireControllerLease,
+  leaseIsValid,
+  renewControllerLease,
+} from "../../../../domain/execution/run.js";
+import {
+  ControllerLeaseLostError,
+  ResultValidationError,
+  RunAlreadyControlledError,
+} from "../../../../ports/run-repository.js";
 import type {
   AttemptPaths,
+  ControllerSession,
+  RecoveredRun,
   RunRepository,
   SnapshotCreationRequest,
   SnapshotCreationResult,
@@ -119,8 +131,147 @@ export class FilesystemRunRepository implements RunRepository {
     }
   }
 
+  async load(projectRoot: string, runId: string): Promise<RecoveredRun> {
+    const directory = this.runDirectoryFor(projectRoot, runId);
+    let run: RunRecord;
+    let definition: RecoveredRun["definition"];
+    try {
+      run = JSON.parse(
+        await readFile(path.join(directory, "run.json"), "utf8"),
+      ) as RunRecord;
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(directory, "snapshot", "manifest.json"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      definition = manifest.effectiveDefinition as RecoveredRun["definition"];
+    } catch (error) {
+      throw new Error(
+        `Durable run storage is corrupt: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+    if (
+      run.id !== runId ||
+      run.projectRoot !== projectRoot ||
+      !definition ||
+      typeof definition !== "object" ||
+      definition.workflowId !== run.workflowId
+    )
+      throw new Error("Durable run storage is inconsistent");
+    return { run, definition };
+  }
+
+  async acquireControl(
+    projectRoot: string,
+    runId: string,
+    controllerId: string,
+    observedAt: string,
+  ): Promise<ControllerSession> {
+    return this.withRunLock(projectRoot, runId, async () => {
+      const recovered = await this.load(projectRoot, runId);
+      const current = recovered.run.controllerLease;
+      if (
+        leaseIsValid(current, observedAt) &&
+        current?.controllerId !== controllerId
+      )
+        throw new RunAlreadyControlledError(
+          `Run ${runId} is already controlled by ${current?.controllerId}`,
+        );
+      const lease = acquireControllerLease(
+        current,
+        controllerId,
+        recovered.definition.policies.controllerLeaseMs,
+        observedAt,
+      );
+      recovered.run.controllerLease = lease;
+      this.appendLeaseEvent(
+        recovered.run,
+        current ? "controller_lease_recovered" : "controller_lease_acquired",
+        observedAt,
+        lease,
+      );
+      await this.writeRun(recovered.run);
+      return { run: recovered.run, fencingToken: lease.fencingToken };
+    });
+  }
+
+  async renewControl(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+    observedAt: string,
+  ): Promise<ControllerSession> {
+    return this.withRunLock(run.projectRoot, run.id, async () => {
+      const current = (await this.load(run.projectRoot, run.id)).run;
+      const lease = this.requireLease(
+        current.controllerLease,
+        controllerId,
+        fencingToken,
+      );
+      if (!leaseIsValid(lease, observedAt))
+        throw new ControllerLeaseLostError(
+          "Controller lease expired before it could be renewed",
+        );
+      current.controllerLease = renewControllerLease(lease, observedAt);
+      this.appendLeaseEvent(
+        current,
+        "controller_lease_renewed",
+        observedAt,
+        current.controllerLease,
+      );
+      await this.writeRun(current);
+      return { run: current, fencingToken };
+    });
+  }
+
+  async saveControlled(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+  ): Promise<void> {
+    await this.withRunLock(run.projectRoot, run.id, async () => {
+      const current = (await this.load(run.projectRoot, run.id)).run;
+      this.requireLease(current.controllerLease, controllerId, fencingToken);
+      run.controllerLease = current.controllerLease;
+      await this.writeRun(run);
+    });
+  }
+
+  async releaseControl(
+    run: RunRecord,
+    controllerId: string,
+    fencingToken: number,
+    observedAt: string,
+  ): Promise<RunRecord> {
+    return this.withRunLock(run.projectRoot, run.id, async () => {
+      const current = (await this.load(run.projectRoot, run.id)).run;
+      const lease = this.requireLease(
+        current.controllerLease,
+        controllerId,
+        fencingToken,
+      );
+      current.controllerLease = undefined;
+      this.appendLeaseEvent(
+        current,
+        "controller_lease_released",
+        observedAt,
+        lease,
+      );
+      await this.writeRun(current);
+      return current;
+    });
+  }
+
   save(run: RunRecord): Promise<void> {
     const snapshot = structuredClone(run);
+    if (snapshot.controllerLease)
+      return this.saveControlled(
+        snapshot,
+        snapshot.controllerLease.controllerId,
+        snapshot.controllerLease.fencingToken,
+      );
     const previous = this.saveQueues.get(run.id) ?? Promise.resolve();
     const save = previous
       .catch(() => undefined)
@@ -142,6 +293,76 @@ export class FilesystemRunRepository implements RunRepository {
     };
     void save.then(cleanup, cleanup);
     return save;
+  }
+
+  private async writeRun(run: RunRecord): Promise<void> {
+    const directory = this.runDirectory(run);
+    await mkdir(directory, { recursive: true });
+    const target = path.join(directory, "run.json");
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, "utf8");
+    await rename(temporary, target);
+  }
+
+  private async withRunLock<T>(
+    projectRoot: string,
+    runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const lock = path.join(
+      this.runDirectoryFor(projectRoot, runId),
+      ".control-lock",
+    );
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await mkdir(lock);
+        break;
+      } catch (error) {
+        if (
+          (error as NodeJS.ErrnoException).code !== "EEXIST" ||
+          attempt >= 100
+        )
+          throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await rm(lock, { recursive: true, force: true });
+    }
+  }
+
+  private requireLease(
+    lease: ControllerLease | undefined,
+    controllerId: string,
+    fencingToken: number,
+  ): ControllerLease {
+    if (
+      !lease ||
+      lease.controllerId !== controllerId ||
+      lease.fencingToken !== fencingToken
+    )
+      throw new ControllerLeaseLostError("Controller fencing token is stale");
+    return lease;
+  }
+
+  private appendLeaseEvent(
+    run: RunRecord,
+    type: string,
+    at: string,
+    lease: ControllerLease,
+  ): void {
+    run.events.push({
+      sequence: run.events.length + 1,
+      type,
+      at,
+      data: {
+        controllerId: lease.controllerId,
+        fencingToken: lease.fencingToken,
+        expiresAt: lease.expiresAt,
+      },
+    });
   }
 
   async prepareVisitContext(run: RunRecord): Promise<string> {
@@ -322,18 +543,14 @@ export class FilesystemRunRepository implements RunRepository {
         "documents",
         ...relative.split(path.sep),
       );
-      if (
-        run.documents.some((document) => document.internalPath === internalPath)
-      )
-        throw new ResultValidationError(
-          "documents_invalid",
-          `Document provenance collision: ${internalPath}`,
-        );
       const durablePath = this.durablePath(
         this.runDirectory(run),
         internalPath,
       );
-      return { source, relative, internalPath, durablePath };
+      const existing = run.documents.find(
+        (document) => document.internalPath === internalPath,
+      );
+      return { source, relative, internalPath, durablePath, existing };
     });
     if (
       new Set(planned.map((document) => document.internalPath)).size !==
@@ -343,9 +560,40 @@ export class FilesystemRunRepository implements RunRepository {
         "documents_invalid",
         "Result documents contain a provenance collision",
       );
-    for (const { source, relative, internalPath, durablePath } of planned) {
+    for (const {
+      source,
+      relative,
+      internalPath,
+      durablePath,
+      existing,
+    } of planned) {
+      const sourceContent = await readFile(source);
+      const sourceHash = createHash("sha256")
+        .update(sourceContent)
+        .digest("hex");
+      if (existing) {
+        if (existing.sha256 !== sourceHash)
+          throw new ResultValidationError(
+            "documents_invalid",
+            `Document provenance collision: ${internalPath}`,
+          );
+        records.push(existing);
+        continue;
+      }
       await mkdir(path.dirname(durablePath), { recursive: true });
-      await copyFile(source, durablePath, constants.COPYFILE_EXCL);
+      try {
+        await copyFile(source, durablePath, constants.COPYFILE_EXCL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const durableHash = createHash("sha256")
+          .update(await readFile(durablePath))
+          .digest("hex");
+        if (durableHash !== sourceHash)
+          throw new ResultValidationError(
+            "documents_invalid",
+            `Document provenance collision: ${internalPath}`,
+          );
+      }
       const content = await readFile(durablePath);
       records.push({
         stateId: visit.stateId,

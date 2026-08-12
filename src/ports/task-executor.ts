@@ -21,7 +21,21 @@ export interface TaskExecution {
   logs: { stdout: string; stderr: string };
 }
 
+export type RecoveryObservation =
+  | { status: "not_found" }
+  | {
+      status:
+        "active" | "completed" | "failed" | "start_unknown" | "stop_unknown";
+      references: ExecutorReferences;
+      logs: { stdout: string; stderr: string };
+    };
+
 export interface TaskExecutor {
+  recover?(
+    identity: string,
+    references: ExecutorReferences | undefined,
+    projectWorkspace: string,
+  ): Promise<RecoveryObservation>;
   execute(
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,

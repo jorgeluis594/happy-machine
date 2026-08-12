@@ -76,6 +76,35 @@ if (operation === "orchestration run-create") {
     `${spec}\n`,
   );
   response = { task: { taskId: "orca-task-1" } };
+} else if (operation === "orchestration task-list") {
+  const identityFile = path.join(process.cwd(), ".fake-recovery-identity");
+  response = {
+    tasks: existsSync(identityFile)
+      ? [
+          {
+            taskId: "recovered-task",
+            spec: {
+              happyMachineAttemptIdentity: readFileSync(
+                identityFile,
+                "utf8",
+              ).trim(),
+            },
+          },
+        ]
+      : [],
+  };
+} else if (operation === "orchestration dispatch-show") {
+  const stateFile = path.join(process.cwd(), ".fake-recovery-state");
+  response = {
+    dispatch: {
+      taskId: "recovered-task",
+      dispatchId: "recovered-dispatch",
+      agentTerminalHandle: "recovered-terminal",
+      workerState: existsSync(stateFile)
+        ? readFileSync(stateFile, "utf8").trim()
+        : "ready",
+    },
+  };
 } else if (operation === "orchestration worker-start") {
   const contract = JSON.parse(
     readFileSync(path.join(process.cwd(), ".fake-contract.json"), "utf8"),

@@ -50,3 +50,56 @@ describe("Orca timeout reconciliation adapter", () => {
     ]);
   });
 });
+
+describe("Orca durable recovery adapter", () => {
+  it("returns not_found when no task has the stable attempt identity", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-recovery-"));
+    const executor = new OrcaTaskExecutor(fixture);
+    await expect(
+      executor.recover("run:state:1:task:1", undefined, root),
+    ).resolves.toEqual({ status: "not_found" });
+  });
+
+  it.each([
+    ["starting", "active"],
+    ["ready", "active"],
+    ["stopping", "active"],
+    ["succeeded", "completed"],
+    ["stopped", "completed"],
+    ["failed", "failed"],
+    ["abandoned", "failed"],
+    ["start_unknown", "start_unknown"],
+    ["stop_unknown", "stop_unknown"],
+  ] as const)(
+    "finds provenance and maps %s to %s",
+    async (workerState, expected) => {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "happy-orca-recovery-"),
+      );
+      const identity = "run:state:1:task:1";
+      await writeFile(path.join(root, ".fake-recovery-identity"), identity);
+      await writeFile(path.join(root, ".fake-recovery-state"), workerState);
+      const executor = new OrcaTaskExecutor(fixture);
+
+      const observation = await executor.recover(identity, undefined, root);
+      expect(observation).toMatchObject({
+        status: expected,
+        references: {
+          taskId: "recovered-task",
+          dispatchId: "recovered-dispatch",
+          terminalHandle: "recovered-terminal",
+        },
+      });
+      const calls = (
+        await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      expect(calls.map((call) => call.slice(0, 2))).toEqual([
+        ["orchestration", "task-list"],
+        ["orchestration", "dispatch-show"],
+      ]);
+    },
+  );
+});

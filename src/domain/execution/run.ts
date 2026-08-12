@@ -129,6 +129,7 @@ export interface RunRecord {
   createdAt: string;
   deadlineAt: string;
   transitionCount: number;
+  controllerLease?: ControllerLease;
   terminalTarget?: "$succeeded" | "$failed";
   failure?: AttemptFailure;
   visits: VisitRecord[];
@@ -139,6 +140,52 @@ export interface RunRecord {
     at: string;
     data: Record<string, unknown>;
   }>;
+}
+
+export interface ControllerLease {
+  controllerId: string;
+  fencingToken: number;
+  durationMs: number;
+  acquiredAt: string;
+  renewedAt: string;
+  expiresAt: string;
+}
+
+export function leaseIsValid(
+  lease: ControllerLease | undefined,
+  observedAt: string,
+): boolean {
+  return (
+    lease !== undefined && Date.parse(observedAt) < Date.parse(lease.expiresAt)
+  );
+}
+
+export function acquireControllerLease(
+  previous: ControllerLease | undefined,
+  controllerId: string,
+  durationMs: number,
+  acquiredAt: string,
+): ControllerLease {
+  const fencingToken = (previous?.fencingToken ?? 0) + 1;
+  return {
+    controllerId,
+    fencingToken,
+    durationMs,
+    acquiredAt,
+    renewedAt: acquiredAt,
+    expiresAt: new Date(Date.parse(acquiredAt) + durationMs).toISOString(),
+  };
+}
+
+export function renewControllerLease(
+  lease: ControllerLease,
+  renewedAt: string,
+): ControllerLease {
+  return {
+    ...lease,
+    renewedAt,
+    expiresAt: new Date(Date.parse(renewedAt) + lease.durationMs).toISOString(),
+  };
 }
 
 export type GlobalLimitFailureCode =
