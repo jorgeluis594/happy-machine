@@ -1,90 +1,161 @@
-# Task 15: Certify the v1 contract with a comprehensive conformance suite
+# Task 15: Certify the v1 public contract with a black-box E2E suite
 
 ## Objective
 
-Automatically demonstrate that a clean Happy Machine installation jointly satisfies every normative behavior, command, invariant, and acceptance scenario in PRODUCT.md.
+Automatically demonstrate that a clean Happy Machine installation satisfies the public v1 contract by exercising only the packaged product and its observable interfaces.
+
+This task may create test infrastructure. It MUST NOT add, correct, or otherwise change product behavior.
 
 ## Functional value
 
-Earlier tasks prove individual capabilities; this task proves they operate together as one coherent product. The suite provides executable evidence for deciding whether v1 is truly complete and prevents future changes from breaking durability or no-duplication guarantees.
+Tasks 01 through 14 prove and own the individual capabilities. This task proves that those capabilities operate together through the interface available to a user. The suite provides reproducible release evidence without coupling conformance tests to production internals.
 
 ## Dependencies
 
 - Tasks 01 through 14.
 
-## Scope
+## E2E boundary
 
-- Create self-contained fixtures for projects, agents, prompts, workflows, and Markdown inputs.
-- Exercise the installed CLI through its six public commands: execute, status, history, resume, cancel, and cleanup.
-- Use a controllable Orca environment that honors the machine-readable contract and can simulate completion, failure, question, escalation, timeout, cancellation, uncertainty, and provenance lookup.
-- Cover the twenty normative scenarios in PRODUCT.md Section 25 as individually identifiable acceptance tests.
-- Cover all ten v1 success criteria in Section 26 through a test traceability matrix.
-- Verify every global invariant in Section 5, including atomicity, immutability, a single controller, and no duplication of uncertain execution.
-- Verify policy defaults, precedence, and scopes with at least one workflow combining all four permitted levels.
-- Verify the observable taxonomy of definition error, attempt failure, parallel aggregate failed, run failure, command conflict, and cancellation.
-- Verify that status and history are sufficient to explain every suite path.
-- Verify exit codes 0, 1, 2, and 130 through real processes.
-- Run scenarios in direct and worktree modes as appropriate.
-- Include fault injection at critical launch and completion atomicity boundaries.
-- Run from a built package installed in a clean temporary directory rather than through internal test imports.
-- Produce a report mapping every normative requirement to one or more tests and flagging any uncovered requirement.
-- Fail the suite when tests are omitted, scenarios are skipped, or normative requirements lack traceability.
-- Explicitly confirm that capabilities excluded from v1 are not required accidentally.
+For this task, an end-to-end test MUST:
 
-## Out of scope
+1. Package Happy Machine once for the suite execution.
+2. Install that local package artifact into a clean temporary environment.
+3. Create an isolated temporary project for the test.
+4. Invoke the installed binary as an operating-system process through one or more of its six public commands: `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
+5. Observe only public effects and artifacts.
 
-- Adding new product behavior to make the suite pass without returning to the corresponding functional task.
-- Measuring performance, load, or scalability not defined by PRODUCT.md.
-- Testing executors other than Orca.
-- Requiring a UI, global registry, human approval states, webhooks, daemon, parallel subflows, semantic merge, automatic commits or merges, rollback, executable configuration, or on_failure.
-- Depending on uncontrolled external services for ordinary suite execution.
+Tests MUST NOT import from `src/` or invoke application, domain, port, infrastructure, composition-root, or persistence modules directly. They MUST NOT create or modify run records or managed run files by hand.
+
+The suite MAY observe:
+
+- Process exit codes, stdout, and stderr.
+- Output from `status` and `history`.
+- Published document, event, error, and command contracts.
+- Calls made to Orca and the values returned by Orca.
+- Agent contexts delivered through the Orca boundary.
+- Files produced in source and managed workspaces.
+- Real Git repository, branch, commit, worktree, and dirty-state observations.
+
+No other internal state is part of the E2E assertion surface.
+
+## Fake Orca
+
+- Provide one declarative fake Orca executable for the entire suite and select it only through the public `ORCA_CLI_COMMAND` environment variable.
+- Configure behavior per test with fixture data rather than test-specific fake executables or production hooks.
+- The fake MUST model successful and failed results, produced documents, event streams, question and escalation events, provenance/recovery lookup, cancellation, stop confirmation, delayed responses, and controllable blocking.
+- The fake MUST record calls and received agent context in a form the tests can inspect.
+- The fake MUST expose synchronization markers so tests can wait for specific lifecycle boundaries without relying on arbitrary sleeps.
+- The suite MUST NOT invoke a real Orca installation, a real LLM agent, or any network service.
+
+## Allowed changes
+
+Task 15 changes are limited to:
+
+- E2E fixtures and the declarative fake Orca.
+- E2E helpers and assertions.
+- Test-runner configuration.
+- Package/install and suite execution scripts.
+- Traceability and conformance-report generation.
+
+Task 15 MUST NOT:
+
+- Change production behavior, public APIs, commands, flags, environment variables, or types.
+- Add test-only behavior or hooks to production code.
+- Weaken, bypass, or replace a public contract for test convenience.
+- Repair a functional gap discovered by the suite.
+
+A functional gap MUST remain visible as a failing E2E test and be referred to the owning task from 01 through 14 for correction.
+
+## Required coverage
+
+- Keep one individually identifiable E2E test for each normative scenario `25.1` through `25.20` in `docs/PRODUCT.md`.
+- Exercise all six public commands through the installed binary.
+- Exercise exit codes `0`, `1`, `2`, and `130` through real processes.
+- Use real operating-system processes and signals for attach, detach, cancellation, and concurrent-controller behavior.
+- Use a pseudo-TTY for interactive cleanup behavior.
+- Use real temporary Git repositories and worktrees for Git-dependent scenarios.
+- Cover Section 26 success criteria only where they are publicly demonstrable by Section 25 scenarios, commands, exit codes, or their retained evidence.
+
+The E2E traceability matrix is intentionally limited to Section 25, Section 26, the six commands, and the four public exit codes. It MUST NOT claim line-by-line coverage of Sections 1 through 27.
 
 ## Acceptance criteria
 
-1. **Normal routing:** An automated test for 25.1 proves needs_revision commits documents and enters exactly the configured state.
-2. **Unknown outcome:** A test for 25.2 proves attempt validation failure, stable retry context, and terminal failure after attempts are exhausted.
-3. **Bounded cycle:** A test for 25.3 proves a new visit with prior draft and feedback in context.
-4. **Fresh retry:** A test for 25.4 proves a clean control workspace and no promotion of partial outputs.
-5. **Failed source changes:** A test for 25.5 proves workspace persistence and exclusion from context.md and routing.
-6. **Parallel succeeded:** A test for 25.6 proves an all-settled join and aggregate succeeded.
-7. **Parallel failed:** A test for 25.7 proves the absence of fail-fast behavior and calculation of the aggregate only after settlement.
-8. **Parallel failure recovery:** A test for 25.8 proves inspect_failures receives successful documents and complete error summaries.
-9. **Detach and resume:** A process test for 25.9 proves exit code 130, absence of cancellation, and no duplication.
-10. **Concurrent controller:** A test for 25.10 proves run_already_controlled without mutation.
-11. **Attempt timeout:** A test for 25.11 prevents retry until the previous execution is confirmed stopped.
-12. **Question or escalation:** A test for 25.12 keeps the attempt and its deadline active.
-13. **Definition snapshot:** A test for 25.13 distinguishes resume from a new execute after definition edits.
-14. **External input snapshot:** A test for 25.14 modifies the original while preserving the run copy.
-15. **Fan-out limitation:** A Git test for 25.15 leaves the main worktree dirty and proves children start from HEAD.
-16. **No automatic merge:** A test for 25.16 proves the join creates neither commit nor merge.
-17. **Cancellation:** A test for 25.17 preserves evidence, reaches canceled, and rejects resume.
-18. **Cleanup prompt:** A pseudo-TTY test for 25.18 asks once, only at run termination, and retains by default.
-19. **Dirty cleanup:** A test for 25.19 protects changes, branches, commits, and history.
-20. **Detached deadline:** A controlled-clock test for 25.20 fails with workflow_timeout during the next controlling reconciliation.
-21. **Commands and exit codes:** Every public command runs through the installed binary, and every normative exit code has at least one process test.
-22. **Complete traceability:** The report contains no normative section, invariant, or success criterion without an associated test.
-23. **Determinism:** Two consecutive suite executions in clean environments produce the same functional results without depending on accidental ordering or external network services.
-24. **No omissions:** Execution fails if any conformance test is skipped, pending, or disabled.
+1. **Normal routing (`25.1`):** The test proves `needs_revision` publishes the expected documents and enters exactly the configured state.
+2. **Unknown outcome (`25.2`):** The test proves attempt validation failure, stable retry context, and terminal failure after attempts are exhausted.
+3. **Bounded cycle (`25.3`):** The test proves a new visit receives the prior draft and feedback in agent context.
+4. **Fresh retry (`25.4`):** The test proves the retry receives a clean control workspace and partial outputs are not promoted.
+5. **Failed source changes (`25.5`):** The test proves source-workspace changes persist but are excluded from `context.md` and routing.
+6. **Parallel succeeded (`25.6`):** The test proves every parallel task settles before the aggregate succeeds.
+7. **Parallel failed (`25.7`):** The test proves there is no fail-fast behavior and the aggregate is calculated only after all tasks settle.
+8. **Parallel failure recovery (`25.8`):** The test proves `inspect_failures` receives successful documents and complete error summaries.
+9. **Detach and resume (`25.9`):** A real-process signal test proves exit code `130`, absence of cancellation, recovery through `resume`, and no duplicate Orca execution.
+10. **Concurrent controller (`25.10`):** Concurrent real processes prove `run_already_controlled` without mutation or duplicate execution.
+11. **Attempt timeout (`25.11`):** Using the fake Orca's blocking and stop markers, the test proves retry does not begin until the previous execution is confirmed stopped.
+12. **Question or escalation (`25.12`):** Fake event streams prove the attempt and its deadline remain active while a question or escalation is handled.
+13. **Definition snapshot (`25.13`):** The test edits project definitions and proves `resume` uses the original snapshot while a new `execute` uses the changed files.
+14. **External input snapshot (`25.14`):** The test edits an original input and proves the existing run retains and uses its copied input.
+15. **Fan-out limitation (`25.15`):** A real Git test leaves the main worktree dirty and proves child worktrees start from `HEAD`.
+16. **No automatic merge (`25.16`):** Real Git observations prove the join creates neither a commit nor a merge.
+17. **Cancellation (`25.17`):** Real processes and fake cancellation markers prove evidence is preserved, the run reaches `canceled`, attached observation exits `2`, and `resume` is rejected.
+18. **Cleanup prompt (`25.18`):** A pseudo-TTY test proves the prompt appears once, only after run termination, and retaining worktrees is the default.
+19. **Dirty cleanup (`25.19`):** A real Git test proves cleanup protects uncommitted changes while preserving branches, commits, and history.
+20. **Detached deadline (`25.20`):** A test uses a normative real timeout, detaches, waits with bounded polling, and proves the next controlling reconciliation fails with `workflow_timeout`.
+21. **Commands:** Each of `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup` is invoked by at least one test through the installed binary.
+22. **Exit codes:** At least one real-process assertion covers each of `0`, `1`, `2`, and `130`.
+23. **Clean installation:** The package is built and packed once per suite execution, and that local artifact is installed once into a fresh temporary environment from which all tests run, with no repository dependency leakage.
+24. **Test isolation:** Every test creates a distinct project directory, state store, fake-Orca configuration, and Git repository when applicable.
+25. **Deterministic synchronization:** Tests coordinate through fake-Orca markers and bounded polling. Arbitrary sleeps are forbidden. Real elapsed time is used only for the normative timeout behavior in `25.11`, `25.12`, and `25.20` when the public contract requires it.
+26. **No omissions:** The suite fails if an E2E test is skipped, pending, disabled, focused exclusively, or lacks a traceability entry.
+27. **Repeatability:** The full suite runs twice, each time with a new clean installation, and both runs produce identical functional results. Temporary paths, timestamps, process IDs, and other nonfunctional values may be normalized in the comparison.
+28. **Public evidence report:** Each suite run emits a report containing the result and public evidence for every traced Section 25 scenario, applicable Section 26 criterion, command, and exit code. Uncovered or failing requirements make the report and suite fail.
+29. **No product repair:** Task 15 is complete only when all E2E tests pass without a product behavior change made within this task.
 
-## Required tests
+## Required test infrastructure
 
-- The twenty acceptance tests listed above, named to reference 25.1 through 25.20.
-- Process tests for the CLI and signals.
-- Tests using real temporary Git repositories.
-- Controlled-clock tests for deadlines, leases, and retry delays.
-- Fault injection across persistence and the Orca adapter.
-- Automated validation of the traceability matrix.
+- One declarative fake Orca selected by `ORCA_CLI_COMMAND`.
+- Fixtures for projects, agents, prompts, workflows, Markdown inputs, fake results, documents, and events.
+- Process helpers for signals, concurrent commands, exit-code capture, and bounded polling.
+- A pseudo-TTY helper for interactive command tests.
+- Helpers that create actual temporary Git repositories and inspect them with Git's public CLI.
+- A pack-once/install-clean runner that can execute the suite twice with independent installations.
+- Automated validation of skipped, pending, disabled, focused, and untraced tests.
+- A machine-readable traceability manifest and generated public-evidence report.
+
+## Explicit exclusions
+
+- Internal clock injection or a production clock seam.
+- Persistence fault injection and assertions about internal atomic write boundaries.
+- Direct testing of leases, repositories, storage adapters, or internal controller implementation.
+- Manual creation, editing, corruption, or deletion of durable run state.
+- Exhaustive traceability for PRODUCT.md Sections 1 through 27.
+- Real Orca, real LLM agents, uncontrolled external services, or network access.
+- Performance, load, or scalability testing not required by the public v1 contract.
+- Executors other than Orca.
+- Capabilities explicitly excluded from v1, including a UI, global registry, human approval states, webhooks, daemon, parallel subflows, semantic merge, automatic commits or merges, rollback, executable configuration, and `on_failure`.
+
+Atomicity internals, persistence failures, lease mechanics, repository behavior, and injected-clock tests remain the responsibility of the unit and integration suites owned by Tasks 01 through 14. Task 15 may assert only their publicly observable consequences when required by the E2E scenarios above.
 
 ## Traceability
 
-- Complete PRODUCT.md: Sections 1 through 27.
-- Normative scenarios: 25.1 through 25.20.
-- Success criteria: 26.1 through 26.10.
+The traceability manifest and generated report MUST cover exactly:
+
+- Normative scenarios `25.1` through `25.20`.
+- V1 success criteria `26.1` through `26.10`, mapped to public E2E evidence where applicable.
+- Public commands `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
+- Public exit codes `0`, `1`, `2`, and `130`.
+
+Each entry MUST identify at least one E2E test and the public evidence it captures. The validation MUST reject missing entries and references to tests that did not run successfully.
+
+## Public interfaces
+
+This task adds or modifies no production API, command, flag, environment variable, or type. The suite consumes only the existing installed CLI contract and `ORCA_CLI_COMMAND`.
 
 ## Definition of done
 
-- The suite passes from a package installed in a clean environment.
-- No tests are skipped, flaky, or dependent on uncontrolled external services.
-- The matrix confirms coverage of every normative rule and identifies the test that provides evidence.
-- All six commands, six run statuses, six error categories, and four exit codes are covered.
-- The conformance report can be retained as v1 release evidence.
+- The suite passes twice from two clean installations of the same locally packed artifact.
+- All twenty Section 25 E2E tests pass and are individually identifiable.
+- All six commands and all four public exit codes have passing real-process coverage.
+- The traceability validator reports no omissions, disabled tests, or unsuccessful evidence.
+- The generated report contains the result and public evidence for every requirement in the bounded matrix.
+- The suite is independent of repository source imports, manually manipulated run state, real Orca or LLM agents, external networks, and uncontrolled timing.
+- Any discovered functional gap has been left as a failing test and assigned back to its owning Task 01 through 14 rather than repaired in Task 15.
