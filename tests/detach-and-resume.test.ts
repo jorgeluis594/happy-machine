@@ -113,6 +113,7 @@ states:
       "utf8",
     );
     expect(callsBeforeResume).not.toContain("worker-stop");
+    expect(callsBeforeResume.match(/worker-start/g)).toHaveLength(1);
 
     const firstAttempt = stored.visits[0];
     if (firstAttempt?.type !== "agent") throw new Error("expected first visit");
