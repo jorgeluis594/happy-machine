@@ -413,6 +413,7 @@ states:
         Promise.reject(new ProjectWorkspaceError("injected Git failure")),
       ensureChild: () => Promise.reject(new Error("must not create child")),
       observe: () => Promise.reject(new Error("must not observe")),
+      remove: () => Promise.reject(new Error("must not remove")),
     };
 
     const run = await execute(setup, executor, {
@@ -476,6 +477,7 @@ states:
           : gitWorkspaces.ensureChild(request);
       },
       observe: (worktree) => gitWorkspaces.observe(worktree),
+      remove: (request) => gitWorkspaces.remove(request),
     };
     const executor = new BehaviorExecutor(() =>
       Promise.reject(new Error("must not launch")),

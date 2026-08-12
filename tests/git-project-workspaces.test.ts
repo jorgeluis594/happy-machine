@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -213,5 +213,74 @@ describe("Git project workspaces", () => {
     await expect(
       git(setup.root, "cat-file", "-e", `${childHead}^{commit}`),
     ).resolves.toBe("");
+  });
+
+  it("removes only a clean, exactly registered worktree and preserves its branch and commit", async () => {
+    const setup = await repository();
+    const workspaces = new GitProjectWorkspaces();
+    const main = await workspaces.ensureMain({
+      projectRoot: setup.root,
+      runId: "run-cleanup-clean",
+    });
+    await writeFile(path.join(main.path, "result.txt"), "committed\n");
+    await git(main.path, "add", "result.txt");
+    await git(main.path, "commit", "--quiet", "-m", "result");
+    const endingHead = await git(main.path, "rev-parse", "HEAD");
+
+    await expect(
+      workspaces.remove({
+        projectRoot: setup.root,
+        runId: "run-cleanup-clean",
+        worktree: main,
+      }),
+    ).resolves.toEqual({
+      result: "removed",
+      observation: { endingHead, dirty: false },
+    });
+    await expect(stat(main.path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await git(setup.root, "rev-parse", main.branch)).toBe(endingHead);
+  });
+
+  it("refuses to remove a dirty worktree and reports its current condition", async () => {
+    const setup = await repository();
+    const workspaces = new GitProjectWorkspaces();
+    const main = await workspaces.ensureMain({
+      projectRoot: setup.root,
+      runId: "run-cleanup-dirty",
+    });
+    await writeFile(path.join(main.path, "uncommitted.txt"), "keep me\n");
+
+    await expect(
+      workspaces.remove({
+        projectRoot: setup.root,
+        runId: "run-cleanup-dirty",
+        worktree: main,
+      }),
+    ).resolves.toEqual({
+      result: "retained_dirty",
+      observation: { endingHead: setup.head, dirty: true },
+    });
+    await expect(stat(main.path)).resolves.toMatchObject({});
+    expect(
+      await readFile(path.join(main.path, "uncommitted.txt"), "utf8"),
+    ).toBe("keep me\n");
+  });
+
+  it("refuses cleanup when durable metadata does not identify a worktree owned by the run", async () => {
+    const setup = await repository();
+    const workspaces = new GitProjectWorkspaces();
+    const main = await workspaces.ensureMain({
+      projectRoot: setup.root,
+      runId: "run-owner",
+    });
+
+    await expect(
+      workspaces.remove({
+        projectRoot: setup.root,
+        runId: "another-run",
+        worktree: main,
+      }),
+    ).rejects.toThrow("does not belong to run another-run");
+    await expect(stat(main.path)).resolves.toMatchObject({});
   });
 });

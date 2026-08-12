@@ -5,6 +5,8 @@ import { ProjectWorkspaceCoordinator } from "./application/services/project-work
 import { CancelWorkflow } from "./application/use-cases/cancel-workflow.js";
 import { RecoverWorkflow } from "./application/use-cases/recover-workflow.js";
 import { InspectRuns } from "./application/use-cases/inspect-runs.js";
+import { CleanupWorktrees } from "./application/use-cases/cleanup-worktrees.js";
+import { createInterface } from "node:readline/promises";
 import { Cli } from "./infrastructure/inbound/cli/cli.js";
 import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { GitProjectWorkspaces } from "./infrastructure/outbound/project-workspaces/git/git-project-workspaces.js";
@@ -46,10 +48,35 @@ export function createProcessEntryPoint(): (
     sleeper,
     workspaceCoordinator,
   );
-  const cli = new Cli(useCase, recover, cancel, new InspectRuns(runs, now), {
-    stdout: (message) => process.stdout.write(`${message}\n`),
-    stderr: (message) => process.stderr.write(`${message}\n`),
-  });
+  const cleanup = new CleanupWorktrees(runs, workspaces, now);
+  const cli = new Cli(
+    useCase,
+    recover,
+    cancel,
+    new InspectRuns(runs, now),
+    {
+      stdout: (message) => process.stdout.write(`${message}\n`),
+      stderr: (message) => process.stderr.write(`${message}\n`),
+    },
+    undefined,
+    cleanup,
+    {
+      isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      confirm: async (message) => {
+        const input = createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        try {
+          return (await input.question(message)).trim().toLowerCase() === "y";
+        } catch {
+          return false;
+        } finally {
+          input.close();
+        }
+      },
+    },
+  );
   return async (argv, currentDirectory) => {
     const controller = new AbortController();
     const detach = () => controller.abort();

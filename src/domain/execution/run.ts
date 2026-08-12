@@ -88,6 +88,25 @@ export interface RunWorkspaceRecord {
   worktrees: ManagedWorktreeRecord[];
 }
 
+export type WorktreeCleanupDecision = "pending" | "retain" | "cleanup";
+export type WorktreeCleanupResult = "removed" | "retained_dirty" | "failed";
+
+export interface WorktreeCleanupEvaluation {
+  worktreeId: string;
+  path: string;
+  dirty: boolean;
+  result: WorktreeCleanupResult;
+  evaluatedAt: string;
+  message?: string;
+}
+
+export interface RunCleanupRecord {
+  promptShownAt?: string;
+  decision?: WorktreeCleanupDecision;
+  decidedAt?: string;
+  evaluations: WorktreeCleanupEvaluation[];
+}
+
 export interface TaskWorkspaceRecord {
   mode: "direct" | "worktree";
   path: string;
@@ -190,6 +209,7 @@ export interface RunRecord {
   transitionCount: number;
   controllerLease?: ControllerLease;
   cancellation?: RunCancellationRecord;
+  cleanup?: RunCleanupRecord;
   terminalTarget?: "$succeeded" | "$failed";
   failure?: AttemptFailure;
   visits: VisitRecord[];

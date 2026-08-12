@@ -89,6 +89,11 @@ export interface RunRepository {
   load?(projectRoot: string, runId: string): Promise<RecoveredRun>;
   discoverProjectRoot?(currentDirectory: string): Promise<string>;
   list?(projectRoot: string): Promise<RunRecord[]>;
+  claimCleanupPrompt?(
+    projectRoot: string,
+    runId: string,
+    shownAt: string,
+  ): Promise<RunRecord | undefined>;
   acquireControl?(
     projectRoot: string,
     runId: string,

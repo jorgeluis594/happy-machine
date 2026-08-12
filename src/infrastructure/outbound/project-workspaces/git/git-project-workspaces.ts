@@ -8,6 +8,8 @@ import type {
   EnsureChildWorkspaceRequest,
   EnsureMainWorkspaceRequest,
   ProjectWorkspaces,
+  RemoveWorkspaceRequest,
+  WorktreeRemoval,
   WorktreeObservation,
 } from "../../../../ports/project-workspaces.js";
 import { ProjectWorkspaceError } from "../../../../ports/project-workspaces.js";
@@ -113,6 +115,79 @@ export class GitProjectWorkspaces implements ProjectWorkspaces {
     } catch (error) {
       throw this.failure("observe managed worktree", error);
     }
+  }
+
+  async remove(request: RemoveWorkspaceRequest): Promise<WorktreeRemoval> {
+    const { projectRoot, worktree } = request;
+    const expected = this.expected(request);
+    if (
+      path.resolve(worktree.path) !== path.resolve(expected.path) ||
+      worktree.branch !== expected.branch
+    )
+      throw new ProjectWorkspaceError(
+        `Managed worktree identity does not belong to run ${request.runId}: ${worktree.path}`,
+      );
+    const registered = await this.existing(
+      projectRoot,
+      worktree.path,
+      worktree.branch,
+    );
+    if (!registered)
+      throw new ProjectWorkspaceError(
+        `Managed worktree is not registered at its recorded path: ${worktree.path}`,
+      );
+    const observation = await this.observe(worktree);
+    if (observation.dirty) return { result: "retained_dirty", observation };
+    try {
+      await executeFile(
+        "git",
+        ["-C", projectRoot, "worktree", "remove", worktree.path],
+        { maxBuffer: 10 * 1024 * 1024 },
+      );
+      return { result: "removed", observation };
+    } catch (error) {
+      throw this.failure("remove managed worktree", error);
+    }
+  }
+
+  private expected(request: RemoveWorkspaceRequest): {
+    path: string;
+    branch: string;
+  } {
+    const run = this.component(request.runId);
+    if (request.worktree.role === "main")
+      return {
+        path: path.join(
+          request.projectRoot,
+          ".happy-machine",
+          "worktrees",
+          run,
+          "main",
+        ),
+        branch: `happy-machine/${run}/main`,
+      };
+    const provenance = request.worktree.provenance;
+    if (!provenance)
+      throw new ProjectWorkspaceError(
+        `Managed parallel worktree has no provenance: ${request.worktree.id}`,
+      );
+    const state = this.component(provenance.stateId);
+    const task = this.component(provenance.taskId);
+    return {
+      path: path.join(
+        request.projectRoot,
+        ".happy-machine",
+        "worktrees",
+        run,
+        "states",
+        state,
+        "visits",
+        String(provenance.visitNumber),
+        "tasks",
+        task,
+      ),
+      branch: `happy-machine/${run}/states/${state}/visits/${provenance.visitNumber}/tasks/${task}`,
+    };
   }
 
   private record(

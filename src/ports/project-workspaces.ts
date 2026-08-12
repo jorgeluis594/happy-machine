@@ -19,6 +19,16 @@ export interface WorktreeObservation {
   dirty: boolean;
 }
 
+export type WorktreeRemoval =
+  | { result: "removed"; observation: WorktreeObservation }
+  | { result: "retained_dirty"; observation: WorktreeObservation };
+
+export interface RemoveWorkspaceRequest {
+  projectRoot: string;
+  runId: string;
+  worktree: ManagedWorktreeRecord;
+}
+
 export interface ProjectWorkspaces {
   ensureMain(
     request: EnsureMainWorkspaceRequest,
@@ -27,6 +37,7 @@ export interface ProjectWorkspaces {
     request: EnsureChildWorkspaceRequest,
   ): Promise<ManagedWorktreeRecord>;
   observe(worktree: ManagedWorktreeRecord): Promise<WorktreeObservation>;
+  remove(request: RemoveWorkspaceRequest): Promise<WorktreeRemoval>;
 }
 
 export class ProjectWorkspaceError extends Error {

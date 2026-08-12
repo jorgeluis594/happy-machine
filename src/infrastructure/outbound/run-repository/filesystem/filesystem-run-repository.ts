@@ -207,6 +207,34 @@ export class FilesystemRunRepository implements RunRepository {
     );
   }
 
+  async claimCleanupPrompt(
+    projectRoot: string,
+    runId: string,
+    shownAt: string,
+  ): Promise<RunRecord | undefined> {
+    return this.withRunLock(projectRoot, runId, async () => {
+      const { run } = await this.load(projectRoot, runId);
+      if (
+        !runIsTerminal(run.status) ||
+        run.workspace?.mode !== "worktree" ||
+        run.workspace.worktrees.length === 0 ||
+        run.cleanup?.promptShownAt
+      )
+        return;
+      run.cleanup ??= { evaluations: [] };
+      run.cleanup.promptShownAt = shownAt;
+      run.cleanup.decision = "pending";
+      run.events.push({
+        sequence: run.events.length + 1,
+        type: "worktree_cleanup_prompt_shown",
+        at: shownAt,
+        data: {},
+      });
+      await this.writeRun(run);
+      return run;
+    });
+  }
+
   async acquireControl(
     projectRoot: string,
     runId: string,

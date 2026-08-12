@@ -1027,7 +1027,7 @@ describe("happy-machine execute", () => {
     const app = cli();
     expect(await app.cli.run(argv, "/project")).toBe(1);
     expect(app.stderr).toEqual([
-      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine cancel RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
+      "Usage: happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] | happy-machine resume RUN_ID | happy-machine cancel RUN_ID | happy-machine cleanup RUN_ID | happy-machine status RUN_ID | happy-machine history [RUN_ID]",
     ]);
   });
 
