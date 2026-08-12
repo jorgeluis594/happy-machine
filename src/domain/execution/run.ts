@@ -66,6 +66,38 @@ export interface TaskRecord {
   attempts: AttemptRecord[];
 }
 
+export interface WorktreeProvenance {
+  stateId: string;
+  visitNumber: number;
+  taskId: string;
+}
+
+export interface ManagedWorktreeRecord {
+  id: string;
+  role: "main" | "parallel_task";
+  provenance?: WorktreeProvenance;
+  path: string;
+  branch: string;
+  startingHead: string;
+  endingHead: string;
+  dirty: boolean;
+}
+
+export interface RunWorkspaceRecord {
+  mode: "direct" | "worktree";
+  worktrees: ManagedWorktreeRecord[];
+}
+
+export interface TaskWorkspaceRecord {
+  mode: "direct" | "worktree";
+  path: string;
+  worktreeId?: string;
+  branch?: string;
+  startingHead?: string;
+  endingHead?: string;
+  dirty?: boolean;
+}
+
 export interface NormalVisitRecord {
   type: "agent";
   stateId: string;
@@ -84,12 +116,7 @@ export interface ParallelTaskRecord extends TaskRecord {
   outcome?: "succeeded";
   failure?: AttemptFailure;
   documents: DocumentRecord[];
-  workspace: {
-    mode: "direct" | "worktree";
-    path: string;
-    head?: string;
-    dirty?: boolean;
-  };
+  workspace: TaskWorkspaceRecord;
 }
 
 export interface ParallelVisitRecord {
@@ -97,6 +124,7 @@ export interface ParallelVisitRecord {
   stateId: string;
   number: number;
   contextPath: string;
+  fanOutHead?: string;
   tasks: ParallelTaskRecord[];
   outcome?: "succeeded" | "failed";
   target?: string;
@@ -153,6 +181,7 @@ export interface RunRecord {
   workflowId: string;
   workflowPath: string;
   projectRoot: string;
+  workspace?: RunWorkspaceRecord;
   definitionSnapshot: DefinitionSnapshotRecord;
   status: RunStatus;
   controllerStatus?: ControllerStatus;
@@ -171,6 +200,116 @@ export interface RunRecord {
     at: string;
     data: Record<string, unknown>;
   }>;
+}
+
+export function workspaceMode(run: RunRecord): "direct" | "worktree" {
+  return run.workspace?.mode ?? "direct";
+}
+
+export function mainWorktree(
+  run: RunRecord,
+): ManagedWorktreeRecord | undefined {
+  return run.workspace?.worktrees.find((worktree) => worktree.role === "main");
+}
+
+export function parallelTaskWorktree(
+  run: RunRecord,
+  stateId: string,
+  visitNumber: number,
+  taskId: string,
+): ManagedWorktreeRecord | undefined {
+  return run.workspace?.worktrees.find(
+    (worktree) =>
+      worktree.role === "parallel_task" &&
+      worktree.provenance?.stateId === stateId &&
+      worktree.provenance.visitNumber === visitNumber &&
+      worktree.provenance.taskId === taskId,
+  );
+}
+
+export function projectWorkspaceForTask(
+  run: RunRecord,
+  visit: VisitRecord,
+  task: TaskRecord,
+): string {
+  if (workspaceMode(run) === "direct") return run.projectRoot;
+  if (visit.type === "agent") {
+    const worktree = mainWorktree(run);
+    if (!worktree)
+      throw new Error(`Run ${run.id} has no prepared main worktree`);
+    return worktree.path;
+  }
+  const parallelTask = visit.tasks.find((candidate) => candidate === task);
+  if (!parallelTask)
+    throw new Error(`Task ${task.id} does not belong to the parallel visit`);
+  if (parallelTask.workspace.mode !== "worktree")
+    throw new Error(`Parallel task ${task.id} has no prepared child worktree`);
+  return parallelTask.workspace.path;
+}
+
+export function recordWorktree(
+  run: RunRecord,
+  worktree: ManagedWorktreeRecord,
+): void {
+  run.workspace ??= { mode: "worktree", worktrees: [] };
+  if (run.workspace.mode !== "worktree")
+    throw new Error("Cannot register a managed worktree in direct mode");
+  const existing = run.workspace.worktrees.find(
+    (candidate) => candidate.id === worktree.id,
+  );
+  if (!existing) {
+    run.workspace.worktrees.push(worktree);
+    return;
+  }
+  if (
+    existing.role !== worktree.role ||
+    existing.path !== worktree.path ||
+    existing.branch !== worktree.branch ||
+    existing.startingHead !== worktree.startingHead ||
+    JSON.stringify(existing.provenance) !== JSON.stringify(worktree.provenance)
+  )
+    throw new Error(`Managed worktree identity changed for ${worktree.id}`);
+  existing.endingHead = worktree.endingHead;
+  existing.dirty = worktree.dirty;
+}
+
+export function recordWorktreeObservation(
+  run: RunRecord,
+  worktreeId: string,
+  endingHead: string,
+  dirty: boolean,
+): ManagedWorktreeRecord {
+  const worktree = run.workspace?.worktrees.find(
+    (candidate) => candidate.id === worktreeId,
+  );
+  if (!worktree)
+    throw new Error(`Run ${run.id} has no managed worktree ${worktreeId}`);
+  worktree.endingHead = endingHead;
+  worktree.dirty = dirty;
+  for (const visit of run.visits) {
+    if (visit.type !== "parallel") continue;
+    const task = visit.tasks.find(
+      (candidate) => candidate.workspace.worktreeId === worktreeId,
+    );
+    if (!task) continue;
+    task.workspace.endingHead = endingHead;
+    task.workspace.dirty = dirty;
+  }
+  return worktree;
+}
+
+export function taskWorkspaceFromWorktree(
+  worktree: ManagedWorktreeRecord,
+): TaskWorkspaceRecord {
+  return {
+    mode: "worktree",
+    path: worktree.path,
+    worktreeId: worktree.id,
+    branch: worktree.branch,
+    startingHead: worktree.startingHead,
+    endingHead: worktree.endingHead,
+    dirty: worktree.dirty,
+  };
 }
 
 export interface ControllerLease {

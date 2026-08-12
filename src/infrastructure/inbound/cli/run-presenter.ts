@@ -85,7 +85,7 @@ export class RunPresenter {
             status: task.status === "running" ? "active" : task.status,
           }));
     return tasks.flatMap(({ task, status }) => [
-      `  ${status}: ${task.id}${"workspace" in task ? ` workspace=${task.workspace.path} mode=${task.workspace.mode}${task.workspace.head ? ` head=${task.workspace.head}` : ""}${task.workspace.dirty === undefined ? "" : ` dirty=${String(task.workspace.dirty)}`}` : ""}`,
+      `  ${status}: ${task.id}${"workspace" in task ? ` workspace=${task.workspace.path} mode=${task.workspace.mode}${task.workspace.branch ? ` branch=${task.workspace.branch}` : ""}${task.workspace.startingHead ? ` starting_head=${task.workspace.startingHead}` : ""}${task.workspace.endingHead ? ` ending_head=${task.workspace.endingHead}` : ""}${task.workspace.dirty === undefined ? "" : ` dirty=${String(task.workspace.dirty)}`}` : ""}`,
       ...(task.attempts.length
         ? task.attempts.map((attempt) => this.attempt(run, task, attempt))
         : ["    attempts: none"]),
