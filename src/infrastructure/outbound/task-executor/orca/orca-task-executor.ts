@@ -233,6 +233,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "current",
       "--command",
       this.codexCommand(launch.model),
+      "--focus",
       "--json",
     ]);
     const { terminalHandle } = this.decode(

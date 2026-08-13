@@ -238,6 +238,7 @@ describe("Orca timeout reconciliation adapter", () => {
       "current",
       "--command",
       "codex --model 'gpt-special'\\'' $(never-run)' --dangerously-bypass-approvals-and-sandbox",
+      "--focus",
       "--json",
     ]);
     expect(calls[3]).toEqual([
