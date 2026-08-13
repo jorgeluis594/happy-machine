@@ -199,7 +199,7 @@ if (operation === "orchestration run-create") {
     dispatch: {
       task_id: taskId,
       id: dispatchId,
-      status: "active",
+      status: "dispatched",
     },
   };
 } else if (operation === "terminal close") {

@@ -303,7 +303,13 @@ describe("Orca timeout reconciliation adapter", () => {
     ],
     [
       "orchestration dispatch",
-      { dispatch: { task_id: "orca-task-1", id: "", status: "active" } },
+      {
+        dispatch: {
+          task_id: "orca-task-1",
+          id: "",
+          status: "dispatched",
+        },
+      },
       "Orca dispatch response expected result.dispatch.id",
       true,
     ],
@@ -375,7 +381,7 @@ describe("Orca timeout reconciliation adapter", () => {
             dispatch: {
               task_id: "other-task",
               id: "orca-dispatch-1",
-              status: "active",
+              status: "dispatched",
             },
           },
         },
@@ -389,6 +395,42 @@ describe("Orca timeout reconciliation adapter", () => {
       message:
         "Orca dispatch returned task other-task instead of created task orca-task-1",
     });
+  });
+
+  it("rejects a dispatch receipt that is not dispatched", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-orca-dispatch-status-"),
+    );
+    await writeFile(
+      path.join(root, ".fake-orca-response-overrides.json"),
+      JSON.stringify({
+        "orchestration dispatch": {
+          id: "rpc-envelope-id",
+          ok: true,
+          result: {
+            dispatch: {
+              task_id: "orca-task-1",
+              id: "orca-dispatch-1",
+              status: "pending",
+            },
+          },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({
+      message: "Orca dispatch returned unexpected status pending",
+    });
+    const calls = await readFile(
+      path.join(root, ".fake-orca-calls.jsonl"),
+      "utf8",
+    );
+    expect(calls).toContain(
+      '["terminal","close","--terminal","terminal-1","--json"]',
+    );
   });
 
   it("turns an explicit failed worker completion into an executor failure", async () => {

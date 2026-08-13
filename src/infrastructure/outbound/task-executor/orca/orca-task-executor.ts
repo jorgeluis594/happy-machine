@@ -261,9 +261,9 @@ export class OrcaTaskExecutor implements TaskExecutor {
           `Orca dispatch returned task ${dispatch.taskId} instead of created task ${taskId}`,
           { ...logs },
         );
-      if (dispatch.status !== "active")
+      if (dispatch.status !== "dispatched")
         throw new TaskExecutorError(
-          `Orca dispatch returned non-active status ${dispatch.status}`,
+          `Orca dispatch returned unexpected status ${dispatch.status}`,
           { ...logs },
         );
     } catch (error) {

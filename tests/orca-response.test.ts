@@ -96,14 +96,14 @@ describe("Orca RPC response decoding", () => {
           dispatch: {
             task_id: "task-resource-id",
             id: "dispatch-resource-id",
-            status: "active",
+            status: "dispatched",
           },
         }),
       ),
     ).toEqual({
       taskId: "task-resource-id",
       dispatchId: "dispatch-resource-id",
-      status: "active",
+      status: "dispatched",
     });
     expect(
       decodeWorkerStart(
@@ -134,7 +134,9 @@ describe("Orca RPC response decoding", () => {
     );
     expect(() =>
       decodeDispatch(
-        success({ dispatch: { task_id: "task", id: "", status: "active" } }),
+        success({
+          dispatch: { task_id: "task", id: "", status: "dispatched" },
+        }),
       ),
     ).toThrow("result.dispatch.id");
     expect(() =>
