@@ -43,6 +43,10 @@ The Happy Machine project uses this logical layout:
 
 ```text
 happy-machine.yaml
+.agents/
+└── skills/
+    └── telegram-jorge/
+        └── SKILL.md
 agents/
 └── implementation.md
 workflows/
@@ -62,11 +66,15 @@ The registry contains one reusable agent:
 The shared instruction file requires the executing agent to:
 
 - Implement only its assigned task and treat earlier tasks as already completed.
+- Treat every design, specification, and implementation plan produced through
+  `brainstorming` for its assigned task as approved in advance by the user.
 - Read the target repository instructions and the assigned task before editing.
 - Preserve existing and earlier-state changes in the shared sequential workspace.
 - Follow the repository's implementation and specialized-skill requirements.
 - Run the focused automated tests and required type and quality checks.
 - Perform the browser validation required by the state prompt through `qa-manual-web`.
+- Send one screenshot already captured during successful `qa-manual-web`
+  validation through `telegram-jorge` before returning `completed`.
 - Return `completed` only when implementation and required validation succeed.
 - Return `failed` when the implementation or required validation cannot be completed successfully.
 - Never begin work belonging exclusively to a later task.
@@ -150,7 +158,7 @@ Every task has browser-observable behavior and therefore invokes `qa-manual-web`
 ### Task 01
 
 ```text
-/goal implement this task docs/superpowers/tasks/warehouse-recount/01-operational-warehouse-isolation.md. After implementing the code, validate the migration, backfill, database constraints, repository behavior, and affected inventory regressions with focused automated tests. Then use the qa-manual-web skill to validate that only OPERATIONAL/ACTIVE warehouses appear in browser lists and selectors, and that browser-submitted operations cannot use RECOUNT or ARCHIVED warehouses. Return completed only when implementation and validation succeed; otherwise return failed.
+/goal implement this task docs/superpowers/tasks/warehouse-recount/01-operational-warehouse-isolation.md. After implementing the code, validate the migration, backfill, database constraints, repository behavior, and affected inventory regressions with focused automated tests. Then use the qa-manual-web skill to validate that only OPERATIONAL/ACTIVE warehouses appear in browser lists and selectors, and that browser-submitted operations cannot use RECOUNT or ARCHIVED warehouses. When implementation and every required validation are successful, send any screenshot captured during qa-manual-web validation to Jorge using the telegram-jorge skill with a concise caption identifying this task. Return completed only after Telegram confirms the delivery; otherwise return failed.
 ```
 
 The browser campaign prepares or discovers an `OPERATIONAL/ACTIVE`, an `OPERATIONAL/ARCHIVED`, and a `RECOUNT/ACTIVE` warehouse. It verifies that only the operational active warehouse is visible or selectable and that a crafted invalid submission cannot change inventory. Migration backfill and database constraints are validated in an isolated automated-test database, not inferred from the UI.
@@ -172,10 +180,35 @@ Each remaining prompt uses the same instruction with one of these exact task pat
 For each row, the state prompt is the literal concatenation of `/goal implement this task `, the row's task path, and this suffix:
 
 ```text
-. After implementing the code, validate the browser-observable functionality using the qa-manual-web skill. Return completed only when implementation and validation succeed; otherwise return failed.
+. After implementing the code, validate the browser-observable functionality using the qa-manual-web skill. When implementation and every required validation are successful, send any screenshot captured during qa-manual-web validation to Jorge using the telegram-jorge skill with a concise caption identifying this task. Return completed only after Telegram confirms the delivery; otherwise return failed.
 ```
 
 Task 05 browser QA validates the detectable Chrome handoff and application states, not physical printer output. Hardware, drivers, paper, and undetectable printer failures remain outside the automated workflow.
+
+## Advance Brainstorming Approval
+
+The user grants advance blanket approval to every design, specification, and
+implementation plan produced through `brainstorming` for an assigned task. Each
+worker must still complete the brainstorming process, present its design, write
+and self-review its spec, and produce its implementation plan. It applies the
+advance approval at review gates and continues without requesting duplicate
+approval. A later user objection, change request, or revocation overrides the
+advance approval.
+
+## Telegram Evidence Delivery
+
+Every state prompt explicitly requires Telegram evidence. After implementation,
+automated checks, and browser validation are all successful, the worker selects
+any screenshot already captured during `qa-manual-web` and invokes
+`telegram-jorge` to send it with a concise caption identifying the current task.
+No additional Telegram-specific screenshot is required. The skill owns its
+delivery procedure and configuration. The worker must verify that delivery
+succeeded before returning `completed`.
+
+The `telegram-jorge` skill must be tracked by Git so it is present in the managed
+worktree created from committed repository content. If the screenshot cannot be
+captured, the skill cannot run, or delivery is not confirmed, the state returns
+`failed` and the workflow terminates.
 
 ## Failure Semantics
 
@@ -186,6 +219,8 @@ The run terminates as failed under any of these conditions:
 - Orca launch, execution, cancellation, or reconciliation fails or becomes unsafe.
 - `result.json` is missing, malformed, or contains an undeclared outcome.
 - A declared output document is invalid.
+- The required validation screenshot cannot be captured or its Telegram
+  delivery is not confirmed.
 - A global workflow limit is exceeded.
 
 Because every `failed` outcome targets `$failed` and `max_attempts` is one, no later state starts after a failed implementation or validation.
@@ -203,6 +238,8 @@ Before the workflow is considered runnable:
 5. Confirm that validation produces no run, workspace, or Orca side effect.
 6. Exercise a controlled executor fixture that returns `completed` for all states and assert the ordered eight-state successful path.
 7. Exercise a controlled `failed` outcome at each state and assert immediate `$failed` termination with no later task launch.
+8. Verify that every state prompt requires a validation screenshot,
+   `telegram-jorge`, and confirmed delivery before `completed`.
 
 Actual execution of the eight implementation states is separate from definition validation because it mutates the target codebase and performs the feature work described by the tasks.
 
@@ -217,4 +254,8 @@ The configuration is complete when:
 - A controlled failure at any state terminates at `$failed` and launches no later state.
 - The effective policies match this design.
 - All prompts reference the intended task and require the approved validation scope.
+- Shared instructions apply the user's advance approval to brainstorming
+  designs, specifications, and implementation plans.
+- `telegram-jorge` is available in committed worktree content and every state
+  requires confirmed screenshot delivery before `completed`.
 - No workflow or routing responsibility is delegated to Orca.
