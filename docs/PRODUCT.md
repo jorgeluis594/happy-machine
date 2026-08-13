@@ -1,7 +1,7 @@
 # Happy Machine Product Contract
 
 **Status:** Normative product definition for v1  
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-12
 
 ## 1. Document Authority
 
@@ -928,15 +928,47 @@ If the controller disappears while cancellation is in progress, `canceling` rema
 ### 22.1 Commands
 
 ```text
-happy-machine execute <workflow.yaml> [--input <document.md> ...]
-happy-machine status <run-id>
-happy-machine history [<run-id>]
-happy-machine resume <run-id>
-happy-machine cancel <run-id>
-happy-machine cleanup <run-id>
+happy-machine
+happy-machine help [COMMAND]
+happy-machine --help
+happy-machine -h
+happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...]
+happy-machine status RUN_ID
+happy-machine history [RUN_ID]
+happy-machine resume RUN_ID
+happy-machine cancel RUN_ID
+happy-machine cleanup RUN_ID
 ```
 
-### 22.2 Execute
+### 22.2 Help
+
+The empty invocation, `help`, `--help`, and `-h` print global help to standard output and exit `0`. Global help includes a program description, general usage, all seven public commands, and the form for requesting command-specific help.
+
+Command-specific help is available in exactly these forms:
+
+```text
+happy-machine help COMMAND
+happy-machine COMMAND --help
+happy-machine COMMAND -h
+```
+
+It prints the command description, usage, arguments, and options to standard output and exits `0`. Help requests MUST NOT invoke an application use case, call Orca, or create durable state.
+
+An unknown command writes these lines to standard error and exits `1`:
+
+```text
+Unknown command: <command>
+Try 'happy-machine help' for more information.
+```
+
+Invalid arguments for a known command write these lines to standard error and exit `1`:
+
+```text
+Invalid arguments for command: <command>
+Try 'happy-machine help <command>' for more information.
+```
+
+### 22.3 Execute
 
 `execute`:
 
@@ -949,7 +981,7 @@ happy-machine cleanup <run-id>
 7. Starts the initial state.
 8. Remains attached until terminal completion or detachment.
 
-### 22.3 Status
+### 22.4 Status
 
 `status` is read-only and reports at least:
 
@@ -963,7 +995,7 @@ happy-machine cleanup <run-id>
 - Last committed outcome and transition.
 - Worktree paths and dirty status when applicable.
 
-### 22.4 History
+### 22.5 History
 
 Without a run ID, `history` lists project runs in reverse chronological order. With a run ID, it shows the ordered event history needed to explain:
 
@@ -975,13 +1007,13 @@ Without a run ID, `history` lists project runs in reverse chronological order. W
 - When the controller detached or resumed.
 - What caused terminal completion.
 
-### 22.5 Exit Codes
+### 22.6 Exit Codes
 
 Attached execution commands use:
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | The run completed as `succeeded`, or a read-only/cleanup command succeeded. |
+| `0` | Help was displayed, the run completed as `succeeded`, or a read-only/cleanup command succeeded. |
 | `1` | The run completed as `failed`, definition validation failed, or the command encountered an operational error. |
 | `2` | The run completed as `canceled`. |
 | `130` | The user detached with `Ctrl+C`; the run was not canceled. |

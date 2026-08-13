@@ -21,7 +21,7 @@ For this task, an end-to-end test MUST:
 1. Package Happy Machine once for the suite execution.
 2. Install that local package artifact into a clean temporary environment.
 3. Create an isolated temporary project for the test.
-4. Invoke the installed binary as an operating-system process through one or more of its six public commands: `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
+4. Invoke the installed binary as an operating-system process through one or more of its seven public commands: `help`, `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
 5. Observe only public effects and artifacts.
 
 Tests MUST NOT import from `src/` or invoke application, domain, port, infrastructure, composition-root, or persistence modules directly. They MUST NOT create or modify run records or managed run files by hand.
@@ -69,14 +69,14 @@ A functional gap MUST remain visible as a failing E2E test and be referred to th
 ## Required coverage
 
 - Keep one individually identifiable E2E test for each normative scenario `25.1` through `25.20` in `docs/PRODUCT.md`.
-- Exercise all six public commands through the installed binary.
+- Exercise all seven public commands through the installed binary.
 - Exercise exit codes `0`, `1`, `2`, and `130` through real processes.
 - Use real operating-system processes and signals for attach, detach, cancellation, and concurrent-controller behavior.
 - Use a pseudo-TTY for interactive cleanup behavior.
 - Use real temporary Git repositories and worktrees for Git-dependent scenarios.
 - Cover Section 26 success criteria only where they are publicly demonstrable by Section 25 scenarios, commands, exit codes, or their retained evidence.
 
-The E2E traceability matrix is intentionally limited to Section 25, Section 26, the six commands, and the four public exit codes. It MUST NOT claim line-by-line coverage of Sections 1 through 27.
+The E2E traceability matrix is intentionally limited to Section 25, Section 26, the seven commands, and the four public exit codes. It MUST NOT claim line-by-line coverage of Sections 1 through 27.
 
 ## Acceptance criteria
 
@@ -100,7 +100,7 @@ The E2E traceability matrix is intentionally limited to Section 25, Section 26, 
 18. **Cleanup prompt (`25.18`):** A pseudo-TTY test proves the prompt appears once, only after run termination, and retaining worktrees is the default.
 19. **Dirty cleanup (`25.19`):** A real Git test proves cleanup protects uncommitted changes while preserving branches, commits, and history.
 20. **Detached deadline (`25.20`):** A test uses a normative real timeout, detaches, waits with bounded polling, and proves the next controlling reconciliation fails with `workflow_timeout`.
-21. **Commands:** Each of `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup` is invoked by at least one test through the installed binary.
+21. **Commands:** Each of `help`, `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup` is invoked by at least one test through the installed binary.
 22. **Exit codes:** At least one real-process assertion covers each of `0`, `1`, `2`, and `130`.
 23. **Clean installation:** The package is built and packed once per suite execution, and that local artifact is installed once into a fresh temporary environment from which all tests run, with no repository dependency leakage.
 24. **Test isolation:** Every test creates a distinct project directory, state store, fake-Orca configuration, and Git repository when applicable.
@@ -141,7 +141,7 @@ The traceability manifest and generated report MUST cover exactly:
 
 - Normative scenarios `25.1` through `25.20`.
 - V1 success criteria `26.1` through `26.10`, mapped to public E2E evidence where applicable.
-- Public commands `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
+- Public commands `help`, `execute`, `status`, `history`, `resume`, `cancel`, and `cleanup`.
 - Public exit codes `0`, `1`, `2`, and `130`.
 
 Each entry MUST identify at least one E2E test and the public evidence it captures. The validation MUST reject missing entries and references to tests that did not run successfully.
@@ -154,7 +154,7 @@ This task adds or modifies no production API, command, flag, environment variabl
 
 - The suite passes twice from two clean installations of the same locally packed artifact.
 - All twenty Section 25 E2E tests pass and are individually identifiable.
-- All six commands and all four public exit codes have passing real-process coverage.
+- All seven commands and all four public exit codes have passing real-process coverage.
 - The traceability validator reports no omissions, disabled tests, or unsuccessful evidence.
 - The generated report contains the result and public evidence for every requirement in the bounded matrix.
 - The suite is independent of repository source imports, manually manipulated run state, real Orca or LLM agents, external networks, and uncontrolled timing.
