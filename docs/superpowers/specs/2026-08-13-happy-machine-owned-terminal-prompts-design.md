@@ -6,24 +6,19 @@ Happy Machine must own the complete prompt lifecycle while Orca acts only as a t
 
 ## Prompt ownership
 
-Happy Machine separates the Codex input into native channels:
+Happy Machine starts Codex with the constant command `codex`, then sends one composed message directly through Orca's argument API. The configured state `prompt` is the exact prefix of that message, so `/goal` remains its first token. A separator, configured agent instructions, execution context, and the `result.json` contract follow in that order.
 
-- The configured agent instructions and the Happy Machine result contract are supplied as Codex `developer_instructions`.
-- The configured state `prompt` is sent unchanged as the Codex user message.
-
-The developer instructions include the project workspace, context path, output directory, exact `result.json` path, allowed outcomes, and the requirement that only the validated result file controls workflow routing. This preserves the operational contract without prepending or appending text to the configured user prompt.
-
-Orca must not generate, wrap, interpret, or retain prompt content. It only transports the already-separated Codex inputs by starting the terminal and sending the user message.
+The appended context includes the attempt identity, project workspace, context path, output directory, exact `result.json` path, attempt number, timeout, allowed outcomes, and the requirement that only the validated result file controls workflow routing. Orca transports this text as the `--text` argument to `terminal send`; it does not pass it through a shell.
 
 ## Launch sequence
 
 Each attempt uses this sequence:
 
-1. Happy Machine builds the Codex developer instructions and command.
-2. Happy Machine calls `orca terminal create` in the current worktree with the configured model, no sandbox, and `--focus`.
+1. Happy Machine calls `orca terminal create --worktree current --command codex --focus --json`.
+2. Orca starts Codex using its local model, permission, and sandbox configuration.
 3. Happy Machine decodes the returned terminal handle and persists it immediately as the attempt's external identity.
 4. Happy Machine waits exactly 8,000 milliseconds using the existing cancelable, test-injectable delay.
-5. Happy Machine calls `orca terminal send --terminal <handle> --text <configured-prompt> --enter --json`.
+5. Happy Machine composes the full message and calls `orca terminal send --terminal <handle> --text <message> --enter --json`.
 6. Happy Machine monitors the result file and terminal metadata until a valid completion, failure, cancellation, or timeout is observed.
 7. The application validates `result.json` and applies the existing workflow transition rules.
 
@@ -73,9 +68,10 @@ If prompt delivery fails, Happy Machine closes the newly created terminal and re
 Automated tests must cover:
 
 - exact ordering: terminal creation, 8,000-millisecond delay, prompt send, result monitoring;
-- the configured prompt passed byte-for-byte to `terminal send`;
-- agent instructions and the result contract passed through Codex `developer_instructions`, separately from the user prompt;
-- configured model, focus behavior, no-sandbox mode, and safe shell escaping;
+- the configured prompt preserved byte-for-byte as the exact prefix sent to `terminal send`, including `/goal`;
+- agent instructions, execution context, paths, outcomes, and result contract appended after the prompt;
+- the exact constant create command, focus behavior, and absence of dynamic model, instruction, permission, sandbox, or shell content;
+- prompts and instructions containing quotes, newlines, `$()`, backticks, and flag-like text without shell interpretation;
 - absence of every `orca orchestration` invocation and every `worker-*` command;
 - terminal-only diagnostics, cancellation, reconciliation, and recovery;
 - cleanup when cancellation or failure occurs before prompt delivery;
@@ -91,4 +87,5 @@ The implementation must pass `npm run lint:fix`, `npm test`, and `npm run typech
 - Happy Machine will not use Orca Tasks, Runs, Dispatches, mailboxes, capabilities, heartbeats, questions, escalations, or `worker_done`.
 - Happy Machine will not infer success from terminal output or TUI idleness.
 - This change does not alter the public Happy Machine CLI or workflow file format.
+- `TaskLaunch.model` remains durable for compatibility, but the Orca adapter does not apply it; local Codex configuration selects the effective model, permissions, and sandbox.
 - The fixed eight-second startup delay remains a proof-of-concept readiness delay rather than a formal Codex-ready signal.

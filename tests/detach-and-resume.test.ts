@@ -146,17 +146,14 @@ states:
       .split("\n")
       .map((line): unknown => JSON.parse(line) as unknown);
     expect(contracts).toHaveLength(2);
-    expect(contracts[1]).toMatchObject({ model: "original-model" });
     const prompts = (
       await readFile(path.join(root, ".fake-prompts.jsonl"), "utf8")
     )
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string);
-    expect(prompts).toEqual([
-      "First original prompt",
-      "Second original prompt",
-    ]);
+    expect(prompts[0]).toMatch(/^First original prompt\n\n---\n/);
+    expect(prompts[1]).toMatch(/^Second original prompt\n\n---\n/);
     expect(
       await readFile(path.join(root, ".fake-agent-input-content"), "utf8"),
     ).toBe("original input\n");

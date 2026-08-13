@@ -47,7 +47,7 @@ const terminalReferences = (): ExecutorReferences => ({
 });
 
 describe("Orca terminal-only task executor", () => {
-  it("creates Codex, persists its handle, waits 8 seconds, then sends the exact prompt", async () => {
+  it("creates plain Codex, persists its handle, waits 8 seconds, then sends the composed prompt", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-order-"));
     const delays: number[] = [];
     let started: ExecutorReferences | undefined;
@@ -74,16 +74,25 @@ describe("Orca terminal-only task executor", () => {
 
     expect(delays).toEqual([8_000]);
     expect(execution.references).toEqual(terminalReferences());
-    expect(await readFile(path.join(root, ".fake-prompt"), "utf8")).toBe(
-      launch.prompt,
-    );
+    const sent = await readFile(path.join(root, ".fake-prompt"), "utf8");
+    expect(sent.startsWith(`${launch.prompt}\n\n---\n`)).toBe(true);
+    expect((await calls(root))[0]).toEqual([
+      "terminal",
+      "create",
+      "--worktree",
+      "current",
+      "--command",
+      "codex",
+      "--focus",
+      "--json",
+    ]);
     expect((await calls(root)).map((call) => call.slice(0, 2))).toEqual([
       ["terminal", "create"],
       ["terminal", "send"],
     ]);
   });
 
-  it("keeps the configured prompt separate from Happy Machine developer instructions", async () => {
+  it("keeps the configured prompt as the exact prefix before instructions and contract", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-prompt-"));
     const launch = await launchFixture(root);
     launch.prompt = "USER PROMPT EXACT\nwithout wrappers";
@@ -91,48 +100,44 @@ describe("Orca terminal-only task executor", () => {
 
     await executor.execute(launch, () => Promise.resolve());
 
-    const instructions = await readFile(
-      path.join(root, ".fake-developer-instructions"),
-      "utf8",
-    );
+    const sent = await readFile(path.join(root, ".fake-prompt"), "utf8");
     const command = await readFile(
       path.join(root, ".fake-codex-command"),
       "utf8",
     );
-    expect(await readFile(path.join(root, ".fake-prompt"), "utf8")).toBe(
-      launch.prompt,
+    expect(sent.startsWith(`${launch.prompt}\n\n---\n`)).toBe(true);
+    expect(sent).toContain("configured agent instructions");
+    expect(sent).toContain("Happy Machine execution context (required)");
+    expect(sent).toContain(JSON.stringify(launch.contextPath));
+    expect(sent).toContain(JSON.stringify(launch.resultPath));
+    expect(sent).toContain('- "approved"\n- "needs_revision"');
+    expect(sent).toContain('"documents": ["relative/path/to/document.md"]');
+    expect(sent.indexOf(launch.instructions)).toBeGreaterThan(
+      launch.prompt.length,
     );
-    expect(instructions).toContain("configured agent instructions");
-    expect(instructions).toContain(
-      "Happy Machine execution context (required)",
-    );
-    expect(instructions).toContain(JSON.stringify(launch.contextPath));
-    expect(instructions).toContain(JSON.stringify(launch.resultPath));
-    expect(instructions).toContain('- "approved"\n- "needs_revision"');
-    expect(instructions).toContain(
-      '"documents": ["relative/path/to/document.md"]',
-    );
-    expect(instructions).not.toContain(launch.prompt);
     expect(command).not.toContain(launch.prompt);
   });
 
-  it("safely quotes the model and developer instructions in the Codex command", async () => {
+  it("never interpolates dynamic or shell-like content into the Codex command", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-quote-"));
     const launch = await launchFixture(root);
     launch.model = "gpt-special' $(never-run)";
-    launch.instructions = "don't replace $(anything)";
+    launch.prompt = '/goal don\'t run `code` $(anything) --flag\n"double"';
+    launch.instructions = "don't replace $(anything) or `this`\n--dangerous";
     const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
 
     await executor.execute(launch, () => Promise.resolve());
 
     const create = (await calls(root))[0];
     const command = create[create.indexOf("--command") + 1];
-    expect(command).toContain(
-      "codex --model 'gpt-special'\\'' $(never-run)' -c '",
-    );
-    expect(command).toContain("developer_instructions=");
-    expect(command).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(command).toBe("codex");
+    expect(create).not.toContain(launch.model);
+    expect(create).not.toContain(launch.instructions);
+    expect(create).not.toContain(launch.prompt);
     expect(create).toContain("--focus");
+    const sent = await readFile(path.join(root, ".fake-prompt"), "utf8");
+    expect(sent.startsWith(launch.prompt)).toBe(true);
+    expect(sent).toContain(launch.instructions);
   });
 
   it("never invokes Orca orchestration or terminal wait", async () => {

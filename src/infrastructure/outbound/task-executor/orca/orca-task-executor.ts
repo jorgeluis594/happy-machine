@@ -179,7 +179,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--worktree",
       "current",
       "--command",
-      this.codexCommand(launch),
+      "codex",
       "--focus",
       "--json",
     ]);
@@ -199,7 +199,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
         "--terminal",
         terminalHandle,
         "--text",
-        launch.prompt,
+        this.agentPrompt(launch),
         "--enter",
         "--json",
       ]);
@@ -546,20 +546,11 @@ export class OrcaTaskExecutor implements TaskExecutor {
       });
   }
 
-  private developerInstructions(launch: TaskLaunch): string {
+  private agentPrompt(launch: TaskLaunch): string {
     const outcomes = launch.allowedOutcomes
       .map((outcome) => `- ${JSON.stringify(outcome)}`)
       .join("\n");
-    return `${launch.instructions}\n\n---\nHappy Machine execution context (required)\n\nAttempt identity: ${JSON.stringify(launch.identity)}\nProject workspace: ${JSON.stringify(launch.projectWorkspace)}\nContext file: ${JSON.stringify(launch.contextPath)}\nAttempt number: ${launch.attemptNumber}\nTimeout milliseconds: ${launch.timeoutMs}\n\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
-  }
-
-  private codexCommand(launch: TaskLaunch): string {
-    const developerOverride = `developer_instructions=${JSON.stringify(this.developerInstructions(launch))}`;
-    return `codex --model ${this.shellQuote(launch.model)} -c ${this.shellQuote(developerOverride)} --dangerously-bypass-approvals-and-sandbox`;
-  }
-
-  private shellQuote(value: string): string {
-    return `'${value.replaceAll("'", `'\\''`)}'`;
+    return `${launch.prompt}\n\n---\nHappy Machine agent instructions (required)\n\n${launch.instructions}\n\nHappy Machine execution context (required)\n\nAttempt identity: ${JSON.stringify(launch.identity)}\nProject workspace: ${JSON.stringify(launch.projectWorkspace)}\nContext file: ${JSON.stringify(launch.contextPath)}\nAttempt number: ${launch.attemptNumber}\nTimeout milliseconds: ${launch.timeoutMs}\n\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
   }
 
   private references(

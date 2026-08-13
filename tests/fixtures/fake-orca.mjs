@@ -16,40 +16,6 @@ appendFileSync(
 const operation = args.slice(0, 2).join(" ");
 const terminalHandle = "terminal-1";
 
-const tokenizeShell = (source) => {
-  const tokens = [];
-  let index = 0;
-  while (index < source.length) {
-    while (/\s/.test(source[index] ?? "")) index += 1;
-    if (index >= source.length) break;
-    let token = "";
-    let quote;
-    while (index < source.length) {
-      const character = source[index];
-      if (!quote && /\s/.test(character)) break;
-      if (!quote && (character === "'" || character === '"')) {
-        quote = character;
-        index += 1;
-        continue;
-      }
-      if (quote && character === quote) {
-        quote = undefined;
-        index += 1;
-        continue;
-      }
-      if (!quote && character === "\\" && index + 1 < source.length) {
-        token += source[index + 1];
-        index += 2;
-        continue;
-      }
-      token += character;
-      index += 1;
-    }
-    tokens.push(token);
-  }
-  return tokens;
-};
-
 const jsonLabel = (text, label) => {
   const line = text
     .split("\n")
@@ -66,33 +32,16 @@ const numberLabel = (text, label) => {
   return Number(line.slice(label.length + 2));
 };
 
-const contractFromCommand = (command) => {
-  const tokens = tokenizeShell(command);
-  const model = tokens[tokens.indexOf("--model") + 1];
-  const config = tokens[tokens.indexOf("-c") + 1];
-  const prefix = "developer_instructions=";
-  if (!config?.startsWith(prefix))
-    throw new Error("Codex command did not contain developer_instructions");
-  const developerInstructions = JSON.parse(config.slice(prefix.length));
+const contractFromPrompt = (prompt) => {
   return {
-    happyMachineAttemptIdentity: jsonLabel(
-      developerInstructions,
-      "Attempt identity",
-    ),
-    projectWorkspace: jsonLabel(developerInstructions, "Project workspace"),
-    contextPath: jsonLabel(developerInstructions, "Context file"),
-    attemptNumber: numberLabel(developerInstructions, "Attempt number"),
-    timeoutMs: numberLabel(developerInstructions, "Timeout milliseconds"),
-    outputDirectory: jsonLabel(
-      developerInstructions,
-      "The assigned output directory is",
-    ),
-    resultPath: jsonLabel(
-      developerInstructions,
-      "Write the task result to exactly",
-    ),
-    instructions: developerInstructions,
-    model,
+    happyMachineAttemptIdentity: jsonLabel(prompt, "Attempt identity"),
+    projectWorkspace: jsonLabel(prompt, "Project workspace"),
+    contextPath: jsonLabel(prompt, "Context file"),
+    attemptNumber: numberLabel(prompt, "Attempt number"),
+    timeoutMs: numberLabel(prompt, "Timeout milliseconds"),
+    outputDirectory: jsonLabel(prompt, "The assigned output directory is"),
+    resultPath: jsonLabel(prompt, "Write the task result to exactly"),
+    instructions: prompt,
   };
 };
 
@@ -211,20 +160,7 @@ let response;
 if (operation === "terminal create") {
   validatePreparedRun();
   const command = args[args.indexOf("--command") + 1];
-  const contract = contractFromCommand(command);
   writeFileSync(path.join(cwd, ".fake-codex-command"), command);
-  writeFileSync(
-    path.join(cwd, ".fake-developer-instructions"),
-    contract.instructions,
-  );
-  writeFileSync(
-    path.join(cwd, ".fake-contract.json"),
-    JSON.stringify(contract),
-  );
-  appendFileSync(
-    path.join(cwd, ".fake-contracts.jsonl"),
-    `${JSON.stringify(contract)}\n`,
-  );
   response = { terminal: { handle: terminalHandle } };
 } else if (operation === "terminal send") {
   const handle = args[args.indexOf("--terminal") + 1];
@@ -234,9 +170,13 @@ if (operation === "terminal create") {
     path.join(cwd, ".fake-prompts.jsonl"),
     `${JSON.stringify(prompt)}\n`,
   );
+  const contract = contractFromPrompt(prompt);
   const contractPath = path.join(cwd, ".fake-contract.json");
-  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
   writeFileSync(contractPath, JSON.stringify({ ...contract, prompt }));
+  appendFileSync(
+    path.join(cwd, ".fake-contracts.jsonl"),
+    `${JSON.stringify(contract)}\n`,
+  );
   const blocked =
     existsSync(path.join(cwd, ".fake-block-check")) &&
     !existsSync(path.join(cwd, ".fake-release-check"));

@@ -706,25 +706,19 @@ describe("happy-machine execute", () => {
       .map(
         (line) =>
           parseJson(line) as {
-            model: string;
             instructions: string;
             timeoutMs: number;
           },
       );
-    expect(contracts).toMatchObject([
-      { model: "review-model", timeoutMs: 5000 },
-      { model: "publish-model", timeoutMs: 2000 },
-    ]);
+    expect(contracts).toMatchObject([{ timeoutMs: 5000 }, { timeoutMs: 2000 }]);
     const prompts = (
       await readFile(path.join(setup.root, ".fake-prompts.jsonl"), "utf8")
     )
       .trim()
       .split("\n")
       .map((line) => parseJson(line));
-    expect(prompts).toEqual([
-      "Review snapshot prompt",
-      "Publish snapshot prompt",
-    ]);
+    expect(prompts[0]).toMatch(/^Review snapshot prompt\n\n---\n/);
+    expect(prompts[1]).toMatch(/^Publish snapshot prompt\n\n---\n/);
     expect(contracts[0].instructions).toContain('- "approved"');
     expect(contracts[0].instructions).not.toContain("publish");
     expect(contracts[1].instructions).toContain('- "published"');
@@ -782,7 +776,6 @@ describe("happy-machine execute", () => {
       contextPath: string;
       outputDirectory: string;
       resultPath: string;
-      model: string;
       timeoutMs: number;
       attemptNumber: number;
       instructions: string;
@@ -794,13 +787,12 @@ describe("happy-machine execute", () => {
       contextPath: attempt.contextPath,
       outputDirectory: attempt.outputDirectory,
       resultPath: attempt.resultPath,
-      model: "test-model",
       timeoutMs: 5000,
       attemptNumber: 1,
     });
     expect(contract.instructions).toContain("Follow the task");
-    expect(contract.prompt).toBe(
-      "Choose an outcome and write the structured result.",
+    expect(contract.prompt).toMatch(
+      /^Choose an outcome and write the structured result\.\n\n---\n/,
     );
   });
 
