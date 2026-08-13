@@ -13,6 +13,30 @@ appendFileSync(
   `${JSON.stringify(args)}\n`,
 );
 const operation = args.slice(0, 2).join(" ");
+const failureConfigPath = path.join(process.cwd(), ".fake-orca-failures.json");
+if (existsSync(failureConfigPath)) {
+  const failure = JSON.parse(readFileSync(failureConfigPath, "utf8"))[
+    operation
+  ];
+  if (failure) {
+    if (failure.stderr) process.stderr.write(failure.stderr);
+    const stdout =
+      failure.stdout ??
+      JSON.stringify({
+        id: `rpc-${operation.replaceAll(" ", "-")}-failure`,
+        ok: false,
+        error: failure.error ?? {
+          code: "fake_orca_failure",
+          message: `Configured failure for ${operation}`,
+        },
+        _meta: { runtimeId: "fake-runtime" },
+      });
+    await new Promise((resolve) =>
+      process.stdout.write(`${stdout}\n`, resolve),
+    );
+    process.exit(failure.exitCode ?? 1);
+  }
+}
 let response;
 if (operation === "orchestration run-create") {
   if (
@@ -67,7 +91,7 @@ if (operation === "orchestration run-create") {
       writeFileSync(originalPath, "content changed after run creation\n");
     }
   }
-  response = { run: { runId: "orca-run-1" } };
+  response = { run: { id: "orca-run-1" } };
 } else if (operation === "orchestration task-create") {
   const spec = args[args.indexOf("--spec") + 1];
   writeFileSync(path.join(process.cwd(), ".fake-contract.json"), spec);
@@ -75,37 +99,54 @@ if (operation === "orchestration run-create") {
     path.join(process.cwd(), ".fake-contracts.jsonl"),
     `${spec}\n`,
   );
-  response = { task: { taskId: "orca-task-1" } };
+  response = { task: { id: "orca-task-1" } };
 } else if (operation === "orchestration task-list") {
   const identityFile = path.join(process.cwd(), ".fake-recovery-identity");
+  const tasks = existsSync(identityFile)
+    ? [
+        {
+          id: "recovered-task",
+          spec: JSON.stringify({
+            happyMachineAttemptIdentity: readFileSync(
+              identityFile,
+              "utf8",
+            ).trim(),
+          }),
+        },
+      ]
+    : [];
   response = {
-    tasks: existsSync(identityFile)
-      ? [
-          {
-            taskId: "recovered-task",
-            spec: {
-              happyMachineAttemptIdentity: readFileSync(
-                identityFile,
-                "utf8",
-              ).trim(),
-            },
-          },
-        ]
-      : [],
+    runId: "orca-run-1",
+    legacyReadOnly: false,
+    tasks,
+    count: tasks.length,
   };
 } else if (operation === "orchestration dispatch-show") {
   const stateFile = path.join(process.cwd(), ".fake-recovery-state");
+  const dispatchFile = path.join(process.cwd(), ".fake-started-dispatch-id");
+  const taskId = args[args.indexOf("--task") + 1];
   response = {
     dispatch: {
-      taskId: "recovered-task",
-      dispatchId: "recovered-dispatch",
-      agentTerminalHandle: "recovered-terminal",
-      workerState: existsSync(stateFile)
+      id: existsSync(dispatchFile)
+        ? readFileSync(dispatchFile, "utf8").trim()
+        : "recovered-dispatch",
+      task_id: taskId,
+      agent_terminal_handle: existsSync(dispatchFile)
+        ? "terminal-1"
+        : "recovered-terminal",
+      worker_state: existsSync(stateFile)
         ? readFileSync(stateFile, "utf8").trim()
         : "ready",
     },
   };
 } else if (operation === "orchestration worker-start") {
+  const taskId = args[args.indexOf("--task") + 1];
+  const dispatchId = "orca-dispatch-1";
+  writeFileSync(path.join(process.cwd(), ".fake-started-task-id"), taskId);
+  writeFileSync(
+    path.join(process.cwd(), ".fake-started-dispatch-id"),
+    dispatchId,
+  );
   const contract = JSON.parse(
     readFileSync(path.join(process.cwd(), ".fake-contract.json"), "utf8"),
   );
@@ -153,8 +194,10 @@ if (operation === "orchestration run-create") {
     })}\n`,
   );
   response = {
-    dispatch: { dispatchId: "orca-dispatch-1" },
-    worker: { agentTerminalHandle: "terminal-1" },
+    taskId,
+    dispatchId,
+    agentTerminalHandle: "terminal-1",
+    state: "ready",
   };
 } else if (operation === "orchestration check") {
   if (existsSync(path.join(process.cwd(), ".fake-block-check"))) {
@@ -173,30 +216,62 @@ if (operation === "orchestration run-create") {
     response = sequence[Math.min(index, sequence.length - 1)];
   } else {
     process.stderr.write("misleading stderr outcome: rejected\n");
+    const dispatchFile = path.join(process.cwd(), ".fake-started-dispatch-id");
+    const dispatchId = existsSync(dispatchFile)
+      ? readFileSync(dispatchFile, "utf8").trim()
+      : "orca-dispatch-1";
     response = {
       messages: [
         {
+          id: "message-worker-done-1",
           type: "worker_done",
-          outcome: "succeeded",
-          dispatchId: "orca-dispatch-1",
+          subject: "completed",
+          body: "worker completed",
+          payload: JSON.stringify({ outcome: "succeeded", dispatchId }),
         },
       ],
+      count: 1,
       log: "misleading stdout outcome: rejected",
     };
   }
 } else if (operation === "orchestration worker-stop") {
-  response = { dispatch: { state: "stopping" } };
+  response = {
+    dispatchId: args[args.indexOf("--dispatch") + 1],
+    state: "stopping",
+  };
 } else if (operation === "orchestration worker-show") {
   const stateFile = path.join(process.cwd(), ".fake-worker-state");
+  const taskFile = path.join(process.cwd(), ".fake-started-task-id");
+  const dispatchId = args[args.indexOf("--dispatch") + 1];
   response = {
     dispatch: {
-      workerState: existsSync(stateFile)
+      id: dispatchId,
+      task_id: existsSync(taskFile)
+        ? readFileSync(taskFile, "utf8").trim()
+        : "task",
+    },
+    worker: {
+      state: existsSync(stateFile)
         ? readFileSync(stateFile, "utf8").trim()
         : "stopped",
+      agent_terminal_handle: "terminal-1",
     },
   };
 } else {
   process.stderr.write(`unexpected fake Orca operation: ${operation}\n`);
   process.exit(2);
 }
-process.stdout.write(`${JSON.stringify(response)}\n`);
+const responseOverridesPath = path.join(
+  process.cwd(),
+  ".fake-orca-response-overrides.json",
+);
+const override = existsSync(responseOverridesPath)
+  ? JSON.parse(readFileSync(responseOverridesPath, "utf8"))[operation]
+  : undefined;
+const envelope = override ?? {
+  id: `rpc-${operation.replaceAll(" ", "-")}`,
+  ok: true,
+  result: response,
+  _meta: { runtimeId: "fake-runtime" },
+};
+process.stdout.write(`${JSON.stringify(envelope)}\n`);

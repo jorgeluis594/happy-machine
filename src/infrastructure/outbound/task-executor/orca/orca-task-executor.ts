@@ -11,6 +11,18 @@ import type {
   TaskLaunch,
 } from "../../../../ports/task-executor.js";
 import { TaskExecutorError } from "../../../../ports/task-executor.js";
+import {
+  assertOrcaSuccess,
+  decodeCheck,
+  decodeDispatchShow,
+  decodeOrcaProcessFailure,
+  decodeRunCreate,
+  decodeTaskCreate,
+  decodeTaskList,
+  decodeWorkerShow,
+  decodeWorkerStart,
+  OrcaResponseError,
+} from "./orca-response.js";
 
 interface CommandResult {
   stdout: string;
@@ -36,76 +48,71 @@ export class OrcaTaskExecutor implements TaskExecutor {
         projectWorkspace,
       );
       lookupLogs = { stdout: listed.stdout, stderr: listed.stderr };
-      const task = this.findObjectContaining(listed.json, identity);
-      taskId = task
-        ? this.findString(task, ["taskId", "task_id", "id"])
-        : undefined;
+      const tasks = this.decode(listed, decodeTaskList, lookupLogs);
+      taskId = tasks.find((task) => task.attemptIdentity === identity)?.taskId;
       if (!taskId) return { status: "not_found" };
     }
     const shown = await this.run(
       ["orchestration", "dispatch-show", "--task", taskId, "--json"],
       projectWorkspace,
     );
-    const events = this.externalEvents(shown.json);
-    const dispatchId =
-      references?.dispatchId ??
-      this.findString(shown.json, ["dispatchId", "dispatch_id"]);
-    if (!dispatchId)
-      return {
-        status: "start_unknown",
-        references: {
-          taskId,
-          dispatchId: `unknown:${identity}`,
-          runId: references?.runId,
-        },
-        logs: {
-          stdout: lookupLogs.stdout + shown.stdout,
-          stderr: lookupLogs.stderr + shown.stderr,
-        },
-        events,
-      };
-    const recoveredReferences: ExecutorReferences = {
-      taskId,
-      dispatchId,
-      runId:
-        references?.runId ?? this.findString(shown.json, ["runId", "run_id"]),
-      terminalHandle:
-        references?.terminalHandle ??
-        this.findString(shown.json, ["agentTerminalHandle", "terminalHandle"]),
-    };
-    const state = this.findString(shown.json, ["workerState", "state"]);
     const logs = {
       stdout: lookupLogs.stdout + shown.stdout,
       stderr: lookupLogs.stderr + shown.stderr,
     };
+    const dispatch = this.decode(shown, decodeDispatchShow, logs);
+    if (!dispatch)
+      return {
+        status: "start_unknown",
+        references: {
+          taskId,
+          dispatchId: references?.dispatchId ?? `unknown:${identity}`,
+          runId: references?.runId,
+        },
+        logs,
+      };
+    if (dispatch.taskId !== taskId)
+      throw new TaskExecutorError(
+        `Orca dispatch-show returned task ${dispatch.taskId} for requested task ${taskId}`,
+        logs,
+      );
+    if (references?.dispatchId && references.dispatchId !== dispatch.dispatchId)
+      throw new TaskExecutorError(
+        `Orca dispatch-show returned dispatch ${dispatch.dispatchId} instead of persisted dispatch ${references.dispatchId}`,
+        logs,
+      );
+    const dispatchId = references?.dispatchId ?? dispatch.dispatchId;
+    const recoveredReferences: ExecutorReferences = {
+      taskId,
+      dispatchId,
+      runId: references?.runId ?? dispatch.runId,
+      terminalHandle: references?.terminalHandle ?? dispatch.terminalHandle,
+    };
+    const state = dispatch.workerState;
     if (state === "start_unknown" || state === "stop_unknown")
-      return { status: state, references: recoveredReferences, logs, events };
+      return { status: state, references: recoveredReferences, logs };
     if (["succeeded", "stopped"].includes(state ?? ""))
       return {
         status: "completed",
         references: recoveredReferences,
         logs,
-        events,
       };
     if (["failed", "abandoned"].includes(state ?? ""))
       return {
         status: "failed",
         references: recoveredReferences,
         logs,
-        events,
       };
     if (["starting", "ready", "stopping"].includes(state ?? ""))
       return {
         status: "active",
         references: recoveredReferences,
         logs,
-        events,
       };
     return {
       status: "start_unknown",
       references: recoveredReferences,
       logs,
-      events,
     };
   }
 
@@ -153,6 +160,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       `Happy Machine ${launch.identity}`,
       "--json",
     ]);
+    const { runId: orcaRunId } = this.decode(runReceipt, decodeRunCreate, logs);
     const taskReceipt = await command([
       "orchestration",
       "task-create",
@@ -160,21 +168,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       contract,
       "--json",
     ]);
-    const orcaRunId = this.findString(runReceipt.json, [
-      "runId",
-      "run_id",
-      "id",
-    ]);
-    const taskId = this.findString(taskReceipt.json, [
-      "taskId",
-      "task_id",
-      "id",
-    ]);
-    if (!taskId)
-      throw new TaskExecutorError(
-        "Orca task-create response did not contain a task ID",
-        logs,
-      );
+    const { taskId } = this.decode(taskReceipt, decodeTaskCreate, logs);
     const workerReceipt = await command([
       "orchestration",
       "worker-start",
@@ -188,26 +182,22 @@ export class OrcaTaskExecutor implements TaskExecutor {
       launch.model,
       "--json",
     ]);
-    const dispatchId = this.findString(workerReceipt.json, [
-      "dispatchId",
-      "dispatch_id",
-      "id",
-    ]);
-    const terminalHandle = this.findString(workerReceipt.json, [
-      "agentTerminalHandle",
-      "terminalHandle",
-      "handle",
-    ]);
-    if (!dispatchId)
+    const worker = this.decode(workerReceipt, decodeWorkerStart, logs);
+    if (worker.taskId !== taskId)
       throw new TaskExecutorError(
-        "Orca worker-start response did not contain a dispatch ID",
-        logs,
+        `Orca worker-start returned task ${worker.taskId} instead of created task ${taskId}`,
+        { ...logs },
+      );
+    if (worker.state !== "ready")
+      throw new TaskExecutorError(
+        `Orca worker-start returned non-ready state ${worker.state}`,
+        { ...logs },
       );
     const references: ExecutorReferences = {
       runId: orcaRunId,
       taskId,
-      dispatchId,
-      terminalHandle,
+      dispatchId: worker.dispatchId,
+      terminalHandle: worker.terminalHandle,
     };
     await onStarted(references);
     const observedEvents = new Map<string, ExternalEventRecord>();
@@ -222,17 +212,27 @@ export class OrcaTaskExecutor implements TaskExecutor {
         String(launch.timeoutMs),
         "--json",
       ]);
-      for (const event of this.externalEvents(completion.json)) {
+      const observation = this.decode(
+        completion,
+        (value) => decodeCheck(value, references.dispatchId),
+        logs,
+      );
+      for (const event of observation.events) {
         const previous = observedEvents.get(event.id);
         if (previous?.status === event.status) continue;
         observedEvents.set(event.id, event);
         await onEvent?.(event);
       }
-      if (this.hasCompletion(completion.json, dispatchId)) break;
-      if (!this.externalEvents(completion.json).length)
+      if (observation.completion?.outcome === "failed")
+        throw new TaskExecutorError(
+          `Orca worker ${references.dispatchId} reported failed completion`,
+          { ...logs },
+        );
+      if (observation.completion?.outcome === "succeeded") break;
+      if (!observation.events.length)
         throw new TaskExecutorError(
           "Orca check returned without completion or a structured intervention event",
-          logs,
+          { ...logs },
         );
     }
     return { references, logs };
@@ -268,7 +268,18 @@ export class OrcaTaskExecutor implements TaskExecutor {
       ],
       projectWorkspace,
     );
-    const state = this.findString(result.json, ["workerState", "state"]);
+    const worker = this.decode(result, decodeWorkerShow);
+    if (worker.dispatchId !== references.dispatchId)
+      throw new TaskExecutorError(
+        `Orca worker-show returned dispatch ${worker.dispatchId} instead of persisted dispatch ${references.dispatchId}`,
+        { stdout: result.stdout, stderr: result.stderr },
+      );
+    if (worker.taskId !== references.taskId)
+      throw new TaskExecutorError(
+        `Orca worker-show returned task ${worker.taskId} instead of persisted task ${references.taskId}`,
+        { stdout: result.stdout, stderr: result.stderr },
+      );
+    const state = worker.workerState;
     if (["failed", "succeeded", "stopped", "abandoned"].includes(state ?? ""))
       return "stopped";
     if (["starting", "ready", "stopping"].includes(state ?? ""))
@@ -282,6 +293,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
     signal?: AbortSignal,
   ): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
+      const operation = args[1] ?? args[0] ?? "command";
       const child = spawn(this.executable, args, { cwd, env: process.env });
       const stopObserving = () => child.kill("SIGTERM");
       if (signal?.aborted) stopObserving();
@@ -295,27 +307,51 @@ export class OrcaTaskExecutor implements TaskExecutor {
         stderr += String(chunk);
       });
       child.on("error", (error) =>
-        reject(new TaskExecutorError(error.message, { stdout, stderr })),
+        reject(
+          new TaskExecutorError(
+            `Orca ${operation} failed to start: ${error.message}`,
+            { stdout, stderr },
+          ),
+        ),
       );
       child.on("close", (code) => {
         signal?.removeEventListener("abort", stopObserving);
-        if (code !== 0)
-          return reject(
-            new TaskExecutorError(
-              `Orca command failed (${code}): ${stderr.trim()}`,
-              { stdout, stderr },
-            ),
-          );
+        let json: unknown;
         try {
-          resolve({ stdout, stderr, json: JSON.parse(stdout) });
+          json = JSON.parse(stdout) as unknown;
         } catch {
+          if (code !== 0)
+            return reject(
+              new TaskExecutorError(
+                this.processFailureMessage(operation, code, stdout, stderr),
+                { stdout, stderr },
+              ),
+            );
           reject(
-            new TaskExecutorError("Orca command returned invalid JSON", {
+            new TaskExecutorError(`Orca ${operation} returned invalid JSON`, {
               stdout,
               stderr,
             }),
           );
+          return;
         }
+        if (code !== 0)
+          return reject(
+            new TaskExecutorError(
+              this.processFailureMessage(operation, code, stdout, stderr, json),
+              { stdout, stderr },
+            ),
+          );
+        try {
+          assertOrcaSuccess(json, operation);
+        } catch (error) {
+          if (error instanceof OrcaResponseError)
+            return reject(
+              new TaskExecutorError(error.message, { stdout, stderr }),
+            );
+          throw error;
+        }
+        resolve({ stdout, stderr, json });
       });
     });
   }
@@ -327,103 +363,35 @@ export class OrcaTaskExecutor implements TaskExecutor {
     return `${launch.prompt}\n\n---\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
   }
 
-  private findString(value: unknown, keys: string[]): string | undefined {
-    if (!value || typeof value !== "object") return undefined;
-    for (const key of keys) {
-      const found = (value as Record<string, unknown>)[key];
-      if (typeof found === "string") return found;
+  private decode<T>(
+    result: CommandResult,
+    decoder: (value: unknown) => T,
+    logs: { stdout: string; stderr: string } = {
+      stdout: result.stdout,
+      stderr: result.stderr,
+    },
+  ): T {
+    try {
+      return decoder(result.json);
+    } catch (error) {
+      if (error instanceof OrcaResponseError)
+        throw new TaskExecutorError(error.message, { ...logs });
+      throw error;
     }
-    for (const child of Object.values(value)) {
-      if (Array.isArray(child))
-        for (const item of child) {
-          const found = this.findString(item, keys);
-          if (found) return found;
-        }
-      else {
-        const found = this.findString(child, keys);
-        if (found) return found;
-      }
-    }
-    return undefined;
   }
 
-  private findObjectContaining(
-    value: unknown,
-    text: string,
-  ): Record<string, unknown> | undefined {
-    if (!value || typeof value !== "object") return undefined;
-    if (!Array.isArray(value) && JSON.stringify(value).includes(text))
-      return value as Record<string, unknown>;
-    for (const child of Object.values(value)) {
-      const found = this.findObjectContaining(child, text);
-      if (found) return found;
-    }
-    return undefined;
-  }
-
-  private hasCompletion(value: unknown, dispatchId: string): boolean {
-    const text = JSON.stringify(value);
-    return (
-      text.includes(dispatchId) &&
-      text.includes("worker_done") &&
-      text.includes("succeeded")
-    );
-  }
-
-  private externalEvents(value: unknown): ExternalEventRecord[] {
-    const objects: Array<Record<string, unknown>> = [];
-    const collect = (candidate: unknown): void => {
-      if (!candidate || typeof candidate !== "object") return;
-      if (!Array.isArray(candidate))
-        objects.push(candidate as Record<string, unknown>);
-      for (const child of Object.values(candidate)) collect(child);
-    };
-    collect(value);
-    const events = new Map<string, ExternalEventRecord>();
-    for (const object of objects) {
-      const rawType = typeof object.type === "string" ? object.type : undefined;
-      if (!rawType) continue;
-      const type = rawType.includes("question")
-        ? "question"
-        : rawType.includes("escalation")
-          ? "escalation"
-          : undefined;
-      if (!type) continue;
-      const id = this.findString(object, [
-        `${type}Id`,
-        `${type}_id`,
-        "eventId",
-        "event_id",
-        "id",
-      ]);
-      if (!id) continue;
-      const rawStatus = this.findString(object, ["status", "state"]);
-      const resolved =
-        rawType.includes("resolved") ||
-        ["answered", "approved", "resolved", "closed"].includes(
-          rawStatus ?? "",
-        );
-      const existing = events.get(id);
-      const observedAt = new Date().toISOString();
-      const event: ExternalEventRecord = {
-        id,
-        type,
-        status: resolved ? "resolved" : "pending",
-        observedAt,
-        ...(resolved ? { resolvedAt: observedAt } : {}),
-        ...(this.findString(object, ["message", "question", "reason", "text"])
-          ? {
-              message: this.findString(object, [
-                "message",
-                "question",
-                "reason",
-                "text",
-              ]),
-            }
-          : {}),
-      };
-      if (!existing || event.status === "resolved") events.set(id, event);
-    }
-    return [...events.values()];
+  private processFailureMessage(
+    operation: string,
+    code: number | null,
+    stdout: string,
+    stderr: string,
+    json?: unknown,
+  ): string {
+    const failure = decodeOrcaProcessFailure(json);
+    const detail = failure
+      ? `${failure.code ? `${failure.code}: ` : ""}${failure.message}`
+      : stderr.trim() || stdout.trim();
+    const exitCode = code === null ? "unknown" : String(code);
+    return `Orca ${operation} failed (${exitCode})${detail ? `: ${detail}` : ""}`;
   }
 }

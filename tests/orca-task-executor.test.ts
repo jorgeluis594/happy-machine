@@ -2,11 +2,33 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { TaskLaunch } from "../src/ports/task-executor.js";
+import { TaskExecutorError } from "../src/ports/task-executor.js";
 import { OrcaTaskExecutor } from "../src/infrastructure/outbound/task-executor/orca/orca-task-executor.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 
 beforeAll(async () => chmod(fixture, 0o755));
+
+async function launchFixture(root: string): Promise<TaskLaunch> {
+  const outputDirectory = path.join(root, "output");
+  await mkdir(outputDirectory);
+  const contextPath = path.join(root, "context.md");
+  await writeFile(contextPath, "context\n");
+  return {
+    identity: "run:state:1:task:1",
+    projectWorkspace: root,
+    contextPath,
+    outputDirectory,
+    resultPath: path.join(root, "result.json"),
+    instructions: "instructions",
+    prompt: "prompt",
+    allowedOutcomes: ["approved", "needs_revision"],
+    model: "model",
+    timeoutMs: 5_000,
+    attemptNumber: 1,
+  };
+}
 
 describe("Orca timeout reconciliation adapter", () => {
   it("consumes questions, escalations, and external resolutions before ordinary completion", async () => {
@@ -97,6 +119,232 @@ describe("Orca timeout reconciliation adapter", () => {
       { id: "e-1", type: "escalation", status: "pending" },
       { id: "q-1", type: "question", status: "resolved" },
     ]);
+  });
+
+  it("uses resource IDs from the RPC result instead of the envelope ID", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-ids-"));
+    const executor = new OrcaTaskExecutor(fixture);
+    let references:
+      Parameters<Parameters<OrcaTaskExecutor["execute"]>[1]>[0] | undefined;
+
+    await executor.execute(await launchFixture(root), (started) => {
+      references = started;
+      return Promise.resolve();
+    });
+
+    expect(references).toEqual({
+      runId: "orca-run-1",
+      taskId: "orca-task-1",
+      dispatchId: "orca-dispatch-1",
+      terminalHandle: "terminal-1",
+    });
+    const calls = (
+      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    const workerStart = calls.find(
+      (call) => call[0] === "orchestration" && call[1] === "worker-start",
+    );
+    expect(workerStart?.[workerStart.indexOf("--task") + 1]).toBe(
+      "orca-task-1",
+    );
+  });
+
+  it("fails before the next side effect when a receipt is malformed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-shape-"));
+    await writeFile(
+      path.join(root, ".fake-orca-response-overrides.json"),
+      JSON.stringify({
+        "orchestration run-create": {
+          id: "rpc-envelope-id",
+          ok: true,
+          result: { run: {} },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({
+      message:
+        "Orca run-create response expected result.run.id to be a non-empty string",
+    });
+    const calls = (
+      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    expect(calls.map((call) => call.slice(0, 2))).toEqual([
+      ["orchestration", "run-create"],
+    ]);
+  });
+
+  it("rejects a worker receipt for a different task", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-orca-task-mismatch-"),
+    );
+    await writeFile(
+      path.join(root, ".fake-orca-response-overrides.json"),
+      JSON.stringify({
+        "orchestration worker-start": {
+          id: "rpc-envelope-id",
+          ok: true,
+          result: {
+            taskId: "other-task",
+            dispatchId: "orca-dispatch-1",
+            state: "ready",
+          },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({
+      message:
+        "Orca worker-start returned task other-task instead of created task orca-task-1",
+    });
+  });
+
+  it("turns an explicit failed worker completion into an executor failure", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-orca-worker-failed-"),
+    );
+    await writeFile(
+      path.join(root, ".fake-check-sequence.json"),
+      JSON.stringify([
+        {
+          messages: [
+            {
+              id: "worker-message",
+              type: "worker_done",
+              payload: JSON.stringify({
+                dispatchId: "orca-dispatch-1",
+                outcome: "failed",
+              }),
+            },
+          ],
+        },
+      ]),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({
+      message: "Orca worker orca-dispatch-1 reported failed completion",
+    });
+  });
+
+  it("surfaces a structured stdout error from a failed Orca command", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-error-"));
+    await writeFile(
+      path.join(root, ".fake-orca-failures.json"),
+      JSON.stringify({
+        "orchestration worker-start": {
+          exitCode: 1,
+          error: {
+            code: "task_not_found",
+            message: "Task rpc-envelope-id was not found",
+          },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    try {
+      await executor.execute(await launchFixture(root), () =>
+        Promise.resolve(),
+      );
+      throw new Error("expected execute to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TaskExecutorError);
+      expect((error as Error).message).toBe(
+        "Orca worker-start failed (1): task_not_found: Task rpc-envelope-id was not found",
+      );
+      const stdout = (error as TaskExecutorError).logs.stdout;
+      expect(stdout).toContain('"run":{"id":"orca-run-1"}');
+      expect(stdout).toContain('"task":{"id":"orca-task-1"}');
+      expect(stdout).toContain('"code":"task_not_found"');
+      expect((error as TaskExecutorError).logs.stderr).toBe("");
+    }
+  });
+
+  it("rejects an unsuccessful RPC envelope even when Orca exits zero", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-rpc-error-"));
+    await writeFile(
+      path.join(root, ".fake-orca-response-overrides.json"),
+      JSON.stringify({
+        "orchestration worker-start": {
+          id: "rpc-envelope-id",
+          ok: false,
+          error: {
+            code: "worker_rejected",
+            message: "Worker could not start",
+          },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({
+      message:
+        "Orca worker-start failed: worker_rejected: Worker could not start",
+    });
+  });
+
+  it.each([
+    [
+      "stderr",
+      { exitCode: 1, stdout: "not json", stderr: "connection lost" },
+      "Orca worker-start failed (1): connection lost",
+    ],
+    [
+      "plain stdout",
+      { exitCode: 1, stdout: "plain worker failure" },
+      "Orca worker-start failed (1): plain worker failure",
+    ],
+    [
+      "invalid success output",
+      { exitCode: 0, stdout: "not json" },
+      "Orca worker-start returned invalid JSON",
+    ],
+    [
+      "non-ready worker receipt",
+      {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          id: "rpc-worker-failure",
+          ok: true,
+          result: {
+            state: "failed",
+            failedStage: "agent_launch",
+            lastError: "Agent did not become ready",
+          },
+        }),
+      },
+      "Orca worker-start failed (1): agent_launch: Agent did not become ready",
+    ],
+  ])("uses the %s diagnostic fallback", async (_name, failure, message) => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-orca-error-fallback-"),
+    );
+    await writeFile(
+      path.join(root, ".fake-orca-failures.json"),
+      JSON.stringify({ "orchestration worker-start": failure }),
+    );
+    const executor = new OrcaTaskExecutor(fixture);
+
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toMatchObject({ message });
   });
 
   it.each([
