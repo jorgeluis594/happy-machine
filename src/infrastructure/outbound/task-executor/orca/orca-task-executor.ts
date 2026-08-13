@@ -21,8 +21,14 @@ import {
   decodeTaskList,
   decodeWorkerShow,
   decodeWorkerStart,
+  decodeWorkerRead,
   OrcaResponseError,
 } from "./orca-response.js";
+import {
+  disabledDiagnostics,
+  type DiagnosticContext,
+  type DiagnosticSink,
+} from "../../../../ports/diagnostics.js";
 
 interface CommandResult {
   stdout: string;
@@ -31,14 +37,28 @@ interface CommandResult {
 }
 
 export class OrcaTaskExecutor implements TaskExecutor {
+  private readonly transcriptStates = new Map<
+    string,
+    {
+      cursor?: string | number;
+      source?: "transcript" | "terminal";
+      reading: boolean;
+      disabled: boolean;
+      warned: boolean;
+      replay: boolean;
+    }
+  >();
+
   constructor(
     private readonly executable = process.env.ORCA_CLI_COMMAND || "orca",
+    private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
   ) {}
 
   async recover(
     identity: string,
     references: ExecutorReferences | undefined,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<RecoveryObservation> {
     let taskId = references?.taskId;
     let lookupLogs = { stdout: "", stderr: "" };
@@ -88,6 +108,11 @@ export class OrcaTaskExecutor implements TaskExecutor {
       runId: references?.runId ?? dispatch.runId,
       terminalHandle: references?.terminalHandle ?? dispatch.terminalHandle,
     };
+    await this.readTranscript(
+      recoveredReferences,
+      projectWorkspace,
+      diagnosticContext,
+    );
     const state = dispatch.workerState;
     if (state === "start_unknown" || state === "stop_unknown")
       return { status: state, references: recoveredReferences, logs };
@@ -128,6 +153,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
           args,
           launch.projectWorkspace,
           launch.signal,
+          launch.diagnosticContext,
         );
         logs.stdout += result.stdout;
         logs.stderr += result.stderr;
@@ -200,40 +226,65 @@ export class OrcaTaskExecutor implements TaskExecutor {
       terminalHandle: worker.terminalHandle,
     };
     await onStarted(references);
-    const observedEvents = new Map<string, ExternalEventRecord>();
-    while (true) {
-      const completion = await command([
-        "orchestration",
-        "check",
-        "--wait",
-        "--types",
-        "worker_done,escalation,question",
-        "--timeout-ms",
-        String(launch.timeoutMs),
-        "--json",
-      ]);
-      const observation = this.decode(
-        completion,
-        (value) => decodeCheck(value, references.dispatchId),
-        logs,
+    let transcriptTimer: NodeJS.Timeout | undefined;
+    if (this.diagnostics.enabled) {
+      await this.readTranscript(
+        references,
+        launch.projectWorkspace,
+        launch.diagnosticContext,
       );
-      for (const event of observation.events) {
-        const previous = observedEvents.get(event.id);
-        if (previous?.status === event.status) continue;
-        observedEvents.set(event.id, event);
-        await onEvent?.(event);
+      transcriptTimer = setInterval(() => {
+        void this.readTranscript(
+          references,
+          launch.projectWorkspace,
+          launch.diagnosticContext,
+        );
+      }, 1000);
+      transcriptTimer.unref();
+    }
+    const observedEvents = new Map<string, ExternalEventRecord>();
+    try {
+      while (true) {
+        const completion = await command([
+          "orchestration",
+          "check",
+          "--wait",
+          "--types",
+          "worker_done,escalation,question",
+          "--timeout-ms",
+          String(launch.timeoutMs),
+          "--json",
+        ]);
+        const observation = this.decode(
+          completion,
+          (value) => decodeCheck(value, references.dispatchId),
+          logs,
+        );
+        for (const event of observation.events) {
+          const previous = observedEvents.get(event.id);
+          if (previous?.status === event.status) continue;
+          observedEvents.set(event.id, event);
+          await onEvent?.(event);
+        }
+        if (observation.completion?.outcome === "failed")
+          throw new TaskExecutorError(
+            `Orca worker ${references.dispatchId} reported failed completion`,
+            { ...logs },
+          );
+        if (observation.completion?.outcome === "succeeded") break;
+        if (!observation.events.length)
+          throw new TaskExecutorError(
+            "Orca check returned without completion or a structured intervention event",
+            { ...logs },
+          );
       }
-      if (observation.completion?.outcome === "failed")
-        throw new TaskExecutorError(
-          `Orca worker ${references.dispatchId} reported failed completion`,
-          { ...logs },
-        );
-      if (observation.completion?.outcome === "succeeded") break;
-      if (!observation.events.length)
-        throw new TaskExecutorError(
-          "Orca check returned without completion or a structured intervention event",
-          { ...logs },
-        );
+    } finally {
+      if (transcriptTimer) clearInterval(transcriptTimer);
+      await this.drainTranscript(
+        references,
+        launch.projectWorkspace,
+        launch.diagnosticContext,
+      );
     }
     return { references, logs };
   }
@@ -241,7 +292,9 @@ export class OrcaTaskExecutor implements TaskExecutor {
   async cancel(
     references: ExecutorReferences,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<void> {
+    await this.readTranscript(references, projectWorkspace, diagnosticContext);
     await this.run(
       [
         "orchestration",
@@ -251,12 +304,16 @@ export class OrcaTaskExecutor implements TaskExecutor {
         "--json",
       ],
       projectWorkspace,
+      undefined,
+      diagnosticContext,
     );
+    await this.drainTranscript(references, projectWorkspace, diagnosticContext);
   }
 
   async reconcile(
     references: ExecutorReferences,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<ExternalExecutionStatus> {
     const result = await this.run(
       [
@@ -267,8 +324,11 @@ export class OrcaTaskExecutor implements TaskExecutor {
         "--json",
       ],
       projectWorkspace,
+      undefined,
+      diagnosticContext,
     );
     const worker = this.decode(result, decodeWorkerShow);
+    await this.readTranscript(references, projectWorkspace, diagnosticContext);
     if (worker.dispatchId !== references.dispatchId)
       throw new TaskExecutorError(
         `Orca worker-show returned dispatch ${worker.dispatchId} instead of persisted dispatch ${references.dispatchId}`,
@@ -291,30 +351,55 @@ export class OrcaTaskExecutor implements TaskExecutor {
     args: string[],
     cwd: string,
     signal?: AbortSignal,
+    context?: DiagnosticContext,
   ): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
       const operation = args[1] ?? args[0] ?? "command";
+      const startedAt = Date.now();
+      this.diagnostics.emit({
+        kind: "orca",
+        name: `${operation}_started`,
+        context,
+      });
       const child = spawn(this.executable, args, { cwd, env: process.env });
       const stopObserving = () => child.kill("SIGTERM");
       if (signal?.aborted) stopObserving();
       else signal?.addEventListener("abort", stopObserving, { once: true });
       let stdout = "";
       let stderr = "";
+      let finished = false;
+      const finish = (code: number | null) => {
+        if (finished) return;
+        finished = true;
+        this.emitCommandFinished(
+          operation,
+          startedAt,
+          code,
+          stdout,
+          stderr,
+          context,
+        );
+      };
       child.stdout.on("data", (chunk) => {
         stdout += String(chunk);
       });
       child.stderr.on("data", (chunk) => {
         stderr += String(chunk);
       });
-      child.on("error", (error) =>
-        reject(
-          new TaskExecutorError(
-            `Orca ${operation} failed to start: ${error.message}`,
-            { stdout, stderr },
-          ),
+      child.on(
+        "error",
+        (error) => (
+          finish(null),
+          reject(
+            new TaskExecutorError(
+              `Orca ${operation} failed to start: ${error.message}`,
+              { stdout, stderr },
+            ),
+          )
         ),
       );
       child.on("close", (code) => {
+        finish(code);
         signal?.removeEventListener("abort", stopObserving);
         let json: unknown;
         try {
@@ -354,6 +439,202 @@ export class OrcaTaskExecutor implements TaskExecutor {
         resolve({ stdout, stderr, json });
       });
     });
+  }
+
+  private emitCommandFinished(
+    operation: string,
+    startedAt: number,
+    exitCode: number | null,
+    stdout: string,
+    stderr: string,
+    context?: DiagnosticContext,
+  ): void {
+    this.diagnostics.emit({
+      kind: "orca",
+      name: `${operation}_finished`,
+      context,
+      data: {
+        durationMs: Date.now() - startedAt,
+        exitCode,
+        stdoutBytes: Buffer.byteLength(stdout),
+        stderrBytes: Buffer.byteLength(stderr),
+      },
+    });
+  }
+
+  private async readTranscript(
+    references: ExecutorReferences,
+    cwd: string,
+    context?: DiagnosticContext,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    if (!this.diagnostics.enabled) return 0;
+    const state = this.transcriptStates.get(references.dispatchId) ?? {
+      reading: false,
+      disabled: false,
+      warned: false,
+      replay: this.diagnostics.replay,
+    };
+    this.transcriptStates.set(references.dispatchId, state);
+    if (state.reading || state.disabled) return 0;
+    state.reading = true;
+    try {
+      const args = [
+        "orchestration",
+        "worker-read",
+        "--dispatch",
+        references.dispatchId,
+        "--source",
+        "auto",
+        "--limit",
+        "200",
+        ...(state.cursor === undefined
+          ? []
+          : ["--cursor", String(state.cursor)]),
+        "--json",
+      ];
+      const result = await this.run(args, cwd, signal, {
+        ...context,
+        dispatchId: references.dispatchId,
+      });
+      const page = this.decode(result, decodeWorkerRead);
+      if (state.source && state.source !== page.source) {
+        this.diagnostics.emit({
+          kind: "warning",
+          name: "transcript_source_changed",
+          context: { ...context, dispatchId: references.dispatchId },
+          text: `from=${state.source} to=${page.source}; cursor reset`,
+        });
+        state.cursor = undefined;
+        state.source = undefined;
+        state.replay = true;
+        return 200;
+      }
+      state.source = page.source;
+      state.cursor = page.cursor;
+      if (page.source === "terminal" && page.fallbackReason && !state.warned) {
+        state.warned = true;
+        this.diagnostics.emit({
+          kind: "warning",
+          name: "transcript_terminal_fallback",
+          context: { ...context, dispatchId: references.dispatchId },
+          source: "terminal",
+          text: `reason=${page.fallbackReason}`,
+        });
+      }
+      let emitted = 0;
+      for (const line of page.terminalLines) {
+        this.emitTranscript(
+          line,
+          page.source,
+          state.replay,
+          references,
+          context,
+        );
+        emitted++;
+      }
+      for (const message of page.messages) {
+        if (message.role === "user" || message.role === "system") continue;
+        for (const block of message.blocks) {
+          if (block.type === "image") continue;
+          const text =
+            block.type === "text"
+              ? block.text
+              : block.type === "tool-call"
+                ? `[tool ${block.name}] ${this.safeJson(block.input)}`
+                : `[tool result${block.isError ? " error" : ""}] ${block.output}`;
+          for (const line of text.split(/\r?\n/)) {
+            this.emitTranscript(
+              line,
+              page.source,
+              state.replay,
+              references,
+              context,
+            );
+            emitted++;
+          }
+        }
+      }
+      if (emitted > 0) state.replay = false;
+      return emitted;
+    } catch (error) {
+      if (signal?.aborted) return 200;
+      const sourceChanged =
+        error instanceof Error && error.message.includes("source_changed");
+      if (sourceChanged) {
+        state.cursor = undefined;
+        state.source = undefined;
+        state.replay = true;
+        this.diagnostics.emit({
+          kind: "warning",
+          name: "transcript_source_changed",
+          context: { ...context, dispatchId: references.dispatchId },
+          text: "cursor reset",
+        });
+        return 200;
+      }
+      if (!state.warned) {
+        state.warned = true;
+        this.diagnostics.emit({
+          kind: "warning",
+          name: "transcript_disabled",
+          context: { ...context, dispatchId: references.dispatchId },
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
+      state.disabled = true;
+      return 0;
+    } finally {
+      state.reading = false;
+    }
+  }
+
+  private async drainTranscript(
+    references: ExecutorReferences,
+    cwd: string,
+    context?: DiagnosticContext,
+  ): Promise<void> {
+    if (!this.diagnostics.enabled) return;
+    const deadline = Date.now() + 2000;
+    let count = 200;
+    while (Date.now() < deadline && count >= 200)
+      count = await this.readTranscript(
+        references,
+        cwd,
+        context,
+        AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      );
+    if (count >= 200)
+      this.diagnostics.emit({
+        kind: "warning",
+        name: "transcript_backlog_remaining",
+        context: { ...context, dispatchId: references.dispatchId },
+      });
+  }
+
+  private emitTranscript(
+    text: string,
+    source: "transcript" | "terminal",
+    replay: boolean,
+    references: ExecutorReferences,
+    context?: DiagnosticContext,
+  ): void {
+    this.diagnostics.emit({
+      kind: "transcript",
+      name: "agent",
+      context: { ...context, dispatchId: references.dispatchId },
+      source,
+      replay,
+      text,
+    });
+  }
+
+  private safeJson(value: unknown): string {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "[unserializable input]";
+    }
   }
 
   private effectivePrompt(launch: TaskLaunch): string {

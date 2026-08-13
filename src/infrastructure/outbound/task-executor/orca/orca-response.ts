@@ -37,6 +37,20 @@ export interface OrcaCheckObservation {
   events: ExternalEventRecord[];
 }
 
+export type OrcaTranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "tool-call"; name: string; input: unknown }
+  | { type: "tool-result"; output: string; isError: boolean }
+  | { type: "image" };
+
+export interface OrcaWorkerRead {
+  source: "transcript" | "terminal";
+  cursor?: string | number;
+  fallbackReason?: string;
+  messages: Array<{ role: string; blocks: OrcaTranscriptBlock[] }>;
+  terminalLines: string[];
+}
+
 const WORKER_STATES = new Set<OrcaWorkerState>([
   "starting",
   "ready",
@@ -289,6 +303,124 @@ export function decodeCheck(
     ...(completion ? { completion } : {}),
     events: [...events.values()],
   };
+}
+
+export function decodeWorkerRead(value: unknown): OrcaWorkerRead {
+  const operation = "worker-read";
+  const result = resultRecord(value, operation);
+  const source = requiredString(result.source, operation, "result.source");
+  if (source !== "transcript" && source !== "terminal")
+    throw invalid(operation, "result.source to be transcript or terminal");
+  const cursor = result.cursor;
+  if (
+    cursor !== undefined &&
+    cursor !== null &&
+    typeof cursor !== "string" &&
+    typeof cursor !== "number"
+  )
+    throw invalid(operation, "result.cursor to be a string or number");
+  const fallbackReason = fallbackText(result.fallbackReason);
+  if (source === "terminal") {
+    const terminal = requiredRecord(
+      result.terminal,
+      operation,
+      "result.terminal",
+    );
+    if (
+      !Array.isArray(terminal.tail) ||
+      !terminal.tail.every((line) => typeof line === "string")
+    )
+      throw invalid(
+        operation,
+        "result.terminal.tail to be an array of strings",
+      );
+    return {
+      source,
+      ...(cursor === undefined || cursor === null ? {} : { cursor }),
+      ...(fallbackReason ? { fallbackReason } : {}),
+      messages: [],
+      terminalLines: terminal.tail,
+    };
+  }
+  const transcript = requiredRecord(
+    result.transcript,
+    operation,
+    "result.transcript",
+  );
+  if (!Array.isArray(transcript.messages))
+    throw invalid(operation, "result.transcript.messages to be an array");
+  const messages = transcript.messages.map((candidate, messageIndex) => {
+    const message = requiredRecord(
+      candidate,
+      operation,
+      `result.transcript.messages[${messageIndex}]`,
+    );
+    const role = requiredString(
+      message.role,
+      operation,
+      `result.transcript.messages[${messageIndex}].role`,
+    );
+    if (!Array.isArray(message.blocks))
+      throw invalid(
+        operation,
+        `result.transcript.messages[${messageIndex}].blocks to be an array`,
+      );
+    const blocks = message.blocks.map(
+      (candidateBlock, blockIndex): OrcaTranscriptBlock => {
+        const block = requiredRecord(
+          candidateBlock,
+          operation,
+          `result.transcript.messages[${messageIndex}].blocks[${blockIndex}]`,
+        );
+        const type = requiredString(
+          block.type,
+          operation,
+          `result.transcript.messages[${messageIndex}].blocks[${blockIndex}].type`,
+        );
+        if (type === "text")
+          return {
+            type,
+            text: requiredString(block.text, operation, "transcript text"),
+          };
+        if (type === "tool-call")
+          return {
+            type,
+            name: requiredString(block.name, operation, "tool name"),
+            input: block.input,
+          };
+        if (type === "tool-result")
+          return {
+            type,
+            output: requiredString(block.output, operation, "tool output"),
+            isError: block.isError === true,
+          };
+        if (type === "image") return { type };
+        throw invalid(
+          operation,
+          `transcript block type ${type} to be supported`,
+        );
+      },
+    );
+    return { role, blocks };
+  });
+  return {
+    source,
+    ...(cursor === undefined || cursor === null ? {} : { cursor }),
+    ...(fallbackReason ? { fallbackReason } : {}),
+    messages,
+    terminalLines: [],
+  };
+}
+
+function fallbackText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  const record = optionalRecord(value);
+  if (!record) return undefined;
+  return (
+    optionalStringValue(record.code) ??
+    optionalStringValue(record.reason) ??
+    optionalStringValue(record.message)
+  );
 }
 
 function resultRecord(value: unknown, operation: string): JsonRecord {

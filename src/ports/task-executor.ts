@@ -3,6 +3,7 @@ import type {
   ExecutorReferences,
   ExternalExecutionStatus,
 } from "../domain/execution/run.js";
+import type { DiagnosticContext } from "./diagnostics.js";
 
 export interface TaskLaunch {
   identity: string;
@@ -17,6 +18,13 @@ export interface TaskLaunch {
   timeoutMs: number;
   attemptNumber: number;
   signal?: AbortSignal;
+  diagnosticContext?: {
+    runId: string;
+    stateId: string;
+    visitNumber: number;
+    taskId: string;
+    attemptNumber: number;
+  };
 }
 
 export interface TaskExecution {
@@ -39,6 +47,7 @@ export interface TaskExecutor {
     identity: string,
     references: ExecutorReferences | undefined,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<RecoveryObservation>;
   execute(
     launch: TaskLaunch,
@@ -48,10 +57,12 @@ export interface TaskExecutor {
   cancel(
     references: ExecutorReferences,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<void>;
   reconcile(
     references: ExecutorReferences,
     projectWorkspace: string,
+    diagnosticContext?: DiagnosticContext,
   ): Promise<ExternalExecutionStatus>;
 }
 

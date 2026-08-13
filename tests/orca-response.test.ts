@@ -9,6 +9,7 @@ import {
   decodeTaskList,
   decodeWorkerShow,
   decodeWorkerStart,
+  decodeWorkerRead,
 } from "../src/infrastructure/outbound/task-executor/orca/orca-response.js";
 
 const success = (result: unknown, id = "rpc-envelope-id") => ({
@@ -19,6 +20,62 @@ const success = (result: unknown, id = "rpc-envelope-id") => ({
 });
 
 describe("Orca RPC response decoding", () => {
+  it("decodes verified transcript pages and terminal fallback pages", () => {
+    expect(
+      decodeWorkerRead(
+        success({
+          source: "transcript",
+          cursor: "opaque:2",
+          transcript: {
+            messages: [
+              {
+                role: "assistant",
+                blocks: [
+                  { type: "text", text: "working" },
+                  { type: "tool-call", name: "rg", input: { pattern: "x" } },
+                  { type: "tool-result", output: "found", isError: false },
+                  { type: "image", url: "secret" },
+                ],
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({
+      source: "transcript",
+      cursor: "opaque:2",
+      terminalLines: [],
+    });
+    expect(
+      decodeWorkerRead(
+        success({
+          source: "terminal",
+          cursor: 7,
+          fallbackReason: { code: "session_unverified" },
+          terminal: { tail: ["line"] },
+        }),
+      ),
+    ).toEqual({
+      source: "terminal",
+      cursor: 7,
+      fallbackReason: "session_unverified",
+      messages: [],
+      terminalLines: ["line"],
+    });
+  });
+
+  it("rejects malformed worker-read pages", () => {
+    expect(() =>
+      decodeWorkerRead(
+        success({ source: "terminal", terminal: { tail: [3] } }),
+      ),
+    ).toThrow("terminal.tail");
+    expect(() =>
+      decodeWorkerRead(
+        success({ source: "transcript", transcript: { messages: "bad" } }),
+      ),
+    ).toThrow("transcript.messages");
+  });
   it("reads resource IDs without selecting the envelope ID", () => {
     expect(
       decodeRunCreate(success({ run: { id: "run-resource-id" } })),

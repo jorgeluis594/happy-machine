@@ -36,6 +36,10 @@ import type {
 } from "../../ports/task-executor.js";
 import { TaskExecutorError } from "../../ports/task-executor.js";
 import {
+  disabledDiagnostics,
+  type DiagnosticSink,
+} from "../../ports/diagnostics.js";
+import {
   ControllerDetachedError,
   detached,
   throwIfDetached,
@@ -81,6 +85,7 @@ export class ExecuteWorkflow {
     private readonly makeId: () => string,
     private readonly wait: Wait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
+    private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
   ) {}
 
   async execute(request: ExecuteWorkflowRequest): Promise<RunRecord> {
@@ -636,6 +641,13 @@ export class ExecuteWorkflow {
           timeoutMs: work.policies.attemptTimeoutMs,
           attemptNumber,
           signal,
+          diagnosticContext: {
+            runId: run.id,
+            stateId: visit.stateId,
+            visitNumber: visit.number,
+            taskId: task.id,
+            attemptNumber,
+          },
         },
         timestamp,
         signal,
@@ -890,7 +902,11 @@ export class ExecuteWorkflow {
     });
     await this.runs.save(run);
     try {
-      await this.executor.cancel(references, launch.projectWorkspace);
+      await this.executor.cancel(
+        references,
+        launch.projectWorkspace,
+        launch.diagnosticContext,
+      );
       const completedAt = timestamp();
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(run, "attempt_cancellation_command_completed", completedAt, {
@@ -915,6 +931,7 @@ export class ExecuteWorkflow {
         status = await this.executor.reconcile(
           references,
           launch.projectWorkspace,
+          launch.diagnosticContext,
         );
       } catch {
         status = "unknown";
@@ -1260,5 +1277,24 @@ export class ExecuteWorkflow {
     data: Record<string, unknown>,
   ): void {
     run.events.push({ sequence: run.events.length + 1, type, at, data });
+    this.diagnostics.emit({
+      at,
+      kind: "event",
+      name: type,
+      context: {
+        runId: run.id,
+        stateId: typeof data.stateId === "string" ? data.stateId : undefined,
+        visitNumber:
+          typeof data.visitNumber === "number" ? data.visitNumber : undefined,
+        taskId: typeof data.taskId === "string" ? data.taskId : undefined,
+        attemptNumber:
+          typeof data.attemptNumber === "number"
+            ? data.attemptNumber
+            : undefined,
+        dispatchId:
+          typeof data.dispatchId === "string" ? data.dispatchId : undefined,
+      },
+      data,
+    });
   }
 }

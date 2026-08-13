@@ -12,6 +12,7 @@ import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-
 import { GitProjectWorkspaces } from "./infrastructure/outbound/project-workspaces/git/git-project-workspaces.js";
 import { FilesystemRunRepository } from "./infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
 import { OrcaTaskExecutor } from "./infrastructure/outbound/task-executor/orca/orca-task-executor.js";
+import { CliDiagnostics } from "./infrastructure/inbound/cli/debug-presenter.js";
 
 export function createProcessEntryPoint(): (
   argv: string[],
@@ -21,7 +22,10 @@ export function createProcessEntryPoint(): (
   const runs = new FilesystemRunRepository();
   const workspaces = new GitProjectWorkspaces();
   const workspaceCoordinator = new ProjectWorkspaceCoordinator(workspaces);
-  const executor = new OrcaTaskExecutor();
+  const diagnostics = new CliDiagnostics((message) =>
+    process.stderr.write(`${message}\n`),
+  );
+  const executor = new OrcaTaskExecutor(undefined, diagnostics);
   const now = () => new Date();
   const sleeper = (milliseconds: number, signal?: AbortSignal) =>
     wait(milliseconds, undefined, { signal });
@@ -33,6 +37,7 @@ export function createProcessEntryPoint(): (
     randomUUID,
     sleeper,
     workspaceCoordinator,
+    diagnostics,
   );
   const recover = new RecoverWorkflow(
     runs,
@@ -40,6 +45,7 @@ export function createProcessEntryPoint(): (
     now,
     (milliseconds) => sleeper(milliseconds),
     workspaceCoordinator,
+    diagnostics,
   );
   const cancel = new CancelWorkflow(
     runs,
@@ -47,6 +53,7 @@ export function createProcessEntryPoint(): (
     now,
     sleeper,
     workspaceCoordinator,
+    diagnostics,
   );
   const cleanup = new CleanupWorktrees(runs, workspaces, now);
   const cli = new Cli(
@@ -76,6 +83,8 @@ export function createProcessEntryPoint(): (
         }
       },
     },
+    undefined,
+    diagnostics,
   );
   return async (argv, currentDirectory) => {
     const controller = new AbortController();

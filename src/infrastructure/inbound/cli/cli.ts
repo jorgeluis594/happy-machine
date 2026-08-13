@@ -8,6 +8,7 @@ import type { RunRecord } from "../../../domain/execution/run.js";
 import { runIsTerminal } from "../../../domain/execution/run.js";
 import { HelpPresenter, type HelpCommandName } from "./help-presenter.js";
 import { RunPresenter } from "./run-presenter.js";
+import type { DiagnosticScope } from "../../../ports/diagnostics.js";
 
 export interface CliStreams {
   stdout(message: string): void;
@@ -20,9 +21,14 @@ export interface CleanupPrompt {
 }
 
 type OperationRequest =
-  | { command: "execute"; workflowPath: string; inputPaths: string[] }
-  | { command: "resume"; runId: string }
-  | { command: "cancel"; runId: string }
+  | {
+      command: "execute";
+      workflowPath: string;
+      inputPaths: string[];
+      debug: boolean;
+    }
+  | { command: "resume"; runId: string; debug: boolean }
+  | { command: "cancel"; runId: string; debug: boolean }
   | { command: "cleanup"; runId: string }
   | { command: "status"; runId: string }
   | { command: "history"; runId?: string };
@@ -47,6 +53,7 @@ export class Cli {
     private readonly cleanupWorktrees?: CleanupWorktrees,
     private readonly cleanupPrompt?: CleanupPrompt,
     private readonly helpPresenter = new HelpPresenter(),
+    private readonly diagnostics?: DiagnosticScope,
   ) {}
 
   async run(
@@ -92,7 +99,7 @@ export class Cli {
           ? 1
           : 0;
       }
-      const run =
+      const operation = async () =>
         request.command === "execute"
           ? await this.executeWorkflow.execute({
               workflowPath: request.workflowPath,
@@ -114,6 +121,15 @@ export class Cli {
                 controllerId: `${request.runId}:cancel:${process.pid}`,
                 signal,
               });
+      const run = this.diagnostics
+        ? await this.diagnostics.run(
+            {
+              enabled: request.debug,
+              replay: request.command === "resume",
+            },
+            operation,
+          )
+        : await operation();
       this.streams.stdout(`Run ${run.id}: ${run.status}`);
       await this.maybePromptForCleanup(currentDirectory, run);
       return run.status === "succeeded" ? 0 : run.status === "canceled" ? 2 : 1;
@@ -155,10 +171,24 @@ export class Cli {
   }
 
   private operationRequest(argv: string[]): OperationRequest | undefined {
-    if (argv[0] === "resume" && argv.length === 2 && argv[1])
-      return { command: "resume", runId: argv[1] };
-    if (argv[0] === "cancel" && argv.length === 2 && argv[1])
-      return { command: "cancel", runId: argv[1] };
+    if (
+      ["status", "history", "cleanup"].includes(argv[0] ?? "") &&
+      argv
+        .slice(1)
+        .some(
+          (argument) =>
+            argument === "--debug" || argument.startsWith("--debug="),
+        )
+    )
+      return undefined;
+    if (["resume", "cancel"].includes(argv[0] ?? "")) {
+      const parsed = this.extractDebug(argv.slice(1));
+      if (!parsed || parsed.args.length !== 1 || !parsed.args[0])
+        return undefined;
+      return argv[0] === "resume"
+        ? { command: "resume", runId: parsed.args[0], debug: parsed.debug }
+        : { command: "cancel", runId: parsed.args[0], debug: parsed.debug };
+    }
     if (argv[0] === "cleanup" && argv.length === 2 && argv[1])
       return { command: "cleanup", runId: argv[1] };
     if (argv[0] === "status" && argv.length === 2 && argv[1])
@@ -166,16 +196,38 @@ export class Cli {
     if (argv[0] === "history" && argv.length <= 2)
       return { command: "history", runId: argv[1] };
     if (argv[0] !== "execute" || argv.length < 2) return undefined;
-    const workflowPath = argv[1];
+    const parsed = this.extractDebug(argv.slice(1));
+    if (!parsed) return undefined;
+    const [workflowPath, ...options] = parsed.args;
     if (!workflowPath || workflowPath.startsWith("--")) return undefined;
     const inputPaths: string[] = [];
-    for (let index = 2; index < argv.length; index += 2) {
-      if (argv[index] !== "--input") return undefined;
-      const inputPath = argv[index + 1];
+    for (let index = 0; index < options.length; index += 2) {
+      if (options[index] !== "--input") return undefined;
+      const inputPath = options[index + 1];
       if (!inputPath || inputPath.startsWith("--")) return undefined;
       inputPaths.push(inputPath);
     }
-    return { command: "execute", workflowPath, inputPaths };
+    return {
+      command: "execute",
+      workflowPath,
+      inputPaths,
+      debug: parsed.debug,
+    };
+  }
+
+  private extractDebug(
+    args: string[],
+  ): { args: string[]; debug: boolean } | undefined {
+    let debug = false;
+    const remaining: string[] = [];
+    for (const argument of args) {
+      if (argument.startsWith("--debug=")) return undefined;
+      if (argument === "--debug") {
+        if (debug) return undefined;
+        debug = true;
+      } else remaining.push(argument);
+    }
+    return { args: remaining, debug };
   }
 
   private presentRequestError(

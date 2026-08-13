@@ -47,6 +47,10 @@ import {
   requireWorkspaceCoordinator,
   workspaceFailure,
 } from "../services/project-workspace-coordinator.js";
+import {
+  disabledDiagnostics,
+  type DiagnosticSink,
+} from "../../ports/diagnostics.js";
 
 export interface RecoverWorkflowRequest {
   projectRoot: string;
@@ -81,6 +85,7 @@ export class RecoverWorkflow {
     private readonly now: () => Date,
     private readonly wait: RecoveryWait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
+    private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
   ) {}
 
   async recover(request: RecoverWorkflowRequest): Promise<RunRecord> {
@@ -710,6 +715,7 @@ export class RecoverWorkflow {
       attempt.id,
       attempt.executor,
       projectWorkspace,
+      this.diagnosticContext(controlled.run, attempt),
     );
   }
 
@@ -781,7 +787,11 @@ export class RecoverWorkflow {
     };
     await this.persist(controlled);
     try {
-      await this.executor.cancel(attempt.executor, projectWorkspace);
+      await this.executor.cancel(
+        attempt.executor,
+        projectWorkspace,
+        this.diagnosticContext(controlled.run, attempt),
+      );
       const completedAt = this.timestamp();
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(controlled.run, "attempt_cancellation_command_completed", {
@@ -796,6 +806,7 @@ export class RecoverWorkflow {
     const status = await this.executor.reconcile(
       attempt.executor,
       projectWorkspace,
+      this.diagnosticContext(controlled.run, attempt),
     );
     const observedAt = this.timestamp();
     attempt.reconciliation.observations.push({ status, at: observedAt });
@@ -832,7 +843,11 @@ export class RecoverWorkflow {
           task,
         );
         try {
-          await this.executor.cancel(attempt.executor, projectWorkspace);
+          await this.executor.cancel(
+            attempt.executor,
+            projectWorkspace,
+            this.diagnosticContext(controlled.run, attempt),
+          );
         } catch {
           // The run still ends for the expired global deadline.
         }
@@ -840,6 +855,7 @@ export class RecoverWorkflow {
           attempt.externalStatus = await this.executor.reconcile(
             attempt.executor,
             projectWorkspace,
+            this.diagnosticContext(controlled.run, attempt),
           );
         } catch {
           attempt.externalStatus = "unknown";
@@ -991,7 +1007,27 @@ export class RecoverWorkflow {
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,
       signal: controlled.signal,
+      diagnosticContext: this.diagnosticContext(controlled.run, attempt),
     };
+  }
+
+  private diagnosticContext(
+    run: RunRecord,
+    attempt: AttemptRecord,
+  ): TaskLaunch["diagnosticContext"] {
+    for (const visit of run.visits) {
+      const tasks = visit.type === "agent" ? [visit.task] : visit.tasks;
+      for (const task of tasks)
+        if (task.attempts.includes(attempt))
+          return {
+            runId: run.id,
+            stateId: visit.stateId,
+            visitNumber: visit.number,
+            taskId: task.id,
+            attemptNumber: attempt.number,
+          };
+    }
+    return undefined;
   }
 
   private terminal(target: string): target is "$succeeded" | "$failed" {
@@ -1007,10 +1043,30 @@ export class RecoverWorkflow {
     type: string,
     data: Record<string, unknown>,
   ): void {
+    const at = this.timestamp();
     run.events.push({
       sequence: run.events.length + 1,
       type,
-      at: this.timestamp(),
+      at,
+      data,
+    });
+    this.diagnostics.emit({
+      at,
+      kind: "event",
+      name: type,
+      context: {
+        runId: run.id,
+        stateId: typeof data.stateId === "string" ? data.stateId : undefined,
+        visitNumber:
+          typeof data.visitNumber === "number" ? data.visitNumber : undefined,
+        taskId: typeof data.taskId === "string" ? data.taskId : undefined,
+        attemptNumber:
+          typeof data.attemptNumber === "number"
+            ? data.attemptNumber
+            : undefined,
+        dispatchId:
+          typeof data.dispatchId === "string" ? data.dispatchId : undefined,
+      },
       data,
     });
   }

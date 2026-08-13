@@ -12,17 +12,18 @@ const commands = [
   },
   {
     command: "execute",
-    usage: "happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...]",
+    usage:
+      "happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] [--debug]",
     argument: "WORKFLOW_PATH",
   },
   {
     command: "resume",
-    usage: "happy-machine resume RUN_ID",
+    usage: "happy-machine resume RUN_ID [--debug]",
     argument: "RUN_ID",
   },
   {
     command: "cancel",
-    usage: "happy-machine cancel RUN_ID",
+    usage: "happy-machine cancel RUN_ID [--debug]",
     argument: "RUN_ID",
   },
   {
@@ -186,6 +187,43 @@ describe("happy-machine help", () => {
     expect(setup.stderr).toEqual([
       `Invalid arguments for command: ${command}\nTry 'happy-machine help ${command}' for more information.`,
     ]);
+    expectNoCalls(setup.calls);
+  });
+});
+
+describe("--debug parsing", () => {
+  it.each([
+    ["execute", ["execute", "--debug", "workflow.yaml"], "execute"],
+    ["execute trailing", ["execute", "workflow.yaml", "--debug"], "execute"],
+    [
+      "execute among inputs",
+      ["execute", "workflow.yaml", "--input", "a.md", "--debug"],
+      "execute",
+    ],
+    ["resume", ["resume", "--debug", "run_1"], "recover"],
+    ["resume trailing", ["resume", "run_1", "--debug"], "recover"],
+    ["cancel", ["cancel", "--debug", "run_1"], "cancel"],
+  ])("accepts %s", async (_label, argv, callName) => {
+    const setup = harness();
+    setup.calls.execute.mockResolvedValue({ id: "run_1", status: "succeeded" });
+    setup.calls.recover.mockResolvedValue({ id: "run_1", status: "succeeded" });
+    setup.calls.cancel.mockResolvedValue({ id: "run_1", status: "canceled" });
+    await setup.app.run(argv, "/project");
+    expect(
+      setup.calls[callName as "execute" | "recover" | "cancel"],
+    ).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["execute", "workflow.yaml", "--debug", "--debug"],
+    ["resume", "run_1", "--debug=yes"],
+    ["cancel", "--debug=false", "run_1"],
+    ["status", "run_1", "--debug"],
+    ["history", "--debug"],
+    ["cleanup", "run_1", "--debug"],
+  ])("rejects %j", async (...argv) => {
+    const setup = harness();
+    expect(await setup.app.run(argv, "/project")).toBe(1);
     expectNoCalls(setup.calls);
   });
 });

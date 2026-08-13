@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { TaskLaunch } from "../src/ports/task-executor.js";
 import { TaskExecutorError } from "../src/ports/task-executor.js";
 import { OrcaTaskExecutor } from "../src/infrastructure/outbound/task-executor/orca/orca-task-executor.js";
+import type { DiagnosticEntry } from "../src/ports/diagnostics.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 
@@ -31,6 +32,33 @@ async function launchFixture(root: string): Promise<TaskLaunch> {
 }
 
 describe("Orca timeout reconciliation adapter", () => {
+  it("streams bounded transcript only when diagnostics are enabled", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-debug-"));
+    const entries: DiagnosticEntry[] = [];
+    const executor = new OrcaTaskExecutor(fixture, {
+      enabled: true,
+      replay: false,
+      emit: (entry) => entries.push(entry),
+    });
+    await executor.execute(await launchFixture(root), () => Promise.resolve());
+    const transcript = entries.filter((entry) => entry.kind === "transcript");
+    expect(transcript.map((entry) => entry.text)).toEqual([
+      "agent progress",
+      '[tool rg] {"pattern":"needle"}',
+      "[tool result] match",
+    ]);
+    expect(JSON.stringify(entries)).not.toContain("hidden system prompt");
+    expect(JSON.stringify(entries)).not.toContain("hidden user prompt");
+    expect(JSON.stringify(entries)).not.toContain("instructions");
+    expect(entries.some((entry) => entry.name === "worker-read_started")).toBe(
+      true,
+    );
+    expect(
+      entries.find((entry) => entry.name === "worker-read_finished")?.data
+        ?.exitCode,
+    ).toBe(0);
+  });
+
   it("consumes questions, escalations, and external resolutions before ordinary completion", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-events-"));
     const output = path.join(root, "output");
@@ -150,6 +178,11 @@ describe("Orca timeout reconciliation adapter", () => {
     expect(workerStart?.[workerStart.indexOf("--task") + 1]).toBe(
       "orca-task-1",
     );
+    expect(
+      calls.some(
+        (call) => call[0] === "orchestration" && call[1] === "worker-read",
+      ),
+    ).toBe(false);
   });
 
   it("fails before the next side effect when a receipt is malformed", async () => {

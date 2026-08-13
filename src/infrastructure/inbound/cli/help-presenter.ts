@@ -32,8 +32,14 @@ const commandHelp = [
   {
     name: "execute",
     description: "Execute a workflow and remain attached until it finishes.",
-    usage: "happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...]",
+    usage:
+      "happy-machine execute WORKFLOW_PATH [--input DOCUMENT.md ...] [--debug]",
     arguments: [
+      {
+        label: "--debug",
+        description:
+          "Stream structured diagnostics and agent transcripts to stderr.",
+      },
       {
         label: "WORKFLOW_PATH",
         description: "Path to the workflow YAML file.",
@@ -53,7 +59,7 @@ const commandHelp = [
   {
     name: "resume",
     description: "Resume control of a detached run.",
-    usage: "happy-machine resume RUN_ID",
+    usage: "happy-machine resume RUN_ID [--debug]",
     arguments: [
       {
         label: "RUN_ID",
@@ -61,6 +67,11 @@ const commandHelp = [
       },
     ],
     options: [
+      {
+        label: "--debug",
+        description:
+          "Stream diagnostics and retained agent transcript to stderr.",
+      },
       {
         label: "-h, --help",
         description: "Show help for this command.",
@@ -70,7 +81,7 @@ const commandHelp = [
   {
     name: "cancel",
     description: "Cancel a run and reconcile its active work.",
-    usage: "happy-machine cancel RUN_ID",
+    usage: "happy-machine cancel RUN_ID [--debug]",
     arguments: [
       {
         label: "RUN_ID",
@@ -78,6 +89,11 @@ const commandHelp = [
       },
     ],
     options: [
+      {
+        label: "--debug",
+        description:
+          "Stream cancellation diagnostics and agent transcript to stderr.",
+      },
       {
         label: "-h, --help",
         description: "Show help for this command.",

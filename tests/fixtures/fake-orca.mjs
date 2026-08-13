@@ -239,6 +239,39 @@ if (operation === "orchestration run-create") {
     dispatchId: args[args.indexOf("--dispatch") + 1],
     state: "stopping",
   };
+} else if (operation === "orchestration worker-read") {
+  const cursorIndex = args.indexOf("--cursor");
+  response = {
+    source: "transcript",
+    cursor: cursorIndex < 0 ? "page-1" : "page-2",
+    transcript: {
+      messages:
+        cursorIndex < 0
+          ? [
+              {
+                role: "system",
+                blocks: [{ type: "text", text: "hidden system prompt" }],
+              },
+              {
+                role: "user",
+                blocks: [{ type: "text", text: "hidden user prompt" }],
+              },
+              {
+                role: "assistant",
+                blocks: [
+                  { type: "text", text: "agent progress" },
+                  {
+                    type: "tool-call",
+                    name: "rg",
+                    input: { pattern: "needle" },
+                  },
+                  { type: "tool-result", output: "match", isError: false },
+                ],
+              },
+            ]
+          : [],
+    },
+  };
 } else if (operation === "orchestration worker-show") {
   const stateFile = path.join(process.cwd(), ".fake-worker-state");
   const taskFile = path.join(process.cwd(), ".fake-started-task-id");

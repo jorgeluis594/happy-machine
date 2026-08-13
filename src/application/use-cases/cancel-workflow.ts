@@ -18,6 +18,10 @@ import type {
 } from "../../ports/task-executor.js";
 import { throwIfDetached } from "../services/controller-detachment.js";
 import {
+  disabledDiagnostics,
+  type DiagnosticSink,
+} from "../../ports/diagnostics.js";
+import {
   type ProjectWorkspaceCoordinator,
   requireWorkspaceCoordinator,
   workspaceFailure,
@@ -57,6 +61,7 @@ export class CancelWorkflow {
     private readonly now: () => Date,
     private readonly wait: CancellationWait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
+    private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
   ) {}
 
   async cancel(request: CancelWorkflowRequest): Promise<RunRecord> {
@@ -153,7 +158,11 @@ export class CancelWorkflow {
       item.visit,
       item.task,
     );
-    const observation = await this.recover(attempt, projectWorkspace);
+    const observation = await this.recover(
+      controlled.run,
+      item,
+      projectWorkspace,
+    );
     if (observation && observation.status !== "not_found") {
       attempt.executor = observation.references;
       attempt.logs = {
@@ -195,7 +204,12 @@ export class CancelWorkflow {
         references,
         projectWorkspace,
       );
-      const status = await this.reconcile(references, projectWorkspace);
+      const status = await this.reconcile(
+        controlled.run,
+        item,
+        references,
+        projectWorkspace,
+      );
       this.recordObservation(controlled.run, item, status);
       await this.persist(controlled);
       if (status !== "active") {
@@ -234,7 +248,11 @@ export class CancelWorkflow {
     }
     if (attempt.reconciliation.cancellationCommandCompletedAt) return;
     try {
-      await this.executor.cancel(references, projectWorkspace);
+      await this.executor.cancel(
+        references,
+        projectWorkspace,
+        this.diagnosticContext(controlled.run, item),
+      );
       const completedAt = this.timestamp();
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(
@@ -264,15 +282,17 @@ export class CancelWorkflow {
   }
 
   private async recover(
-    attempt: AttemptRecord,
+    run: RunRecord,
+    item: ActiveAttempt,
     projectWorkspace: string,
   ): Promise<RecoveryObservation | undefined> {
     if (!this.executor.recover) return undefined;
     try {
       return await this.executor.recover(
-        attempt.id,
-        attempt.executor,
+        item.attempt.id,
+        item.attempt.executor,
         projectWorkspace,
+        this.diagnosticContext(run, item),
       );
     } catch {
       return undefined;
@@ -280,14 +300,39 @@ export class CancelWorkflow {
   }
 
   private async reconcile(
+    run: RunRecord,
+    item: ActiveAttempt,
     references: ExecutorReferences,
     projectWorkspace: string,
   ): Promise<ExternalExecutionStatus> {
     try {
-      return await this.executor.reconcile(references, projectWorkspace);
+      return await this.executor.reconcile(
+        references,
+        projectWorkspace,
+        this.diagnosticContext(run, item),
+      );
     } catch {
       return "unknown";
     }
+  }
+
+  private diagnosticContext(
+    run: RunRecord,
+    item: ActiveAttempt,
+  ): {
+    runId: string;
+    stateId: string;
+    visitNumber: number;
+    taskId: string;
+    attemptNumber: number;
+  } {
+    return {
+      runId: run.id,
+      stateId: item.visit.stateId,
+      visitNumber: item.visit.number,
+      taskId: item.task.id,
+      attemptNumber: item.attempt.number,
+    };
   }
 
   private recordObservation(
@@ -394,6 +439,25 @@ export class CancelWorkflow {
     data: Record<string, unknown>,
   ): void {
     run.events.push({ sequence: run.events.length + 1, type, at, data });
+    this.diagnostics.emit({
+      at,
+      kind: "event",
+      name: type,
+      context: {
+        runId: run.id,
+        stateId: typeof data.stateId === "string" ? data.stateId : undefined,
+        visitNumber:
+          typeof data.visitNumber === "number" ? data.visitNumber : undefined,
+        taskId: typeof data.taskId === "string" ? data.taskId : undefined,
+        attemptNumber:
+          typeof data.attemptNumber === "number"
+            ? data.attemptNumber
+            : undefined,
+        dispatchId:
+          typeof data.dispatchId === "string" ? data.dispatchId : undefined,
+      },
+      data,
+    });
   }
 
   private timestamp(): string {
