@@ -1,17 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  decodeCheck,
-  decodeDispatch,
-  decodeDispatchShow,
   decodeOrcaFailure,
   decodeOrcaProcessFailure,
-  decodeRunCreate,
-  decodeTaskCreate,
+  decodeTerminalClose,
   decodeTerminalCreate,
-  decodeTaskList,
-  decodeWorkerShow,
-  decodeWorkerStart,
-  decodeWorkerRead,
+  decodeTerminalRead,
+  decodeTerminalSend,
+  decodeTerminalShow,
 } from "../src/infrastructure/outbound/task-executor/orca/orca-response.js";
 
 const success = (result: unknown, id = "rpc-envelope-id") => ({
@@ -21,283 +16,111 @@ const success = (result: unknown, id = "rpc-envelope-id") => ({
   _meta: { runtimeId: "runtime" },
 });
 
-describe("Orca RPC response decoding", () => {
-  it("decodes verified transcript pages and terminal fallback pages", () => {
-    expect(
-      decodeWorkerRead(
-        success({
-          source: "transcript",
-          cursor: "opaque:2",
-          transcript: {
-            messages: [
-              {
-                role: "assistant",
-                blocks: [
-                  { type: "text", text: "working" },
-                  { type: "tool-call", name: "rg", input: { pattern: "x" } },
-                  { type: "tool-result", output: "found", isError: false },
-                  { type: "image", url: "secret" },
-                ],
-              },
-            ],
-          },
-        }),
-      ),
-    ).toMatchObject({
-      source: "transcript",
-      cursor: "opaque:2",
-      terminalLines: [],
-    });
-    expect(
-      decodeWorkerRead(
-        success({
-          source: "terminal",
-          cursor: 7,
-          fallbackReason: { code: "session_unverified" },
-          terminal: { tail: ["line"] },
-        }),
-      ),
-    ).toEqual({
-      source: "terminal",
-      cursor: 7,
-      fallbackReason: "session_unverified",
-      messages: [],
-      terminalLines: ["line"],
-    });
-  });
-
-  it("rejects malformed worker-read pages", () => {
-    expect(() =>
-      decodeWorkerRead(
-        success({ source: "terminal", terminal: { tail: [3] } }),
-      ),
-    ).toThrow("terminal.tail");
-    expect(() =>
-      decodeWorkerRead(
-        success({ source: "transcript", transcript: { messages: "bad" } }),
-      ),
-    ).toThrow("transcript.messages");
-  });
-  it("reads resource IDs without selecting the envelope ID", () => {
-    expect(
-      decodeRunCreate(success({ run: { id: "run-resource-id" } })),
-    ).toEqual({ runId: "run-resource-id" });
-    expect(
-      decodeTaskCreate(success({ task: { id: "task-resource-id" } })),
-    ).toEqual({ taskId: "task-resource-id" });
+describe("Orca terminal response decoding", () => {
+  it("decodes terminal resources without selecting the envelope ID", () => {
     expect(
       decodeTerminalCreate(
         success({ terminal: { handle: "terminal-resource-id" } }),
       ),
     ).toEqual({ terminalHandle: "terminal-resource-id" });
     expect(
-      decodeDispatch(
+      decodeTerminalSend(
         success({
-          dispatch: {
-            task_id: "task-resource-id",
-            id: "dispatch-resource-id",
-            status: "dispatched",
+          send: {
+            handle: "terminal-resource-id",
+            accepted: true,
+            bytesWritten: 12,
           },
         }),
       ),
     ).toEqual({
-      taskId: "task-resource-id",
-      dispatchId: "dispatch-resource-id",
-      status: "dispatched",
+      terminalHandle: "terminal-resource-id",
+      accepted: true,
+      bytesWritten: 12,
     });
     expect(
-      decodeWorkerStart(
+      decodeTerminalClose(
+        success({ close: { handle: "terminal-resource-id" } }),
+      ),
+    ).toEqual({ terminalHandle: "terminal-resource-id" });
+  });
+
+  it("decodes active and inactive terminal observations", () => {
+    expect(
+      decodeTerminalShow(
         success({
-          taskId: "task-resource-id",
-          dispatchId: "dispatch-resource-id",
-          agentTerminalHandle: "terminal-resource-id",
-          state: "ready",
+          terminal: {
+            handle: "terminal-resource-id",
+            connected: true,
+            orphaned: false,
+          },
+        }),
+      ),
+    ).toEqual({ terminalHandle: "terminal-resource-id", active: true });
+    expect(
+      decodeTerminalShow(
+        success({
+          terminal: {
+            handle: "terminal-resource-id",
+            connected: true,
+            orphaned: true,
+          },
+        }),
+      ),
+    ).toEqual({ terminalHandle: "terminal-resource-id", active: false });
+  });
+
+  it("decodes bounded terminal transcript pages", () => {
+    expect(
+      decodeTerminalRead(
+        success({
+          terminal: {
+            handle: "terminal-resource-id",
+            status: "running",
+            tail: ["working", "done"],
+            nextCursor: "opaque:2",
+          },
         }),
       ),
     ).toEqual({
-      taskId: "task-resource-id",
-      dispatchId: "dispatch-resource-id",
       terminalHandle: "terminal-resource-id",
-      state: "ready",
+      status: "running",
+      cursor: "opaque:2",
+      terminalLines: ["working", "done"],
     });
   });
 
-  it("rejects unwrapped and malformed success payloads", () => {
-    expect(() => decodeRunCreate({ run: { id: "run" } })).toThrow(
-      "Orca run-create response expected an RPC envelope with ok=true",
-    );
-    expect(() => decodeTaskCreate(success({ task: {} }))).toThrow(
-      "result.task.id",
-    );
+  it("rejects unwrapped and malformed terminal payloads", () => {
+    expect(() =>
+      decodeTerminalCreate({ terminal: { handle: "terminal" } }),
+    ).toThrow("Orca create response expected an RPC envelope with ok=true");
     expect(() => decodeTerminalCreate(success({ terminal: {} }))).toThrow(
       "result.terminal.handle",
     );
     expect(() =>
-      decodeDispatch(
-        success({
-          dispatch: { task_id: "task", id: "", status: "dispatched" },
-        }),
+      decodeTerminalSend(
+        success({ send: { handle: "terminal", accepted: "yes" } }),
       ),
-    ).toThrow("result.dispatch.id");
+    ).toThrow("result.send.accepted");
     expect(() =>
-      decodeWorkerStart(
-        success({
-          taskId: "task",
-          dispatchId: "dispatch",
-          state: "mystery",
-        }),
+      decodeTerminalShow(
+        success({ terminal: { handle: "terminal", connected: "yes" } }),
       ),
-    ).toThrow("result.state to contain a known worker state");
-  });
-
-  it("finds recovery identity only inside decoded task specifications", () => {
-    expect(
-      decodeTaskList(
+    ).toThrow("result.terminal.connected");
+    expect(() =>
+      decodeTerminalRead(
         success({
-          tasks: [
-            { id: "unrelated", spec: "plain text" },
-            {
-              id: "matching-task",
-              spec: JSON.stringify({
-                happyMachineAttemptIdentity: "run:state:1:task:1",
-              }),
-            },
-          ],
-        }),
-      ),
-    ).toEqual([
-      { taskId: "unrelated" },
-      {
-        taskId: "matching-task",
-        attemptIdentity: "run:state:1:task:1",
-      },
-    ]);
-  });
-
-  it("decodes dispatch and worker observations from their explicit objects", () => {
-    expect(
-      decodeDispatchShow(
-        success({
-          runId: "run-resource-id",
-          dispatch: {
-            id: "dispatch-resource-id",
-            task_id: "task-resource-id",
-            worker_state: "ready",
-            agent_terminal_handle: "terminal-resource-id",
+          terminal: {
+            handle: "terminal",
+            status: "running",
+            tail: [3],
           },
         }),
       ),
-    ).toEqual({
-      runId: "run-resource-id",
-      dispatchId: "dispatch-resource-id",
-      taskId: "task-resource-id",
-      workerState: "ready",
-      terminalHandle: "terminal-resource-id",
-    });
-    expect(decodeDispatchShow(success({ dispatch: null }))).toBeNull();
-    expect(
-      decodeWorkerShow(
-        success({
-          dispatch: {
-            id: "dispatch-resource-id",
-            task_id: "task-resource-id",
-          },
-          worker: {
-            state: "stopped",
-            agent_terminal_handle: "terminal-resource-id",
-          },
-        }),
-      ),
-    ).toEqual({
-      dispatchId: "dispatch-resource-id",
-      taskId: "task-resource-id",
-      workerState: "stopped",
-      terminalHandle: "terminal-resource-id",
-    });
-  });
-
-  it("accepts only a structured completion for the expected dispatch", () => {
-    const matching = decodeCheck(
-      success({
-        messages: [
-          {
-            id: "worker-message",
-            type: "worker_done",
-            payload: JSON.stringify({
-              dispatchId: "expected-dispatch",
-              outcome: "succeeded",
-            }),
-          },
-        ],
-        misleading: "worker_done succeeded other-dispatch",
-      }),
-      "expected-dispatch",
+    ).toThrow("result.terminal.tail");
+    expect(() => decodeTerminalClose(success({ close: {} }))).toThrow(
+      "result.close.handle",
     );
-    expect(matching.completion).toEqual({
-      dispatchId: "expected-dispatch",
-      outcome: "succeeded",
-    });
-
-    const mismatched = decodeCheck(
-      success({
-        messages: [
-          {
-            id: "worker-message",
-            type: "worker_done",
-            payload: JSON.stringify({
-              dispatchId: "other-dispatch",
-              outcome: "succeeded",
-            }),
-          },
-        ],
-        misleading: "expected-dispatch worker_done succeeded",
-      }),
-      "expected-dispatch",
-    );
-    expect(mismatched.completion).toBeUndefined();
-  });
-
-  it("decodes and deduplicates structured intervention messages", () => {
-    const observation = decodeCheck(
-      success({
-        messages: [
-          {
-            id: "question-1",
-            type: "question",
-            subject: "Approve?",
-          },
-          {
-            id: "resolution-message",
-            type: "question_resolved",
-            payload: JSON.stringify({
-              questionId: "question-1",
-              status: "answered",
-            }),
-          },
-          {
-            id: "escalation-1",
-            type: "escalation",
-            body: "Review required",
-          },
-          {
-            id: "malformed-worker",
-            type: "worker_done",
-            payload: "not json",
-          },
-        ],
-      }),
-      "dispatch",
-    );
-    expect(observation.completion).toBeUndefined();
-    expect(observation.events).toMatchObject([
-      { id: "question-1", type: "question", status: "resolved" },
-      {
-        id: "escalation-1",
-        type: "escalation",
-        status: "pending",
-        message: "Review required",
-      },
-    ]);
   });
 
   it("extracts structured failures without treating the envelope ID as evidence", () => {
@@ -306,27 +129,27 @@ describe("Orca RPC response decoding", () => {
         id: "rpc-failure-id",
         ok: false,
         error: {
-          code: "task_not_found",
-          message: "Task rpc-failure-id was not found",
-          data: { recovery: ["task-list"] },
+          code: "terminal_handle_stale",
+          message: "terminal_handle_stale",
+          data: { recovery: ["terminal-list"] },
         },
       }),
     ).toEqual({
-      code: "task_not_found",
-      message: "Task rpc-failure-id was not found",
-      details: { recovery: ["task-list"] },
+      code: "terminal_handle_stale",
+      message: "terminal_handle_stale",
+      details: { recovery: ["terminal-list"] },
     });
     expect(
       decodeOrcaProcessFailure(
         success({
           state: "failed",
-          failedStage: "agent_launch",
-          lastError: "Agent did not become ready",
+          failedStage: "terminal_send",
+          lastError: "Terminal rejected input",
         }),
       ),
     ).toEqual({
-      code: "agent_launch",
-      message: "Agent did not become ready",
+      code: "terminal_send",
+      message: "Terminal rejected input",
     });
   });
 });

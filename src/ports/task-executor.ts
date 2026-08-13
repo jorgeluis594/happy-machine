@@ -47,6 +47,7 @@ export interface TaskExecutor {
     identity: string,
     references: ExecutorReferences | undefined,
     projectWorkspace: string,
+    resultPath?: string,
     diagnosticContext?: DiagnosticContext,
   ): Promise<RecoveryObservation>;
   execute(

@@ -1,17 +1,4 @@
-import type { ExternalEventRecord } from "../../../../domain/execution/run.js";
-
 type JsonRecord = Record<string, unknown>;
-
-export type OrcaWorkerState =
-  | "starting"
-  | "ready"
-  | "start_unknown"
-  | "failed"
-  | "succeeded"
-  | "stopping"
-  | "stop_unknown"
-  | "stopped"
-  | "abandoned";
 
 export interface OrcaFailure {
   code?: string;
@@ -19,49 +6,17 @@ export interface OrcaFailure {
   details?: unknown;
 }
 
-export interface OrcaTaskCandidate {
-  taskId: string;
-  attemptIdentity?: string;
+export interface OrcaTerminalObservation {
+  terminalHandle: string;
+  active: boolean;
 }
 
-export interface OrcaDispatchObservation {
-  dispatchId: string;
-  taskId: string;
-  workerState: OrcaWorkerState;
-  terminalHandle?: string;
-  runId?: string;
-}
-
-export interface OrcaCheckObservation {
-  completion?: { dispatchId: string; outcome: "succeeded" | "failed" };
-  events: ExternalEventRecord[];
-}
-
-export type OrcaTranscriptBlock =
-  | { type: "text"; text: string }
-  | { type: "tool-call"; name: string; input: unknown }
-  | { type: "tool-result"; output: string; isError: boolean }
-  | { type: "image" };
-
-export interface OrcaWorkerRead {
-  source: "transcript" | "terminal";
+export interface OrcaTerminalRead {
+  terminalHandle: string;
+  status: string;
   cursor?: string | number;
-  fallbackReason?: string;
-  messages: Array<{ role: string; blocks: OrcaTranscriptBlock[] }>;
   terminalLines: string[];
 }
-
-const WORKER_STATES = new Set<OrcaWorkerState>([
-  "starting",
-  "ready",
-  "start_unknown",
-  "failed",
-  "succeeded",
-  "stopping",
-  "stop_unknown",
-  "stopped",
-  "abandoned",
-]);
 
 export class OrcaResponseError extends Error {}
 
@@ -73,9 +28,9 @@ export function decodeOrcaFailure(value: unknown): OrcaFailure | undefined {
   const envelope = optionalRecord(value);
   if (envelope?.ok !== false) return undefined;
   const error = optionalRecord(envelope.error);
-  const code = optionalStringValue(error?.code);
+  const code = optionalString(error?.code);
   const message =
-    optionalStringValue(error?.message) ??
+    optionalString(error?.message) ??
     "Orca returned an unsuccessful RPC response";
   const details = error?.details ?? error?.data;
   return {
@@ -93,36 +48,21 @@ export function decodeOrcaProcessFailure(
   const envelope = optionalRecord(value);
   if (envelope?.ok !== true) return undefined;
   const result = optionalRecord(envelope.result);
-  const message = optionalStringValue(result?.lastError);
+  const message = optionalString(result?.lastError);
   if (!message) return undefined;
   const code =
-    optionalStringValue(result?.failedStage) ??
-    optionalStringValue(result?.stage) ??
-    optionalStringValue(result?.state);
+    optionalString(result?.failedStage) ??
+    optionalString(result?.stage) ??
+    optionalString(result?.state);
   return { ...(code ? { code } : {}), message };
-}
-
-export function decodeRunCreate(value: unknown): { runId: string } {
-  const operation = "run-create";
-  const result = resultRecord(value, operation);
-  const run = requiredRecord(result.run, operation, "result.run");
-  return { runId: requiredString(run.id, operation, "result.run.id") };
-}
-
-export function decodeTaskCreate(value: unknown): { taskId: string } {
-  const operation = "task-create";
-  const result = resultRecord(value, operation);
-  const task = requiredRecord(result.task, operation, "result.task");
-  return { taskId: requiredString(task.id, operation, "result.task.id") };
 }
 
 export function decodeTerminalCreate(value: unknown): {
   terminalHandle: string;
 } {
   const operation = "create";
-  const result = resultRecord(value, operation);
   const terminal = requiredRecord(
-    result.terminal,
+    resultRecord(value, operation).terminal,
     operation,
     "result.terminal",
   );
@@ -135,338 +75,115 @@ export function decodeTerminalCreate(value: unknown): {
   };
 }
 
-export function decodeDispatch(value: unknown): {
-  taskId: string;
-  dispatchId: string;
-  status: string;
+export function decodeTerminalSend(value: unknown): {
+  terminalHandle: string;
+  accepted: boolean;
+  bytesWritten?: number;
 } {
-  const operation = "dispatch";
-  const result = resultRecord(value, operation);
-  const dispatch = requiredRecord(
-    result.dispatch,
+  const operation = "send";
+  const send = requiredRecord(
+    resultRecord(value, operation).send,
     operation,
-    "result.dispatch",
+    "result.send",
+  );
+  const bytesWritten = optionalNonNegativeNumber(
+    send.bytesWritten,
+    operation,
+    "result.send.bytesWritten",
   );
   return {
-    taskId: requiredString(
-      dispatch.task_id,
+    terminalHandle: requiredString(
+      send.handle,
       operation,
-      "result.dispatch.task_id",
+      "result.send.handle",
     ),
-    dispatchId: requiredString(dispatch.id, operation, "result.dispatch.id"),
-    status: requiredString(
-      dispatch.status,
-      operation,
-      "result.dispatch.status",
-    ),
+    accepted: requiredBoolean(send.accepted, operation, "result.send.accepted"),
+    ...(bytesWritten === undefined ? {} : { bytesWritten }),
   };
 }
 
-export function decodeWorkerStart(value: unknown): {
-  taskId: string;
-  dispatchId: string;
-  terminalHandle?: string;
-  state: OrcaWorkerState;
-} {
-  const operation = "worker-start";
-  const result = resultRecord(value, operation);
-  return {
-    taskId: requiredString(result.taskId, operation, "result.taskId"),
-    dispatchId: requiredString(
-      result.dispatchId,
-      operation,
-      "result.dispatchId",
-    ),
-    state: requiredWorkerState(result.state, operation, "result.state"),
-    ...optionalStringField(
-      result.agentTerminalHandle,
-      operation,
-      "result.agentTerminalHandle",
-      "terminalHandle",
-    ),
-  };
-}
-
-export function decodeTaskList(value: unknown): OrcaTaskCandidate[] {
-  const operation = "task-list";
-  const result = resultRecord(value, operation);
-  if (!Array.isArray(result.tasks))
-    throw invalid(operation, "result.tasks to be an array");
-  return result.tasks.map((value, index) => {
-    const task = requiredRecord(value, operation, `result.tasks[${index}]`);
-    const taskId = requiredString(
-      task.id,
-      operation,
-      `result.tasks[${index}].id`,
-    );
-    const attemptIdentity = attemptIdentityFromSpec(task.spec);
-    return {
-      taskId,
-      ...(attemptIdentity ? { attemptIdentity } : {}),
-    };
-  });
-}
-
-export function decodeDispatchShow(
-  value: unknown,
-): OrcaDispatchObservation | null {
-  const operation = "dispatch-show";
-  const result = resultRecord(value, operation);
-  if (result.dispatch === null) return null;
-  const dispatch = requiredRecord(
-    result.dispatch,
+export function decodeTerminalShow(value: unknown): OrcaTerminalObservation {
+  const operation = "show";
+  const terminal = requiredRecord(
+    resultRecord(value, operation).terminal,
     operation,
-    "result.dispatch",
+    "result.terminal",
+  );
+  const connected = requiredBoolean(
+    terminal.connected,
+    operation,
+    "result.terminal.connected",
+  );
+  const orphaned = optionalBoolean(
+    terminal.orphaned,
+    operation,
+    "result.terminal.orphaned",
   );
   return {
-    dispatchId: requiredString(dispatch.id, operation, "result.dispatch.id"),
-    taskId: requiredString(
-      dispatch.task_id,
+    terminalHandle: requiredString(
+      terminal.handle,
       operation,
-      "result.dispatch.task_id",
+      "result.terminal.handle",
     ),
-    workerState: requiredWorkerState(
-      dispatch.worker_state,
-      operation,
-      "result.dispatch.worker_state",
-    ),
-    ...optionalStringField(
-      dispatch.agent_terminal_handle,
-      operation,
-      "result.dispatch.agent_terminal_handle",
-      "terminalHandle",
-    ),
-    ...optionalStringField(result.runId, operation, "result.runId", "runId"),
+    active: connected && orphaned !== true,
   };
 }
 
-export function decodeWorkerShow(value: unknown): {
-  dispatchId: string;
-  taskId: string;
-  workerState: OrcaWorkerState;
-  terminalHandle?: string;
-} {
-  const operation = "worker-show";
-  const result = resultRecord(value, operation);
-  const dispatch = requiredRecord(
-    result.dispatch,
+export function decodeTerminalRead(value: unknown): OrcaTerminalRead {
+  const operation = "read";
+  const terminal = requiredRecord(
+    resultRecord(value, operation).terminal,
     operation,
-    "result.dispatch",
+    "result.terminal",
   );
-  const worker = requiredRecord(result.worker, operation, "result.worker");
-  return {
-    dispatchId: requiredString(dispatch.id, operation, "result.dispatch.id"),
-    taskId: requiredString(
-      dispatch.task_id,
-      operation,
-      "result.dispatch.task_id",
-    ),
-    workerState: requiredWorkerState(
-      worker.state,
-      operation,
-      "result.worker.state",
-    ),
-    ...optionalStringField(
-      worker.agent_terminal_handle,
-      operation,
-      "result.worker.agent_terminal_handle",
-      "terminalHandle",
-    ),
-  };
-}
-
-export function decodeCheck(
-  value: unknown,
-  expectedDispatchId: string,
-): OrcaCheckObservation {
-  const operation = "check";
-  const result = resultRecord(value, operation);
-  if (!Array.isArray(result.messages))
-    throw invalid(operation, "result.messages to be an array");
-  const events = new Map<string, ExternalEventRecord>();
-  let completion: OrcaCheckObservation["completion"];
-
-  for (const candidate of result.messages) {
-    const message = optionalRecord(candidate);
-    if (!message) continue;
-    const rawType = optionalStringValue(message.type);
-    if (!rawType) continue;
-    const payload = messagePayload(message.payload);
-
-    if (rawType === "worker_done") {
-      const dispatchId =
-        optionalStringValue(payload?.dispatchId) ??
-        optionalStringValue(payload?.dispatch_id) ??
-        optionalStringValue(message.dispatchId) ??
-        optionalStringValue(message.dispatch_id);
-      const outcome =
-        optionalStringValue(payload?.outcome) ??
-        optionalStringValue(message.outcome);
-      if (
-        dispatchId === expectedDispatchId &&
-        (outcome === "succeeded" || outcome === "failed")
-      )
-        completion = { dispatchId, outcome };
-      continue;
-    }
-
-    const type = rawType.includes("question")
-      ? "question"
-      : rawType.includes("escalation")
-        ? "escalation"
-        : undefined;
-    if (!type) continue;
-    const id =
-      optionalStringValue(payload?.[`${type}Id`]) ??
-      optionalStringValue(payload?.[`${type}_id`]) ??
-      optionalStringValue(message[`${type}Id`]) ??
-      optionalStringValue(message[`${type}_id`]) ??
-      optionalStringValue(message.id);
-    if (!id) continue;
-    const rawStatus =
-      optionalStringValue(payload?.status) ??
-      optionalStringValue(payload?.state) ??
-      optionalStringValue(message.status) ??
-      optionalStringValue(message.state);
-    const resolved =
-      rawType.includes("resolved") ||
-      ["answered", "approved", "resolved", "closed"].includes(rawStatus ?? "");
-    const existing = events.get(id);
-    const observedAt = new Date().toISOString();
-    const text = messageText(message, payload);
-    const event: ExternalEventRecord = {
-      id,
-      type,
-      status: resolved ? "resolved" : "pending",
-      observedAt,
-      ...(resolved ? { resolvedAt: observedAt } : {}),
-      ...(text ? { message: text } : {}),
-    };
-    if (!existing || event.status === "resolved") events.set(id, event);
-  }
-
-  return {
-    ...(completion ? { completion } : {}),
-    events: [...events.values()],
-  };
-}
-
-export function decodeWorkerRead(value: unknown): OrcaWorkerRead {
-  const operation = "worker-read";
-  const result = resultRecord(value, operation);
-  const source = requiredString(result.source, operation, "result.source");
-  if (source !== "transcript" && source !== "terminal")
-    throw invalid(operation, "result.source to be transcript or terminal");
-  const cursor = result.cursor;
+  if (
+    !Array.isArray(terminal.tail) ||
+    !terminal.tail.every((line) => typeof line === "string")
+  )
+    throw invalid(operation, "result.terminal.tail to be an array of strings");
+  const cursor = terminal.nextCursor;
   if (
     cursor !== undefined &&
     cursor !== null &&
     typeof cursor !== "string" &&
     typeof cursor !== "number"
   )
-    throw invalid(operation, "result.cursor to be a string or number");
-  const fallbackReason = fallbackText(result.fallbackReason);
-  if (source === "terminal") {
-    const terminal = requiredRecord(
-      result.terminal,
+    throw invalid(
       operation,
-      "result.terminal",
+      "result.terminal.nextCursor to be a string or number",
     );
-    if (
-      !Array.isArray(terminal.tail) ||
-      !terminal.tail.every((line) => typeof line === "string")
-    )
-      throw invalid(
-        operation,
-        "result.terminal.tail to be an array of strings",
-      );
-    return {
-      source,
-      ...(cursor === undefined || cursor === null ? {} : { cursor }),
-      ...(fallbackReason ? { fallbackReason } : {}),
-      messages: [],
-      terminalLines: terminal.tail,
-    };
-  }
-  const transcript = requiredRecord(
-    result.transcript,
-    operation,
-    "result.transcript",
-  );
-  if (!Array.isArray(transcript.messages))
-    throw invalid(operation, "result.transcript.messages to be an array");
-  const messages = transcript.messages.map((candidate, messageIndex) => {
-    const message = requiredRecord(
-      candidate,
-      operation,
-      `result.transcript.messages[${messageIndex}]`,
-    );
-    const role = requiredString(
-      message.role,
-      operation,
-      `result.transcript.messages[${messageIndex}].role`,
-    );
-    if (!Array.isArray(message.blocks))
-      throw invalid(
-        operation,
-        `result.transcript.messages[${messageIndex}].blocks to be an array`,
-      );
-    const blocks = message.blocks.map(
-      (candidateBlock, blockIndex): OrcaTranscriptBlock => {
-        const block = requiredRecord(
-          candidateBlock,
-          operation,
-          `result.transcript.messages[${messageIndex}].blocks[${blockIndex}]`,
-        );
-        const type = requiredString(
-          block.type,
-          operation,
-          `result.transcript.messages[${messageIndex}].blocks[${blockIndex}].type`,
-        );
-        if (type === "text")
-          return {
-            type,
-            text: requiredString(block.text, operation, "transcript text"),
-          };
-        if (type === "tool-call")
-          return {
-            type,
-            name: requiredString(block.name, operation, "tool name"),
-            input: block.input,
-          };
-        if (type === "tool-result")
-          return {
-            type,
-            output: requiredString(block.output, operation, "tool output"),
-            isError: block.isError === true,
-          };
-        if (type === "image") return { type };
-        throw invalid(
-          operation,
-          `transcript block type ${type} to be supported`,
-        );
-      },
-    );
-    return { role, blocks };
-  });
   return {
-    source,
+    terminalHandle: requiredString(
+      terminal.handle,
+      operation,
+      "result.terminal.handle",
+    ),
+    status: requiredString(
+      terminal.status,
+      operation,
+      "result.terminal.status",
+    ),
     ...(cursor === undefined || cursor === null ? {} : { cursor }),
-    ...(fallbackReason ? { fallbackReason } : {}),
-    messages,
-    terminalLines: [],
+    terminalLines: terminal.tail,
   };
 }
 
-function fallbackText(value: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  const record = optionalRecord(value);
-  if (!record) return undefined;
-  return (
-    optionalStringValue(record.code) ??
-    optionalStringValue(record.reason) ??
-    optionalStringValue(record.message)
+export function decodeTerminalClose(value: unknown): {
+  terminalHandle: string;
+} {
+  const operation = "close";
+  const close = requiredRecord(
+    resultRecord(value, operation).close,
+    operation,
+    "result.close",
   );
+  return {
+    terminalHandle: requiredString(
+      close.handle,
+      operation,
+      "result.close.handle",
+    ),
+  };
 }
 
 function resultRecord(value: unknown, operation: string): JsonRecord {
@@ -504,81 +221,43 @@ function requiredString(
   operation: string,
   path: string,
 ): string {
-  const found = optionalStringValue(value);
+  const found = optionalString(value);
   if (!found) throw invalid(operation, `${path} to be a non-empty string`);
   return found;
 }
 
-function optionalStringField<Key extends string>(
-  value: unknown,
-  operation: string,
-  path: string,
-  key: Key,
-): { [Property in Key]?: string } {
-  if (value === undefined || value === null) return {};
-  const found = optionalStringValue(value);
-  if (!found) throw invalid(operation, `${path} to be a non-empty string`);
-  return { [key]: found } as { [Property in Key]?: string };
-}
-
-function optionalStringValue(value: unknown): string | undefined {
+function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function requiredWorkerState(
+function requiredBoolean(
   value: unknown,
   operation: string,
   path: string,
-): OrcaWorkerState {
-  const state = requiredString(value, operation, path);
-  if (!WORKER_STATES.has(state as OrcaWorkerState))
-    throw invalid(operation, `${path} to contain a known worker state`);
-  return state as OrcaWorkerState;
+): boolean {
+  if (typeof value !== "boolean")
+    throw invalid(operation, `${path} to be a boolean`);
+  return value;
 }
 
-function attemptIdentityFromSpec(value: unknown): string | undefined {
-  let spec = value;
-  if (typeof spec === "string") {
-    try {
-      spec = JSON.parse(spec) as unknown;
-    } catch {
-      return undefined;
-    }
-  }
-  return optionalStringValue(optionalRecord(spec)?.happyMachineAttemptIdentity);
+function optionalBoolean(
+  value: unknown,
+  operation: string,
+  path: string,
+): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requiredBoolean(value, operation, path);
 }
 
-function messagePayload(value: unknown): JsonRecord | undefined {
-  if (typeof value === "string") {
-    try {
-      return optionalRecord(JSON.parse(value) as unknown);
-    } catch {
-      return undefined;
-    }
-  }
-  return optionalRecord(value);
-}
-
-function messageText(
-  message: JsonRecord,
-  payload: JsonRecord | undefined,
-): string | undefined {
-  for (const value of [
-    payload?.message,
-    payload?.question,
-    payload?.reason,
-    payload?.text,
-    message.message,
-    message.question,
-    message.reason,
-    message.text,
-    message.body,
-    message.subject,
-  ]) {
-    const found = optionalStringValue(value);
-    if (found) return found;
-  }
-  return undefined;
+function optionalNonNegativeNumber(
+  value: unknown,
+  operation: string,
+  path: string,
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    throw invalid(operation, `${path} to be a non-negative number`);
+  return value;
 }
 
 function invalid(operation: string, expectation: string): OrcaResponseError {

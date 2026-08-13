@@ -1,6 +1,7 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  ExecutorReferences,
   ExternalEventRecord,
   GlobalLimitEvaluation,
   NormalVisitRecord,
@@ -898,7 +899,7 @@ export class ExecuteWorkflow {
     };
     this.event(run, "attempt_cancellation_requested", requestedAt, {
       identity: attempt.id,
-      dispatchId: references.dispatchId,
+      ...this.references(references),
     });
     await this.runs.save(run);
     try {
@@ -911,7 +912,7 @@ export class ExecuteWorkflow {
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(run, "attempt_cancellation_command_completed", completedAt, {
         identity: attempt.id,
-        dispatchId: references.dispatchId,
+        ...this.references(references),
         cause,
       });
       await this.runs.save(run);
@@ -1270,6 +1271,18 @@ export class ExecuteWorkflow {
     throw new Error(`Attempt ${attempt.id} has no durable provenance`);
   }
 
+  private references(references: ExecutorReferences): Record<string, unknown> {
+    if (references.executionId) return { executionId: references.executionId };
+    return {
+      ...(references.runId ? { executorRunId: references.runId } : {}),
+      executorTaskId: references.taskId,
+      dispatchId: references.dispatchId,
+      ...(references.terminalHandle
+        ? { terminalHandle: references.terminalHandle }
+        : {}),
+    };
+  }
+
   private event(
     run: RunRecord,
     type: string,
@@ -1291,6 +1304,8 @@ export class ExecuteWorkflow {
           typeof data.attemptNumber === "number"
             ? data.attemptNumber
             : undefined,
+        executionId:
+          typeof data.executionId === "string" ? data.executionId : undefined,
         dispatchId:
           typeof data.dispatchId === "string" ? data.dispatchId : undefined,
       },

@@ -147,7 +147,7 @@ class FakeOrcaExecutor implements TaskExecutor {
     external: ExecutorReferences,
   ): Promise<"active" | "stopped" | "unknown"> {
     this.reconciliations.push(structuredClone(external));
-    const sequence = this.sequences.get(external.dispatchId);
+    const sequence = this.sequences.get(external.dispatchId!);
     return Promise.resolve(sequence?.shift() ?? "stopped");
   }
 }
@@ -553,7 +553,7 @@ describe("durable run cancellation", () => {
     const executor = new FakeOrcaExecutor();
     const firstDispatch = references(
       "run-cancel:fan_out:1:active_one:1",
-    ).dispatchId;
+    ).dispatchId!;
     executor.sequences.set(firstDispatch, ["active", "stopped"]);
 
     await expect(
@@ -635,7 +635,7 @@ describe("durable run cancellation", () => {
     const executor = new FakeOrcaExecutor();
     const uncertainDispatch = references(
       "run-cancel:fan_out:1:active_one:1",
-    ).dispatchId;
+    ).dispatchId!;
     executor.sequences.set(uncertainDispatch, ["unknown"]);
 
     const completed = await canceler(setup.repository, executor).cancel({

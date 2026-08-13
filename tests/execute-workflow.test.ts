@@ -600,7 +600,7 @@ describe("happy-machine execute", () => {
     )
       .trim()
       .split("\n");
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(2);
   });
 
   it("fails an unknown outcome after one attempt without promoting output or workspace edits", async () => {
@@ -707,7 +707,7 @@ describe("happy-machine execute", () => {
         (line) =>
           parseJson(line) as {
             model: string;
-            prompt: string;
+            instructions: string;
             timeoutMs: number;
           },
       );
@@ -715,16 +715,20 @@ describe("happy-machine execute", () => {
       { model: "review-model", timeoutMs: 5000 },
       { model: "publish-model", timeoutMs: 2000 },
     ]);
-    expect(contracts[0].prompt).toContain(
-      "Review snapshot prompt\n\n---\nHappy Machine result contract (required)",
-    );
-    expect(contracts[0].prompt).toContain('- "approved"');
-    expect(contracts[0].prompt).not.toContain("publish");
-    expect(contracts[1].prompt).toContain(
-      "Publish snapshot prompt\n\n---\nHappy Machine result contract (required)",
-    );
-    expect(contracts[1].prompt).toContain('- "published"');
-    expect(contracts[1].prompt).not.toContain("$succeeded");
+    const prompts = (
+      await readFile(path.join(setup.root, ".fake-prompts.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => parseJson(line));
+    expect(prompts).toEqual([
+      "Review snapshot prompt",
+      "Publish snapshot prompt",
+    ]);
+    expect(contracts[0].instructions).toContain('- "approved"');
+    expect(contracts[0].instructions).not.toContain("publish");
+    expect(contracts[1].instructions).toContain('- "published"');
+    expect(contracts[1].instructions).not.toContain("$succeeded");
   });
 
   it("uses only result.json for routing and durably attributes the launch, logs, and outcome", async () => {
@@ -744,18 +748,12 @@ describe("happy-machine execute", () => {
       status: "succeeded",
       outcome: "approved",
       executor: {
-        runId: "orca-run-1",
-        taskId: "orca-task-1",
-        dispatchId: "orca-dispatch-1",
+        executionId: "terminal-1",
         terminalHandle: "terminal-1",
       },
     });
-    expect(attempt.logs.stdout).toContain(
-      "misleading stdout outcome: rejected",
-    );
-    expect(attempt.logs.stderr).toContain(
-      "misleading stderr outcome: rejected",
-    );
+    expect(attempt.logs.stdout).toContain('"handle":"terminal-1"');
+    expect(attempt.logs.stderr).toBe("");
     expect(run.events.map((event: { type: string }) => event.type)).toEqual([
       "run_created",
       "controller_lease_acquired",
@@ -801,10 +799,12 @@ describe("happy-machine execute", () => {
       attemptNumber: 1,
     });
     expect(contract.instructions).toContain("Follow the task");
-    expect(contract.prompt).toContain("Choose an outcome");
+    expect(contract.prompt).toBe(
+      "Choose an outcome and write the structured result.",
+    );
   });
 
-  it("persists structured Orca questions, escalations, and external resolution without changing routing", async () => {
+  it("does not consume Orca orchestration messages", async () => {
     const setup = await project("approved");
     await writeFile(
       path.join(setup.root, ".fake-check-sequence.json"),
@@ -851,18 +851,16 @@ describe("happy-machine execute", () => {
 
     expect(run.status).toBe("succeeded");
     expect(attempt.outcome).toBe("approved");
-    expect(attempt.externalEvents).toMatchObject([
-      { id: "q-1", type: "question", status: "resolved" },
-      { id: "e-1", type: "escalation", status: "pending" },
-    ]);
-    expect(run.events.map((event) => event.type)).toEqual(
+    expect(attempt.externalEvents).toBeUndefined();
+    expect(run.events.map((event) => event.type)).not.toEqual(
       expect.arrayContaining([
         "orca_question_observed",
         "orca_escalation_observed",
         "orca_question_resolved",
-        "attempt_succeeded",
-        "transition_committed",
       ]),
+    );
+    expect(run.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["attempt_succeeded", "transition_committed"]),
     );
   });
 

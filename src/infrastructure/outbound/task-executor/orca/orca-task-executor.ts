@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import type {
-  ExternalEventRecord,
   ExecutorReferences,
   ExternalExecutionStatus,
 } from "../../../../domain/execution/run.js";
@@ -13,16 +13,12 @@ import type {
 import { TaskExecutorError } from "../../../../ports/task-executor.js";
 import {
   assertOrcaSuccess,
-  decodeCheck,
-  decodeDispatch,
-  decodeDispatchShow,
   decodeOrcaProcessFailure,
-  decodeRunCreate,
-  decodeTaskCreate,
+  decodeTerminalClose,
   decodeTerminalCreate,
-  decodeTaskList,
-  decodeWorkerShow,
-  decodeWorkerRead,
+  decodeTerminalRead,
+  decodeTerminalSend,
+  decodeTerminalShow,
   OrcaResponseError,
 } from "./orca-response.js";
 import {
@@ -43,13 +39,14 @@ export type OrcaStartupDelay = (
 ) => Promise<void>;
 
 const STARTUP_DELAY_MS = 8_000;
+const RESULT_POLL_MS = 250;
 
 const abortError = (signal?: AbortSignal): Error =>
   signal?.reason instanceof Error
     ? signal.reason
     : new DOMException("Aborted", "AbortError");
 
-const defaultStartupDelay: OrcaStartupDelay = (milliseconds, signal) =>
+const defaultDelay: OrcaStartupDelay = (milliseconds, signal) =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortError(signal));
@@ -71,7 +68,6 @@ export class OrcaTaskExecutor implements TaskExecutor {
     string,
     {
       cursor?: string | number;
-      source?: "transcript" | "terminal";
       reading: boolean;
       disabled: boolean;
       warned: boolean;
@@ -82,100 +78,78 @@ export class OrcaTaskExecutor implements TaskExecutor {
   constructor(
     private readonly executable = process.env.ORCA_CLI_COMMAND || "orca",
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
-    private readonly startupDelay: OrcaStartupDelay = defaultStartupDelay,
+    private readonly startupDelay: OrcaStartupDelay = defaultDelay,
+    private readonly pollDelay: OrcaStartupDelay = defaultDelay,
   ) {}
 
   async recover(
-    identity: string,
+    _identity: string,
     references: ExecutorReferences | undefined,
     projectWorkspace: string,
+    resultPath?: string,
     diagnosticContext?: DiagnosticContext,
   ): Promise<RecoveryObservation> {
-    let taskId = references?.taskId;
-    let lookupLogs = { stdout: "", stderr: "" };
-    if (!taskId) {
-      const listed = await this.run(
-        ["orchestration", "task-list", "--json"],
-        projectWorkspace,
-      );
-      lookupLogs = { stdout: listed.stdout, stderr: listed.stderr };
-      const tasks = this.decode(listed, decodeTaskList, lookupLogs);
-      taskId = tasks.find((task) => task.attemptIdentity === identity)?.taskId;
-      if (!taskId) return { status: "not_found" };
-    }
-    const shown = await this.run(
-      ["orchestration", "dispatch-show", "--task", taskId, "--json"],
-      projectWorkspace,
-    );
-    const logs = {
-      stdout: lookupLogs.stdout + shown.stdout,
-      stderr: lookupLogs.stderr + shown.stderr,
-    };
-    const dispatch = this.decode(shown, decodeDispatchShow, logs);
-    if (!dispatch)
-      return {
-        status: "start_unknown",
-        references: {
-          taskId,
-          dispatchId: references?.dispatchId ?? `unknown:${identity}`,
-          runId: references?.runId,
-        },
-        logs,
-      };
-    if (dispatch.taskId !== taskId)
-      throw new TaskExecutorError(
-        `Orca dispatch-show returned task ${dispatch.taskId} for requested task ${taskId}`,
-        logs,
-      );
-    if (references?.dispatchId && references.dispatchId !== dispatch.dispatchId)
-      throw new TaskExecutorError(
-        `Orca dispatch-show returned dispatch ${dispatch.dispatchId} instead of persisted dispatch ${references.dispatchId}`,
-        logs,
-      );
-    const dispatchId = references?.dispatchId ?? dispatch.dispatchId;
-    const recoveredReferences: ExecutorReferences = {
-      taskId,
-      dispatchId,
-      runId: references?.runId ?? dispatch.runId,
-      terminalHandle: references?.terminalHandle ?? dispatch.terminalHandle,
-    };
-    await this.readTranscript(
-      recoveredReferences,
-      projectWorkspace,
-      diagnosticContext,
-    );
-    const state = dispatch.workerState;
-    if (state === "start_unknown" || state === "stop_unknown")
-      return { status: state, references: recoveredReferences, logs };
-    if (["succeeded", "stopped"].includes(state ?? ""))
+    if (!references) return { status: "not_found" };
+    if (resultPath && (await this.resultAvailable(resultPath)))
       return {
         status: "completed",
-        references: recoveredReferences,
-        logs,
+        references,
+        logs: { stdout: "", stderr: "" },
       };
-    if (["failed", "abandoned"].includes(state ?? ""))
+    const handle = this.terminalHandle(references);
+    if (!handle)
       return {
-        status: "failed",
-        references: recoveredReferences,
-        logs,
+        status: "start_unknown",
+        references,
+        logs: { stdout: "", stderr: "" },
       };
-    if (["starting", "ready", "stopping"].includes(state ?? ""))
+    const recoveredReferences = this.references(handle, references);
+    try {
+      const shown = await this.run(
+        ["terminal", "show", "--terminal", handle, "--json"],
+        projectWorkspace,
+        undefined,
+        diagnosticContext,
+      );
+      const terminal = this.decode(shown, decodeTerminalShow);
+      this.assertHandle("show", terminal.terminalHandle, handle, shown);
+      await this.readTranscript(
+        recoveredReferences,
+        projectWorkspace,
+        diagnosticContext,
+      );
       return {
-        status: "active",
+        status: terminal.active ? "active" : "failed",
         references: recoveredReferences,
-        logs,
+        logs: { stdout: shown.stdout, stderr: shown.stderr },
       };
-    return {
-      status: "start_unknown",
-      references: recoveredReferences,
-      logs,
-    };
+    } catch (error) {
+      if (this.staleTerminal(error)) {
+        if (resultPath && (await this.resultAvailable(resultPath)))
+          return {
+            status: "completed",
+            references: recoveredReferences,
+            logs:
+              error instanceof TaskExecutorError
+                ? error.logs
+                : { stdout: "", stderr: "" },
+          };
+        return {
+          status: "failed",
+          references: recoveredReferences,
+          logs:
+            error instanceof TaskExecutorError
+              ? error.logs
+              : { stdout: "", stderr: "" },
+        };
+      }
+      throw error;
+    }
   }
 
   async execute(
     launch: TaskLaunch,
     onStarted: (references: ExecutorReferences) => Promise<void>,
-    onEvent?: (event: ExternalEventRecord) => Promise<void>,
   ): Promise<TaskExecution> {
     const logs = { stdout: "", stderr: "" };
     const command = async (args: string[]): Promise<CommandResult> => {
@@ -198,41 +172,14 @@ export class OrcaTaskExecutor implements TaskExecutor {
         throw error;
       }
     };
-    const contract = JSON.stringify({
-      happyMachineAttemptIdentity: launch.identity,
-      projectWorkspace: launch.projectWorkspace,
-      contextPath: launch.contextPath,
-      outputDirectory: launch.outputDirectory,
-      resultPath: launch.resultPath,
-      instructions: launch.instructions,
-      prompt: this.effectivePrompt(launch),
-      model: launch.model,
-      timeoutMs: launch.timeoutMs,
-      attemptNumber: launch.attemptNumber,
-    });
-    const runReceipt = await command([
-      "orchestration",
-      "run-create",
-      "--objective",
-      `Happy Machine ${launch.identity}`,
-      "--json",
-    ]);
-    const { runId: orcaRunId } = this.decode(runReceipt, decodeRunCreate, logs);
-    const taskReceipt = await command([
-      "orchestration",
-      "task-create",
-      "--spec",
-      contract,
-      "--json",
-    ]);
-    const { taskId } = this.decode(taskReceipt, decodeTaskCreate, logs);
+
     const terminalReceipt = await command([
       "terminal",
       "create",
       "--worktree",
       "current",
       "--command",
-      this.codexCommand(launch.model),
+      this.codexCommand(launch),
       "--focus",
       "--json",
     ]);
@@ -241,113 +188,57 @@ export class OrcaTaskExecutor implements TaskExecutor {
       decodeTerminalCreate,
       logs,
     );
-    let dispatch!: { taskId: string; dispatchId: string; status: string };
+    const references = this.references(terminalHandle);
+    let promptDelivered = false;
     try {
+      await onStarted(references);
       await this.startupDelay(STARTUP_DELAY_MS, launch.signal);
-      const dispatchReceipt = await command([
-        "orchestration",
-        "dispatch",
-        "--task",
-        taskId,
-        "--run",
-        orcaRunId,
-        "--to",
+      const sendReceipt = await command([
+        "terminal",
+        "send",
+        "--terminal",
         terminalHandle,
-        "--inject",
+        "--text",
+        launch.prompt,
+        "--enter",
         "--json",
       ]);
-      dispatch = this.decode(dispatchReceipt, decodeDispatch, logs);
-      if (dispatch.taskId !== taskId)
+      const sent = this.decode(sendReceipt, decodeTerminalSend, logs);
+      this.assertHandle(
+        "send",
+        sent.terminalHandle,
+        terminalHandle,
+        sendReceipt,
+      );
+      if (!sent.accepted)
         throw new TaskExecutorError(
-          `Orca dispatch returned task ${dispatch.taskId} instead of created task ${taskId}`,
+          `Orca send did not accept input for terminal ${terminalHandle}`,
           { ...logs },
         );
-      if (dispatch.status !== "dispatched")
-        throw new TaskExecutorError(
-          `Orca dispatch returned unexpected status ${dispatch.status}`,
-          { ...logs },
-        );
-    } catch (error) {
-      try {
-        await this.run(
-          ["terminal", "close", "--terminal", terminalHandle, "--json"],
-          launch.projectWorkspace,
-          undefined,
-          launch.diagnosticContext,
-        );
-      } catch {
-        // Preserve the launch failure; cleanup is best effort.
-      }
-      throw error;
-    }
-    const references: ExecutorReferences = {
-      runId: orcaRunId,
-      taskId,
-      dispatchId: dispatch.dispatchId,
-      terminalHandle,
-    };
-    await onStarted(references);
-    let transcriptTimer: NodeJS.Timeout | undefined;
-    if (this.diagnostics.enabled) {
-      await this.readTranscript(
+      promptDelivered = true;
+      await this.waitForResult(
+        launch.resultPath,
         references,
         launch.projectWorkspace,
+        launch.signal,
         launch.diagnosticContext,
+        logs,
       );
-      transcriptTimer = setInterval(() => {
-        void this.readTranscript(
-          references,
-          launch.projectWorkspace,
-          launch.diagnosticContext,
-        );
-      }, 1000);
-      transcriptTimer.unref();
-    }
-    const observedEvents = new Map<string, ExternalEventRecord>();
-    try {
-      while (true) {
-        const completion = await command([
-          "orchestration",
-          "check",
-          "--wait",
-          "--types",
-          "worker_done,escalation,question",
-          "--timeout-ms",
-          String(launch.timeoutMs),
-          "--json",
-        ]);
-        const observation = this.decode(
-          completion,
-          (value) => decodeCheck(value, references.dispatchId),
-          logs,
-        );
-        for (const event of observation.events) {
-          const previous = observedEvents.get(event.id);
-          if (previous?.status === event.status) continue;
-          observedEvents.set(event.id, event);
-          await onEvent?.(event);
-        }
-        if (observation.completion?.outcome === "failed")
-          throw new TaskExecutorError(
-            `Orca worker ${references.dispatchId} reported failed completion`,
-            { ...logs },
-          );
-        if (observation.completion?.outcome === "succeeded") break;
-        if (!observation.events.length)
-          throw new TaskExecutorError(
-            "Orca check returned without completion or a structured intervention event",
-            { ...logs },
-          );
-      }
-    } finally {
-      if (transcriptTimer) clearInterval(transcriptTimer);
       await this.drainTranscript(
         references,
         launch.projectWorkspace,
         launch.diagnosticContext,
       );
+      return { references, logs };
+    } catch (error) {
+      if (!promptDelivered)
+        await this.closeBestEffort(
+          terminalHandle,
+          launch.projectWorkspace,
+          launch.diagnosticContext,
+        );
+      throw error;
     }
-    return { references, logs };
   }
 
   async cancel(
@@ -355,19 +246,16 @@ export class OrcaTaskExecutor implements TaskExecutor {
     projectWorkspace: string,
     diagnosticContext?: DiagnosticContext,
   ): Promise<void> {
+    const handle = this.requireTerminalHandle(references);
     await this.readTranscript(references, projectWorkspace, diagnosticContext);
-    await this.run(
-      [
-        "orchestration",
-        "worker-stop",
-        "--dispatch",
-        references.dispatchId,
-        "--json",
-      ],
+    const result = await this.run(
+      ["terminal", "close", "--terminal", handle, "--tab", "--json"],
       projectWorkspace,
       undefined,
       diagnosticContext,
     );
+    const closed = this.decode(result, decodeTerminalClose);
+    this.assertHandle("close", closed.terminalHandle, handle, result);
     await this.drainTranscript(references, projectWorkspace, diagnosticContext);
   }
 
@@ -376,36 +264,83 @@ export class OrcaTaskExecutor implements TaskExecutor {
     projectWorkspace: string,
     diagnosticContext?: DiagnosticContext,
   ): Promise<ExternalExecutionStatus> {
-    const result = await this.run(
-      [
-        "orchestration",
-        "worker-show",
-        "--dispatch",
-        references.dispatchId,
-        "--json",
-      ],
-      projectWorkspace,
-      undefined,
-      diagnosticContext,
-    );
-    const worker = this.decode(result, decodeWorkerShow);
-    await this.readTranscript(references, projectWorkspace, diagnosticContext);
-    if (worker.dispatchId !== references.dispatchId)
-      throw new TaskExecutorError(
-        `Orca worker-show returned dispatch ${worker.dispatchId} instead of persisted dispatch ${references.dispatchId}`,
-        { stdout: result.stdout, stderr: result.stderr },
+    const handle = this.requireTerminalHandle(references);
+    try {
+      const result = await this.run(
+        ["terminal", "show", "--terminal", handle, "--json"],
+        projectWorkspace,
+        undefined,
+        diagnosticContext,
       );
-    if (worker.taskId !== references.taskId)
-      throw new TaskExecutorError(
-        `Orca worker-show returned task ${worker.taskId} instead of persisted task ${references.taskId}`,
-        { stdout: result.stdout, stderr: result.stderr },
+      const terminal = this.decode(result, decodeTerminalShow);
+      this.assertHandle("show", terminal.terminalHandle, handle, result);
+      await this.readTranscript(
+        references,
+        projectWorkspace,
+        diagnosticContext,
       );
-    const state = worker.workerState;
-    if (["failed", "succeeded", "stopped", "abandoned"].includes(state ?? ""))
-      return "stopped";
-    if (["starting", "ready", "stopping"].includes(state ?? ""))
-      return "active";
-    return "unknown";
+      return terminal.active ? "active" : "stopped";
+    } catch (error) {
+      if (this.staleTerminal(error)) return "stopped";
+      throw error;
+    }
+  }
+
+  private async waitForResult(
+    resultPath: string,
+    references: ExecutorReferences,
+    cwd: string,
+    signal: AbortSignal | undefined,
+    context: DiagnosticContext | undefined,
+    logs: { stdout: string; stderr: string },
+  ): Promise<void> {
+    const handle = this.requireTerminalHandle(references);
+    while (!(await this.resultAvailable(resultPath))) {
+      await this.readTranscript(references, cwd, context, signal);
+      try {
+        const result = await this.run(
+          ["terminal", "show", "--terminal", handle, "--json"],
+          cwd,
+          signal,
+          context,
+        );
+        logs.stdout += result.stdout;
+        logs.stderr += result.stderr;
+        const terminal = this.decode(result, decodeTerminalShow, logs);
+        this.assertHandle("show", terminal.terminalHandle, handle, result);
+        if (!terminal.active)
+          throw new TaskExecutorError(
+            `Orca terminal ${handle} stopped before producing result.json`,
+            { ...logs },
+          );
+      } catch (error) {
+        if (signal?.aborted) throw abortError(signal);
+        if (this.staleTerminal(error)) {
+          if (await this.resultAvailable(resultPath)) return;
+          throw new TaskExecutorError(
+            `Orca terminal ${handle} disappeared before producing result.json`,
+            { ...logs },
+          );
+        }
+        if (error instanceof TaskExecutorError) throw error;
+      }
+      await this.pollDelay(RESULT_POLL_MS, signal);
+    }
+  }
+
+  private async resultAvailable(resultPath: string): Promise<boolean> {
+    try {
+      return (await readFile(resultPath)).length > 0;
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      )
+        return false;
+      throw error;
+    }
   }
 
   private run(
@@ -447,18 +382,15 @@ export class OrcaTaskExecutor implements TaskExecutor {
       child.stderr.on("data", (chunk) => {
         stderr += String(chunk);
       });
-      child.on(
-        "error",
-        (error) => (
-          finish(null),
-          reject(
-            new TaskExecutorError(
-              `Orca ${operation} failed to start: ${error.message}`,
-              { stdout, stderr },
-            ),
-          )
-        ),
-      );
+      child.on("error", (error) => {
+        finish(null);
+        reject(
+          new TaskExecutorError(
+            `Orca ${operation} failed to start: ${error.message}`,
+            { stdout, stderr },
+          ),
+        );
+      });
       child.on("close", (code) => {
         finish(code);
         signal?.removeEventListener("abort", stopObserving);
@@ -530,116 +462,56 @@ export class OrcaTaskExecutor implements TaskExecutor {
     signal?: AbortSignal,
   ): Promise<number> {
     if (!this.diagnostics.enabled) return 0;
-    const state = this.transcriptStates.get(references.dispatchId) ?? {
+    const handle = this.requireTerminalHandle(references);
+    const state = this.transcriptStates.get(handle) ?? {
       reading: false,
       disabled: false,
       warned: false,
       replay: this.diagnostics.replay,
     };
-    this.transcriptStates.set(references.dispatchId, state);
+    this.transcriptStates.set(handle, state);
     if (state.reading || state.disabled) return 0;
     state.reading = true;
     try {
-      const args = [
-        "orchestration",
-        "worker-read",
-        "--dispatch",
-        references.dispatchId,
-        "--source",
-        "auto",
-        "--limit",
-        "200",
-        ...(state.cursor === undefined
-          ? []
-          : ["--cursor", String(state.cursor)]),
-        "--json",
-      ];
-      const result = await this.run(args, cwd, signal, {
-        ...context,
-        dispatchId: references.dispatchId,
-      });
-      const page = this.decode(result, decodeWorkerRead);
-      if (state.source && state.source !== page.source) {
-        this.diagnostics.emit({
-          kind: "warning",
-          name: "transcript_source_changed",
-          context: { ...context, dispatchId: references.dispatchId },
-          text: `from=${state.source} to=${page.source}; cursor reset`,
-        });
-        state.cursor = undefined;
-        state.source = undefined;
-        state.replay = true;
-        return 200;
-      }
-      state.source = page.source;
+      const result = await this.run(
+        [
+          "terminal",
+          "read",
+          "--terminal",
+          handle,
+          "--limit",
+          "200",
+          ...(state.cursor === undefined
+            ? []
+            : ["--cursor", String(state.cursor)]),
+          "--json",
+        ],
+        cwd,
+        signal,
+        { ...context, executionId: handle },
+      );
+      const page = this.decode(result, decodeTerminalRead);
+      this.assertHandle("read", page.terminalHandle, handle, result);
       state.cursor = page.cursor;
-      if (page.source === "terminal" && page.fallbackReason && !state.warned) {
-        state.warned = true;
+      for (const line of page.terminalLines)
         this.diagnostics.emit({
-          kind: "warning",
-          name: "transcript_terminal_fallback",
-          context: { ...context, dispatchId: references.dispatchId },
+          kind: "transcript",
+          name: "agent",
+          context: { ...context, executionId: handle },
           source: "terminal",
-          text: `reason=${page.fallbackReason}`,
+          replay: state.replay,
+          text: line,
         });
-      }
-      let emitted = 0;
-      for (const line of page.terminalLines) {
-        this.emitTranscript(
-          line,
-          page.source,
-          state.replay,
-          references,
-          context,
-        );
-        emitted++;
-      }
-      for (const message of page.messages) {
-        if (message.role === "user" || message.role === "system") continue;
-        for (const block of message.blocks) {
-          if (block.type === "image") continue;
-          const text =
-            block.type === "text"
-              ? block.text
-              : block.type === "tool-call"
-                ? `[tool ${block.name}] ${this.safeJson(block.input)}`
-                : `[tool result${block.isError ? " error" : ""}] ${block.output}`;
-          for (const line of text.split(/\r?\n/)) {
-            this.emitTranscript(
-              line,
-              page.source,
-              state.replay,
-              references,
-              context,
-            );
-            emitted++;
-          }
-        }
-      }
-      if (emitted > 0) state.replay = false;
-      return emitted;
+      if (page.terminalLines.length) state.replay = false;
+      return page.terminalLines.length;
     } catch (error) {
       if (signal?.aborted) return 200;
-      const sourceChanged =
-        error instanceof Error && error.message.includes("source_changed");
-      if (sourceChanged) {
-        state.cursor = undefined;
-        state.source = undefined;
-        state.replay = true;
-        this.diagnostics.emit({
-          kind: "warning",
-          name: "transcript_source_changed",
-          context: { ...context, dispatchId: references.dispatchId },
-          text: "cursor reset",
-        });
-        return 200;
-      }
       if (!state.warned) {
         state.warned = true;
         this.diagnostics.emit({
           kind: "warning",
           name: "transcript_disabled",
-          context: { ...context, dispatchId: references.dispatchId },
+          context: { ...context, executionId: handle },
           text: error instanceof Error ? error.message : String(error),
         });
       }
@@ -656,7 +528,8 @@ export class OrcaTaskExecutor implements TaskExecutor {
     context?: DiagnosticContext,
   ): Promise<void> {
     if (!this.diagnostics.enabled) return;
-    const deadline = Date.now() + 2000;
+    const handle = this.requireTerminalHandle(references);
+    const deadline = Date.now() + 2_000;
     let count = 200;
     while (Date.now() < deadline && count >= 200)
       count = await this.readTranscript(
@@ -669,48 +542,85 @@ export class OrcaTaskExecutor implements TaskExecutor {
       this.diagnostics.emit({
         kind: "warning",
         name: "transcript_backlog_remaining",
-        context: { ...context, dispatchId: references.dispatchId },
+        context: { ...context, executionId: handle },
       });
   }
 
-  private emitTranscript(
-    text: string,
-    source: "transcript" | "terminal",
-    replay: boolean,
-    references: ExecutorReferences,
-    context?: DiagnosticContext,
-  ): void {
-    this.diagnostics.emit({
-      kind: "transcript",
-      name: "agent",
-      context: { ...context, dispatchId: references.dispatchId },
-      source,
-      replay,
-      text,
-    });
-  }
-
-  private safeJson(value: unknown): string {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return "[unserializable input]";
-    }
-  }
-
-  private effectivePrompt(launch: TaskLaunch): string {
+  private developerInstructions(launch: TaskLaunch): string {
     const outcomes = launch.allowedOutcomes
       .map((outcome) => `- ${JSON.stringify(outcome)}`)
       .join("\n");
-    return `${launch.prompt}\n\n---\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
+    return `${launch.instructions}\n\n---\nHappy Machine execution context (required)\n\nAttempt identity: ${JSON.stringify(launch.identity)}\nProject workspace: ${JSON.stringify(launch.projectWorkspace)}\nContext file: ${JSON.stringify(launch.contextPath)}\nAttempt number: ${launch.attemptNumber}\nTimeout milliseconds: ${launch.timeoutMs}\n\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
   }
 
-  private codexCommand(model: string): string {
-    return `codex --model ${this.shellQuote(model)} --dangerously-bypass-approvals-and-sandbox`;
+  private codexCommand(launch: TaskLaunch): string {
+    const developerOverride = `developer_instructions=${JSON.stringify(this.developerInstructions(launch))}`;
+    return `codex --model ${this.shellQuote(launch.model)} -c ${this.shellQuote(developerOverride)} --dangerously-bypass-approvals-and-sandbox`;
   }
 
   private shellQuote(value: string): string {
     return `'${value.replaceAll("'", `'\\''`)}'`;
+  }
+
+  private references(
+    handle: string,
+    legacy?: ExecutorReferences,
+  ): ExecutorReferences {
+    return {
+      ...(legacy ?? {}),
+      executionId: handle,
+      terminalHandle: handle,
+    };
+  }
+
+  private terminalHandle(references: ExecutorReferences): string | undefined {
+    return references.executionId ?? references.terminalHandle;
+  }
+
+  private requireTerminalHandle(references: ExecutorReferences): string {
+    const handle = this.terminalHandle(references);
+    if (!handle)
+      throw new TaskExecutorError(
+        "External execution has no terminal handle for terminal-only control",
+      );
+    return handle;
+  }
+
+  private assertHandle(
+    operation: string,
+    actual: string,
+    expected: string,
+    result: Pick<CommandResult, "stdout" | "stderr">,
+  ): void {
+    if (actual !== expected)
+      throw new TaskExecutorError(
+        `Orca ${operation} returned terminal ${actual} instead of ${expected}`,
+        { stdout: result.stdout, stderr: result.stderr },
+      );
+  }
+
+  private staleTerminal(error: unknown): boolean {
+    return (
+      error instanceof TaskExecutorError &&
+      error.message.includes("terminal_handle_stale")
+    );
+  }
+
+  private async closeBestEffort(
+    terminalHandle: string,
+    cwd: string,
+    context?: DiagnosticContext,
+  ): Promise<void> {
+    try {
+      await this.run(
+        ["terminal", "close", "--terminal", terminalHandle, "--tab", "--json"],
+        cwd,
+        undefined,
+        context,
+      );
+    } catch {
+      // Preserve the launch failure; cleanup is best effort.
+    }
   }
 
   private decode<T>(

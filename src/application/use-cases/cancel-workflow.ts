@@ -262,7 +262,7 @@ export class CancelWorkflow {
         {
           ...this.provenance(item),
           identity: attempt.id,
-          dispatchId: references.dispatchId,
+          ...this.references(references),
         },
       );
     } catch (error) {
@@ -292,6 +292,7 @@ export class CancelWorkflow {
         item.attempt.id,
         item.attempt.executor,
         projectWorkspace,
+        item.attempt.resultPath,
         this.diagnosticContext(run, item),
       );
     } catch {
@@ -404,6 +405,7 @@ export class CancelWorkflow {
   }
 
   private references(references: ExecutorReferences): Record<string, unknown> {
+    if (references.executionId) return { executionId: references.executionId };
     return {
       ...(references.runId ? { executorRunId: references.runId } : {}),
       executorTaskId: references.taskId,
@@ -453,6 +455,8 @@ export class CancelWorkflow {
           typeof data.attemptNumber === "number"
             ? data.attemptNumber
             : undefined,
+        executionId:
+          typeof data.executionId === "string" ? data.executionId : undefined,
         dispatchId:
           typeof data.dispatchId === "string" ? data.dispatchId : undefined,
       },

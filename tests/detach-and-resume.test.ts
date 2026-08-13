@@ -112,8 +112,8 @@ states:
       path.join(root, ".fake-orca-calls.jsonl"),
       "utf8",
     );
-    expect(callsBeforeResume).not.toContain("worker-stop");
-    expect(callsBeforeResume.match(/"dispatch"/g)).toHaveLength(1);
+    expect(callsBeforeResume).not.toContain('"orchestration"');
+    expect(callsBeforeResume.match(/"send"/g)).toHaveLength(1);
 
     const firstAttempt = stored.visits[0];
     if (firstAttempt?.type !== "agent") throw new Error("expected first visit");
@@ -147,9 +147,16 @@ states:
       .map((line): unknown => JSON.parse(line) as unknown);
     expect(contracts).toHaveLength(2);
     expect(contracts[1]).toMatchObject({ model: "original-model" });
-    expect((contracts[1] as { prompt: string }).prompt).toContain(
-      "Second original prompt\n\n---\nHappy Machine result contract (required)",
-    );
+    const prompts = (
+      await readFile(path.join(root, ".fake-prompts.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string);
+    expect(prompts).toEqual([
+      "First original prompt",
+      "Second original prompt",
+    ]);
     expect(
       await readFile(path.join(root, ".fake-agent-input-content"), "utf8"),
     ).toBe("original input\n");
@@ -157,6 +164,7 @@ states:
       path.join(root, ".fake-orca-calls.jsonl"),
       "utf8",
     );
-    expect(allCalls.match(/"dispatch"/g)).toHaveLength(2);
+    expect(allCalls).not.toContain('"orchestration"');
+    expect(allCalls.match(/"send"/g)).toHaveLength(2);
   }, 30_000);
 });

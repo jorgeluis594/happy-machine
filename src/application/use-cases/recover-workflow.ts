@@ -1,6 +1,7 @@
 import type {
   AttemptFailure,
   AttemptRecord,
+  ExecutorReferences,
   ExternalEventRecord,
   NormalVisitRecord,
   ParallelVisitRecord,
@@ -715,6 +716,7 @@ export class RecoverWorkflow {
       attempt.id,
       attempt.executor,
       projectWorkspace,
+      attempt.resultPath,
       this.diagnosticContext(controlled.run, attempt),
     );
   }
@@ -796,7 +798,7 @@ export class RecoverWorkflow {
       attempt.reconciliation.cancellationCommandCompletedAt = completedAt;
       this.event(controlled.run, "attempt_cancellation_command_completed", {
         identity: attempt.id,
-        dispatchId: attempt.executor.dispatchId,
+        ...this.references(attempt.executor),
         cause: "attempt_timeout",
       });
       await this.persist(controlled);
@@ -1034,6 +1036,18 @@ export class RecoverWorkflow {
     return target === "$succeeded" || target === "$failed";
   }
 
+  private references(references: ExecutorReferences): Record<string, unknown> {
+    if (references.executionId) return { executionId: references.executionId };
+    return {
+      ...(references.runId ? { executorRunId: references.runId } : {}),
+      executorTaskId: references.taskId,
+      dispatchId: references.dispatchId,
+      ...(references.terminalHandle
+        ? { terminalHandle: references.terminalHandle }
+        : {}),
+    };
+  }
+
   private coordinator(): ProjectWorkspaceCoordinator {
     return requireWorkspaceCoordinator(this.workspaceCoordinator);
   }
@@ -1064,6 +1078,8 @@ export class RecoverWorkflow {
           typeof data.attemptNumber === "number"
             ? data.attemptNumber
             : undefined,
+        executionId:
+          typeof data.executionId === "string" ? data.executionId : undefined,
         dispatchId:
           typeof data.dispatchId === "string" ? data.dispatchId : undefined,
       },

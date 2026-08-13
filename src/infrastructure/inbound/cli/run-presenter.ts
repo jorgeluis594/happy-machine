@@ -221,9 +221,10 @@ export class RunPresenter {
   }
 
   private executor(attempt: AttemptRecord): string {
-    return attempt.executor
-      ? `task=${attempt.executor.taskId},dispatch=${attempt.executor.dispatchId}${attempt.executor.terminalHandle ? `,terminal=${attempt.executor.terminalHandle}` : ""}`
-      : "none";
+    if (!attempt.executor) return "none";
+    if (attempt.executor.executionId)
+      return `execution=${attempt.executor.executionId}`;
+    return `task=${attempt.executor.taskId},dispatch=${attempt.executor.dispatchId}${attempt.executor.terminalHandle ? `,terminal=${attempt.executor.terminalHandle}` : ""}`;
   }
 
   private attemptCancellation(attempt: AttemptRecord): string {

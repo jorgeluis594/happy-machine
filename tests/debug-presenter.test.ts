@@ -22,13 +22,14 @@ describe("CLI debug presenter", () => {
           visitNumber: 1,
           taskId: "writer",
           attemptNumber: 2,
+          executionId: "term_1",
           dispatchId: "d1",
         },
         text: "\u001b[31mhello\u001b[0m\u0000",
       });
     });
     expect(lines).toEqual([
-      "[2026-08-12T12:00:00.000Z] debug run=run_1 state=draft visit=1 task=writer attempt=2 dispatch=d1 source=terminal replay=true transcript=agent hello",
+      "[2026-08-12T12:00:00.000Z] debug run=run_1 state=draft visit=1 task=writer attempt=2 execution=term_1 dispatch=d1 source=terminal replay=true transcript=agent hello",
     ]);
   });
 

@@ -1,14 +1,16 @@
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { ExecutorReferences } from "../src/domain/execution/run.js";
+import type { DiagnosticEntry } from "../src/ports/diagnostics.js";
 import type { TaskLaunch } from "../src/ports/task-executor.js";
 import { TaskExecutorError } from "../src/ports/task-executor.js";
 import { OrcaTaskExecutor } from "../src/infrastructure/outbound/task-executor/orca/orca-task-executor.js";
-import type { DiagnosticEntry } from "../src/ports/diagnostics.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
-const noStartupDelay = () => Promise.resolve();
+const noDelay = () => Promise.resolve();
 
 beforeAll(async () => chmod(fixture, 0o755));
 
@@ -23,8 +25,8 @@ async function launchFixture(root: string): Promise<TaskLaunch> {
     contextPath,
     outputDirectory,
     resultPath: path.join(root, "result.json"),
-    instructions: "instructions",
-    prompt: "prompt",
+    instructions: "configured agent instructions",
+    prompt: "configured prompt",
     allowedOutcomes: ["approved", "needs_revision"],
     model: "model",
     timeoutMs: 5_000,
@@ -32,266 +34,170 @@ async function launchFixture(root: string): Promise<TaskLaunch> {
   };
 }
 
-describe("Orca timeout reconciliation adapter", () => {
-  it("streams bounded transcript only when diagnostics are enabled", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-debug-"));
-    const entries: DiagnosticEntry[] = [];
-    const executor = new OrcaTaskExecutor(
-      fixture,
-      {
-        enabled: true,
-        replay: false,
-        emit: (entry) => entries.push(entry),
-      },
-      noStartupDelay,
-    );
-    await executor.execute(await launchFixture(root), () => Promise.resolve());
-    const transcript = entries.filter((entry) => entry.kind === "transcript");
-    expect(transcript.map((entry) => entry.text)).toEqual([
-      "agent progress",
-      '[tool rg] {"pattern":"needle"}',
-      "[tool result] match",
-    ]);
-    expect(JSON.stringify(entries)).not.toContain("hidden system prompt");
-    expect(JSON.stringify(entries)).not.toContain("hidden user prompt");
-    expect(JSON.stringify(entries)).not.toContain("instructions");
-    expect(entries.some((entry) => entry.name === "worker-read_started")).toBe(
-      true,
-    );
-    expect(
-      entries.find((entry) => entry.name === "worker-read_finished")?.data
-        ?.exitCode,
-    ).toBe(0);
-  });
+async function calls(root: string): Promise<string[][]> {
+  return (await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+}
 
-  it("consumes questions, escalations, and external resolutions before ordinary completion", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-events-"));
-    const output = path.join(root, "output");
-    await mkdir(output);
-    const contextPath = path.join(root, "context.md");
-    await writeFile(contextPath, "context\n");
-    await writeFile(
-      path.join(root, ".fake-check-sequence.json"),
-      JSON.stringify([
-        {
-          messages: [
-            { type: "question", questionId: "q-1", message: "Approve?" },
-          ],
-        },
-        {
-          messages: [
-            { type: "escalation", escalationId: "e-1", reason: "Review" },
-          ],
-        },
-        {
-          messages: [
-            {
-              type: "question_resolved",
-              questionId: "q-1",
-              status: "answered",
-            },
-          ],
-        },
-        {
-          messages: [
-            {
-              type: "worker_done",
-              outcome: "succeeded",
-              dispatchId: "orca-dispatch-1",
-            },
-          ],
-        },
-      ]),
-    );
-    const observed: Array<{ id: string; status: string; type: string }> = [];
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
+const terminalReferences = (): ExecutorReferences => ({
+  executionId: "terminal-1",
+  terminalHandle: "terminal-1",
+});
 
-    await executor.execute(
-      {
-        identity: "run:state:1:task:1",
-        projectWorkspace: root,
-        contextPath,
-        outputDirectory: output,
-        resultPath: path.join(output, "result.json"),
-        instructions: "instructions",
-        prompt: "prompt",
-        allowedOutcomes: ["approved", "needs_revision"],
-        model: "model",
-        timeoutMs: 5_000,
-        attemptNumber: 1,
-      },
-      () => Promise.resolve(),
-      (event) => {
-        observed.push(event);
-        return Promise.resolve();
-      },
-    );
-
-    const contract = JSON.parse(
-      await readFile(path.join(root, ".fake-contract.json"), "utf8"),
-    ) as { instructions: string; prompt: string };
-    expect(contract.instructions).toBe("instructions");
-    expect(contract.prompt).toContain(
-      `prompt\n\n---\nHappy Machine result contract (required)`,
-    );
-    expect(contract.prompt).toContain(
-      JSON.stringify(path.join(output, "result.json")),
-    );
-    expect(contract.prompt).toContain(JSON.stringify(output));
-    expect(contract.prompt).toContain('- "approved"\n- "needs_revision"');
-    expect(contract.prompt).toContain(
-      '"documents": ["relative/path/to/document.md"]',
-    );
-    expect(contract.prompt).toContain(
-      "Only result.json controls the workflow transition",
-    );
-    expect(contract.prompt).not.toContain("destination-state");
-
-    expect(observed).toMatchObject([
-      { id: "q-1", type: "question", status: "pending" },
-      { id: "e-1", type: "escalation", status: "pending" },
-      { id: "q-1", type: "question", status: "resolved" },
-    ]);
-  });
-
-  it("uses resource IDs from the RPC result instead of the envelope ID", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-ids-"));
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-    let references:
-      Parameters<Parameters<OrcaTaskExecutor["execute"]>[1]>[0] | undefined;
-
-    await executor.execute(await launchFixture(root), (started) => {
-      references = started;
-      return Promise.resolve();
-    });
-
-    expect(references).toEqual({
-      runId: "orca-run-1",
-      taskId: "orca-task-1",
-      dispatchId: "orca-dispatch-1",
-      terminalHandle: "terminal-1",
-    });
-    const calls = (
-      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    const dispatch = calls.find(
-      (call) => call[0] === "orchestration" && call[1] === "dispatch",
-    );
-    expect(dispatch?.[dispatch.indexOf("--task") + 1]).toBe("orca-task-1");
-    expect(
-      calls.some(
-        (call) => call[0] === "orchestration" && call[1] === "worker-read",
-      ),
-    ).toBe(false);
-  });
-
-  it("creates Codex, waits 8 seconds, dispatches, and only then monitors", async () => {
+describe("Orca terminal-only task executor", () => {
+  it("creates Codex, persists its handle, waits 8 seconds, then sends the exact prompt", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-order-"));
-    const model = "gpt-special' $(never-run)";
     const delays: number[] = [];
+    let started: ExecutorReferences | undefined;
     const executor = new OrcaTaskExecutor(
       fixture,
       undefined,
       async (milliseconds) => {
         delays.push(milliseconds);
-        const calls = (
-          await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-        )
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line) as string[]);
-        expect(calls.map((call) => call.slice(0, 2))).toEqual([
-          ["orchestration", "run-create"],
-          ["orchestration", "task-create"],
-          ["terminal", "create"],
+        expect(await calls(root)).toEqual([
+          expect.arrayContaining(["terminal", "create", "--focus"]),
         ]);
+        expect(existsSync(path.join(root, ".fake-prompt"))).toBe(false);
+        expect(started).toEqual(terminalReferences());
       },
+      noDelay,
     );
     const launch = await launchFixture(root);
+    launch.prompt = "first line\nsecond line ' $() --flag";
 
-    await executor.execute({ ...launch, model }, () => Promise.resolve());
+    const execution = await executor.execute(launch, (references) => {
+      started = references;
+      return Promise.resolve();
+    });
 
-    const calls = (
-      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
     expect(delays).toEqual([8_000]);
-    expect(calls.slice(0, 5).map((call) => call.slice(0, 2))).toEqual([
-      ["orchestration", "run-create"],
-      ["orchestration", "task-create"],
+    expect(execution.references).toEqual(terminalReferences());
+    expect(await readFile(path.join(root, ".fake-prompt"), "utf8")).toBe(
+      launch.prompt,
+    );
+    expect((await calls(root)).map((call) => call.slice(0, 2))).toEqual([
       ["terminal", "create"],
-      ["orchestration", "dispatch"],
-      ["orchestration", "check"],
-    ]);
-    expect(calls.some((call) => call[1] === "worker-start")).toBe(false);
-    expect(calls.some((call) => call[1] === "wait")).toBe(false);
-    const terminalCreate = calls[2];
-    expect(terminalCreate).toEqual([
-      "terminal",
-      "create",
-      "--worktree",
-      "current",
-      "--command",
-      "codex --model 'gpt-special'\\'' $(never-run)' --dangerously-bypass-approvals-and-sandbox",
-      "--focus",
-      "--json",
-    ]);
-    expect(calls[3]).toEqual([
-      "orchestration",
-      "dispatch",
-      "--task",
-      "orca-task-1",
-      "--run",
-      "orca-run-1",
-      "--to",
-      "terminal-1",
-      "--inject",
-      "--json",
+      ["terminal", "send"],
     ]);
   });
 
-  it("closes only the new terminal when startup is cancelled during the delay", async () => {
+  it("keeps the configured prompt separate from Happy Machine developer instructions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-prompt-"));
+    const launch = await launchFixture(root);
+    launch.prompt = "USER PROMPT EXACT\nwithout wrappers";
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+
+    await executor.execute(launch, () => Promise.resolve());
+
+    const instructions = await readFile(
+      path.join(root, ".fake-developer-instructions"),
+      "utf8",
+    );
+    const command = await readFile(
+      path.join(root, ".fake-codex-command"),
+      "utf8",
+    );
+    expect(await readFile(path.join(root, ".fake-prompt"), "utf8")).toBe(
+      launch.prompt,
+    );
+    expect(instructions).toContain("configured agent instructions");
+    expect(instructions).toContain(
+      "Happy Machine execution context (required)",
+    );
+    expect(instructions).toContain(JSON.stringify(launch.contextPath));
+    expect(instructions).toContain(JSON.stringify(launch.resultPath));
+    expect(instructions).toContain('- "approved"\n- "needs_revision"');
+    expect(instructions).toContain(
+      '"documents": ["relative/path/to/document.md"]',
+    );
+    expect(instructions).not.toContain(launch.prompt);
+    expect(command).not.toContain(launch.prompt);
+  });
+
+  it("safely quotes the model and developer instructions in the Codex command", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-quote-"));
+    const launch = await launchFixture(root);
+    launch.model = "gpt-special' $(never-run)";
+    launch.instructions = "don't replace $(anything)";
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+
+    await executor.execute(launch, () => Promise.resolve());
+
+    const create = (await calls(root))[0];
+    const command = create[create.indexOf("--command") + 1];
+    expect(command).toContain(
+      "codex --model 'gpt-special'\\'' $(never-run)' -c '",
+    );
+    expect(command).toContain("developer_instructions=");
+    expect(command).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(create).toContain("--focus");
+  });
+
+  it("never invokes Orca orchestration or terminal wait", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-pure-"));
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    await executor.execute(await launchFixture(root), () => Promise.resolve());
+    const invoked = await calls(root);
+    expect(invoked.some((call) => call[0] === "orchestration")).toBe(false);
+    expect(
+      invoked.some((call) => call[0] === "terminal" && call[1] === "wait"),
+    ).toBe(false);
+  });
+
+  it("closes only the new tab when startup is cancelled during the delay", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-abort-"));
     const controller = new AbortController();
-    let started = false;
     const executor = new OrcaTaskExecutor(
       fixture,
       undefined,
-      (_milliseconds, signal) => {
-        controller.abort(new Error("cancelled during startup"));
-        return Promise.reject(
-          signal?.reason instanceof Error ? signal.reason : new Error("abort"),
-        );
-      },
+      (_milliseconds, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error("startup aborted"),
+              ),
+            { once: true },
+          );
+          controller.abort(new Error("cancelled during startup"));
+        }),
+      noDelay,
     );
     const launch = await launchFixture(root);
+    launch.signal = controller.signal;
 
     await expect(
-      executor.execute(
-        { ...launch, signal: controller.signal },
-        () => ((started = true), Promise.resolve()),
-      ),
+      executor.execute(launch, () => Promise.resolve()),
     ).rejects.toThrow("cancelled during startup");
 
-    const calls = (
-      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    expect(started).toBe(false);
-    expect(calls.some((call) => call[1] === "dispatch")).toBe(false);
-    expect(calls.at(-1)).toEqual([
+    const invoked = await calls(root);
+    expect(invoked.some((call) => call[1] === "send")).toBe(false);
+    expect(invoked.at(-1)).toEqual([
       "terminal",
       "close",
       "--terminal",
       "terminal-1",
+      "--tab",
       "--json",
+    ]);
+  });
+
+  it("closes the new tab when durable start persistence fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-start-"));
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    await expect(
+      executor.execute(await launchFixture(root), () => {
+        throw new Error("persistence failed");
+      }),
+    ).rejects.toThrow("persistence failed");
+    expect((await calls(root)).at(-1)?.slice(0, 2)).toEqual([
+      "terminal",
+      "close",
     ]);
   });
 
@@ -303,363 +209,231 @@ describe("Orca timeout reconciliation adapter", () => {
       false,
     ],
     [
-      "orchestration dispatch",
-      {
-        dispatch: {
-          task_id: "orca-task-1",
-          id: "",
-          status: "dispatched",
-        },
-      },
-      "Orca dispatch response expected result.dispatch.id",
+      "terminal send",
+      { send: {} },
+      "Orca send response expected result.send.handle",
       true,
     ],
   ])(
-    "rejects malformed %s JSON receipts",
-    async (operation, result, message, closesTerminal) => {
+    "rejects malformed %s JSON and cleans up when a handle exists",
+    async (operation, result, message, closes) => {
       const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-json-"));
       await writeFile(
         path.join(root, ".fake-orca-response-overrides.json"),
         JSON.stringify({
-          [operation]: { id: "rpc-envelope-id", ok: true, result },
+          [operation]: { id: "rpc", ok: true, result },
         }),
       );
-      const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
+      const executor = new OrcaTaskExecutor(
+        fixture,
+        undefined,
+        noDelay,
+        noDelay,
+      );
       await expect(
         executor.execute(await launchFixture(root), () => Promise.resolve()),
       ).rejects.toThrow(message);
-      const calls = await readFile(
-        path.join(root, ".fake-orca-calls.jsonl"),
-        "utf8",
+      expect((await calls(root)).some((call) => call[1] === "close")).toBe(
+        closes,
       );
-      expect(calls.includes('["terminal","close"')).toBe(closesTerminal);
     },
   );
 
-  it("fails before the next side effect when a receipt is malformed", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-shape-"));
-    await writeFile(
-      path.join(root, ".fake-orca-response-overrides.json"),
-      JSON.stringify({
-        "orchestration run-create": {
-          id: "rpc-envelope-id",
-          ok: true,
-          result: { run: {} },
-        },
-      }),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
+  it("rejects a mismatched or unaccepted terminal send receipt", async () => {
+    for (const [send, message] of [
+      [
+        { handle: "other-terminal", accepted: true },
+        "returned terminal other-terminal instead of terminal-1",
+      ],
+      [
+        { handle: "terminal-1", accepted: false },
+        "did not accept input for terminal terminal-1",
+      ],
+    ] as const) {
+      const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-send-"));
+      await writeFile(
+        path.join(root, ".fake-orca-response-overrides.json"),
+        JSON.stringify({
+          "terminal send": { id: "rpc", ok: true, result: { send } },
+        }),
+      );
+      const executor = new OrcaTaskExecutor(
+        fixture,
+        undefined,
+        noDelay,
+        noDelay,
+      );
+      await expect(
+        executor.execute(await launchFixture(root), () => Promise.resolve()),
+      ).rejects.toThrow(message);
+    }
+  });
 
+  it("returns after any non-empty result so application validation remains authoritative", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-result-"));
+    await writeFile(path.join(root, ".fake-raw-result"), "not json\n");
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
     await expect(
       executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({
-      message:
-        "Orca run-create response expected result.run.id to be a non-empty string",
-    });
-    const calls = (
-      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    expect(calls.map((call) => call.slice(0, 2))).toEqual([
-      ["orchestration", "run-create"],
+    ).resolves.toMatchObject({ references: terminalReferences() });
+  });
+
+  it("fails when the terminal stops before producing a result", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-stopped-"));
+    await writeFile(path.join(root, ".fake-block-check"), "block\n");
+    await writeFile(path.join(root, ".fake-terminal-state"), "stopped\n");
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    await expect(
+      executor.execute(await launchFixture(root), () => Promise.resolve()),
+    ).rejects.toThrow("stopped before producing result.json");
+  });
+
+  it("streams bounded terminal output only when diagnostics are enabled", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-debug-"));
+    const entries: DiagnosticEntry[] = [];
+    const executor = new OrcaTaskExecutor(
+      fixture,
+      {
+        enabled: true,
+        replay: false,
+        emit: (entry) => entries.push(entry),
+      },
+      noDelay,
+      noDelay,
+    );
+    await executor.execute(await launchFixture(root), () => Promise.resolve());
+    expect(
+      entries
+        .filter((entry) => entry.kind === "transcript")
+        .map((entry) => entry.text),
+    ).toEqual(["agent progress", "match"]);
+    expect(entries.some((entry) => entry.name === "read_started")).toBe(true);
+    expect(
+      entries.find((entry) => entry.name === "read_finished")?.data?.exitCode,
+    ).toBe(0);
+    expect(
+      entries.find((entry) => entry.kind === "transcript")?.context
+        ?.executionId,
+    ).toBe("terminal-1");
+  });
+
+  it("cancels and reconciles exactly the persisted terminal", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-cancel-"));
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    expect(await executor.reconcile(terminalReferences(), root)).toBe("active");
+    await executor.cancel(terminalReferences(), root);
+    expect(await executor.reconcile(terminalReferences(), root)).toBe(
+      "stopped",
+    );
+    expect((await calls(root)).map((call) => call.slice(0, 2))).toEqual([
+      ["terminal", "show"],
+      ["terminal", "close"],
+      ["terminal", "show"],
     ]);
   });
 
-  it("rejects a worker receipt for a different task", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "happy-orca-task-mismatch-"),
-    );
-    await writeFile(
-      path.join(root, ".fake-orca-response-overrides.json"),
-      JSON.stringify({
-        "orchestration dispatch": {
-          id: "rpc-envelope-id",
-          ok: true,
-          result: {
-            dispatch: {
-              task_id: "other-task",
-              id: "orca-dispatch-1",
-              status: "dispatched",
-            },
-          },
-        },
-      }),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-    await expect(
-      executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({
-      message:
-        "Orca dispatch returned task other-task instead of created task orca-task-1",
-    });
-  });
-
-  it("rejects a dispatch receipt that is not dispatched", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "happy-orca-dispatch-status-"),
-    );
-    await writeFile(
-      path.join(root, ".fake-orca-response-overrides.json"),
-      JSON.stringify({
-        "orchestration dispatch": {
-          id: "rpc-envelope-id",
-          ok: true,
-          result: {
-            dispatch: {
-              task_id: "orca-task-1",
-              id: "orca-dispatch-1",
-              status: "pending",
-            },
-          },
-        },
-      }),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-    await expect(
-      executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({
-      message: "Orca dispatch returned unexpected status pending",
-    });
-    const calls = await readFile(
-      path.join(root, ".fake-orca-calls.jsonl"),
-      "utf8",
-    );
-    expect(calls).toContain(
-      '["terminal","close","--terminal","terminal-1","--json"]',
-    );
-  });
-
-  it("turns an explicit failed worker completion into an executor failure", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "happy-orca-worker-failed-"),
-    );
-    await writeFile(
-      path.join(root, ".fake-check-sequence.json"),
-      JSON.stringify([
-        {
-          messages: [
-            {
-              id: "worker-message",
-              type: "worker_done",
-              payload: JSON.stringify({
-                dispatchId: "orca-dispatch-1",
-                outcome: "failed",
-              }),
-            },
-          ],
-        },
-      ]),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-    await expect(
-      executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({
-      message: "Orca worker orca-dispatch-1 reported failed completion",
-    });
-  });
-
-  it("surfaces a structured stdout error from a failed Orca command", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-error-"));
+  it("treats a stale handle as stopped during reconciliation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-stale-"));
     await writeFile(
       path.join(root, ".fake-orca-failures.json"),
       JSON.stringify({
-        "orchestration dispatch": {
-          exitCode: 1,
+        "terminal show": {
           error: {
-            code: "task_not_found",
-            message: "Task rpc-envelope-id was not found",
+            code: "terminal_handle_stale",
+            message: "terminal_handle_stale",
           },
         },
       }),
     );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    await expect(executor.reconcile(terminalReferences(), root)).resolves.toBe(
+      "stopped",
+    );
+  });
 
+  it("recovers terminal-only and legacy terminal references without orchestration", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-recover-"));
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    expect(await executor.recover("identity", undefined, root)).toEqual({
+      status: "not_found",
+    });
+
+    const active = await executor.recover(
+      "identity",
+      terminalReferences(),
+      root,
+      path.join(root, "missing-result.json"),
+    );
+    expect(active).toMatchObject({
+      status: "active",
+      references: terminalReferences(),
+    });
+
+    const legacy: ExecutorReferences = {
+      taskId: "legacy-task",
+      dispatchId: "legacy-dispatch",
+      terminalHandle: "terminal-1",
+    };
+    const recoveredLegacy = await executor.recover(
+      "identity",
+      legacy,
+      root,
+      path.join(root, "missing-result.json"),
+    );
+    expect(recoveredLegacy).toMatchObject({
+      status: "active",
+      references: {
+        executionId: "terminal-1",
+        taskId: "legacy-task",
+        dispatchId: "legacy-dispatch",
+      },
+    });
+    expect(
+      (await calls(root)).some((call) => call[0] === "orchestration"),
+    ).toBe(false);
+  });
+
+  it("uses an existing result as authoritative recovery evidence", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-complete-"));
+    const resultPath = path.join(root, "result.json");
+    await writeFile(resultPath, '{"outcome":"approved","documents":[]}\n');
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    await expect(
+      executor.recover("identity", terminalReferences(), root, resultPath),
+    ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      executor.recover(
+        "identity",
+        { taskId: "legacy-task", dispatchId: "legacy-dispatch" },
+        root,
+        resultPath,
+      ),
+    ).resolves.toMatchObject({ status: "completed" });
+    expect(existsSync(path.join(root, ".fake-orca-calls.jsonl"))).toBe(false);
+  });
+
+  it("preserves structured Orca failure diagnostics", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-failure-"));
+    await writeFile(
+      path.join(root, ".fake-orca-failures.json"),
+      JSON.stringify({
+        "terminal create": {
+          error: { code: "terminal_create", message: "Could not create tab" },
+        },
+      }),
+    );
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+    let caught: unknown;
     try {
       await executor.execute(await launchFixture(root), () =>
         Promise.resolve(),
       );
-      throw new Error("expected execute to fail");
     } catch (error) {
-      expect(error).toBeInstanceOf(TaskExecutorError);
-      expect((error as Error).message).toBe(
-        "Orca dispatch failed (1): task_not_found: Task rpc-envelope-id was not found",
-      );
-      const stdout = (error as TaskExecutorError).logs.stdout;
-      expect(stdout).toContain('"run":{"id":"orca-run-1"}');
-      expect(stdout).toContain('"task":{"id":"orca-task-1"}');
-      expect(stdout).toContain('"code":"task_not_found"');
-      expect((error as TaskExecutorError).logs.stderr).toBe("");
+      caught = error;
     }
-  });
-
-  it("rejects an unsuccessful RPC envelope even when Orca exits zero", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-rpc-error-"));
-    await writeFile(
-      path.join(root, ".fake-orca-response-overrides.json"),
-      JSON.stringify({
-        "orchestration dispatch": {
-          id: "rpc-envelope-id",
-          ok: false,
-          error: {
-            code: "worker_rejected",
-            message: "Worker could not start",
-          },
-        },
-      }),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-    await expect(
-      executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({
-      message: "Orca dispatch failed: worker_rejected: Worker could not start",
+    expect(caught).toBeInstanceOf(TaskExecutorError);
+    expect(caught).toMatchObject({
+      message: "Orca create failed (1): terminal_create: Could not create tab",
     });
   });
-
-  it.each([
-    [
-      "stderr",
-      { exitCode: 1, stdout: "not json", stderr: "connection lost" },
-      "Orca dispatch failed (1): connection lost",
-    ],
-    [
-      "plain stdout",
-      { exitCode: 1, stdout: "plain worker failure" },
-      "Orca dispatch failed (1): plain worker failure",
-    ],
-    [
-      "invalid success output",
-      { exitCode: 0, stdout: "not json" },
-      "Orca dispatch returned invalid JSON",
-    ],
-    [
-      "non-ready worker receipt",
-      {
-        exitCode: 1,
-        stdout: JSON.stringify({
-          id: "rpc-worker-failure",
-          ok: true,
-          result: {
-            state: "failed",
-            failedStage: "agent_launch",
-            lastError: "Agent did not become ready",
-          },
-        }),
-      },
-      "Orca dispatch failed (1): agent_launch: Agent did not become ready",
-    ],
-  ])("uses the %s diagnostic fallback", async (_name, failure, message) => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "happy-orca-error-fallback-"),
-    );
-    await writeFile(
-      path.join(root, ".fake-orca-failures.json"),
-      JSON.stringify({ "orchestration dispatch": failure }),
-    );
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-    await expect(
-      executor.execute(await launchFixture(root), () => Promise.resolve()),
-    ).rejects.toMatchObject({ message });
-  });
-
-  it.each([
-    ["starting", "active"],
-    ["ready", "active"],
-    ["stopping", "active"],
-    ["stopped", "stopped"],
-    ["failed", "stopped"],
-    ["succeeded", "stopped"],
-    ["start_unknown", "unknown"],
-    ["stop_unknown", "unknown"],
-    ["abandoned", "stopped"],
-  ] as const)("maps Orca worker state %s to %s", async (state, expected) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-state-"));
-    await writeFile(path.join(root, ".fake-worker-state"), state);
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-    await expect(
-      executor.reconcile({ taskId: "task", dispatchId: "dispatch" }, root),
-    ).resolves.toBe(expected);
-  });
-
-  it("requests cancellation for exactly the persisted dispatch", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-stop-"));
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-    await executor.cancel(
-      { taskId: "task", dispatchId: "dispatch-to-stop" },
-      root,
-    );
-    const [call] = (
-      await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    expect(call).toEqual([
-      "orchestration",
-      "worker-stop",
-      "--dispatch",
-      "dispatch-to-stop",
-      "--json",
-    ]);
-  });
-});
-
-describe("Orca durable recovery adapter", () => {
-  it("returns not_found when no task has the stable attempt identity", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-recovery-"));
-    const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-    await expect(
-      executor.recover("run:state:1:task:1", undefined, root),
-    ).resolves.toEqual({ status: "not_found" });
-  });
-
-  it.each([
-    ["starting", "active"],
-    ["ready", "active"],
-    ["stopping", "active"],
-    ["succeeded", "completed"],
-    ["stopped", "completed"],
-    ["failed", "failed"],
-    ["abandoned", "failed"],
-    ["start_unknown", "start_unknown"],
-    ["stop_unknown", "stop_unknown"],
-  ] as const)(
-    "finds provenance and maps %s to %s",
-    async (workerState, expected) => {
-      const root = await mkdtemp(
-        path.join(os.tmpdir(), "happy-orca-recovery-"),
-      );
-      const identity = "run:state:1:task:1";
-      await writeFile(path.join(root, ".fake-recovery-identity"), identity);
-      await writeFile(path.join(root, ".fake-recovery-state"), workerState);
-      const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
-
-      const observation = await executor.recover(identity, undefined, root);
-      expect(observation).toMatchObject({
-        status: expected,
-        references: {
-          taskId: "recovered-task",
-          dispatchId: "recovered-dispatch",
-          terminalHandle: "recovered-terminal",
-        },
-      });
-      const calls = (
-        await readFile(path.join(root, ".fake-orca-calls.jsonl"), "utf8")
-      )
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as string[]);
-      expect(calls.map((call) => call.slice(0, 2))).toEqual([
-        ["orchestration", "task-list"],
-        ["orchestration", "dispatch-show"],
-      ]);
-    },
-  );
 });

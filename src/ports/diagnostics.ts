@@ -4,6 +4,7 @@ export interface DiagnosticContext {
   visitNumber?: number;
   taskId?: string;
   attemptNumber?: number;
+  executionId?: string;
   dispatchId?: string;
 }
 

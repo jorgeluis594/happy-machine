@@ -43,6 +43,7 @@ export class CliDiagnostics implements DiagnosticSink, DiagnosticScope {
       ["visit", context.visitNumber],
       ["task", context.taskId],
       ["attempt", context.attemptNumber],
+      ["execution", context.executionId],
       ["dispatch", context.dispatchId],
     ]
       .filter((item) => item[1] !== undefined)

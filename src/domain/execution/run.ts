@@ -18,12 +18,16 @@ export interface AttemptReconciliation {
   confirmedStoppedAt?: string;
 }
 
-export interface ExecutorReferences {
+interface ExecutorReferenceValues {
+  executionId?: string;
   runId?: string;
-  taskId: string;
-  dispatchId: string;
+  taskId?: string;
+  dispatchId?: string;
   terminalHandle?: string;
 }
+
+export type ExecutorReferences = ExecutorReferenceValues &
+  ({ executionId: string } | { taskId: string; dispatchId: string });
 
 export type ExternalEventType = "question" | "escalation";
 export type ExternalEventStatus = "pending" | "resolved";
