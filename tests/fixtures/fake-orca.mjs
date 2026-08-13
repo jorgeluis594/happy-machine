@@ -139,7 +139,9 @@ if (operation === "orchestration run-create") {
         : "ready",
     },
   };
-} else if (operation === "orchestration worker-start") {
+} else if (operation === "terminal create") {
+  response = { terminal: { handle: "terminal-1" } };
+} else if (operation === "orchestration dispatch") {
   const taskId = args[args.indexOf("--task") + 1];
   const dispatchId = "orca-dispatch-1";
   writeFileSync(path.join(process.cwd(), ".fake-started-task-id"), taskId);
@@ -194,10 +196,16 @@ if (operation === "orchestration run-create") {
     })}\n`,
   );
   response = {
-    taskId,
-    dispatchId,
-    agentTerminalHandle: "terminal-1",
-    state: "ready",
+    dispatch: {
+      task_id: taskId,
+      id: dispatchId,
+      status: "active",
+    },
+  };
+} else if (operation === "terminal close") {
+  response = {
+    terminal: { handle: args[args.indexOf("--terminal") + 1] },
+    closed: true,
   };
 } else if (operation === "orchestration check") {
   if (existsSync(path.join(process.cwd(), ".fake-block-check"))) {

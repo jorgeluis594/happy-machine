@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeCheck,
+  decodeDispatch,
   decodeDispatchShow,
   decodeOrcaFailure,
   decodeOrcaProcessFailure,
   decodeRunCreate,
   decodeTaskCreate,
+  decodeTerminalCreate,
   decodeTaskList,
   decodeWorkerShow,
   decodeWorkerStart,
@@ -84,6 +86,26 @@ describe("Orca RPC response decoding", () => {
       decodeTaskCreate(success({ task: { id: "task-resource-id" } })),
     ).toEqual({ taskId: "task-resource-id" });
     expect(
+      decodeTerminalCreate(
+        success({ terminal: { handle: "terminal-resource-id" } }),
+      ),
+    ).toEqual({ terminalHandle: "terminal-resource-id" });
+    expect(
+      decodeDispatch(
+        success({
+          dispatch: {
+            task_id: "task-resource-id",
+            id: "dispatch-resource-id",
+            status: "active",
+          },
+        }),
+      ),
+    ).toEqual({
+      taskId: "task-resource-id",
+      dispatchId: "dispatch-resource-id",
+      status: "active",
+    });
+    expect(
       decodeWorkerStart(
         success({
           taskId: "task-resource-id",
@@ -107,6 +129,14 @@ describe("Orca RPC response decoding", () => {
     expect(() => decodeTaskCreate(success({ task: {} }))).toThrow(
       "result.task.id",
     );
+    expect(() => decodeTerminalCreate(success({ terminal: {} }))).toThrow(
+      "result.terminal.handle",
+    );
+    expect(() =>
+      decodeDispatch(
+        success({ dispatch: { task_id: "task", id: "", status: "active" } }),
+      ),
+    ).toThrow("result.dispatch.id");
     expect(() =>
       decodeWorkerStart(
         success({

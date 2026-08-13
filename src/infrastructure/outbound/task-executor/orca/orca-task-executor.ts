@@ -14,13 +14,14 @@ import { TaskExecutorError } from "../../../../ports/task-executor.js";
 import {
   assertOrcaSuccess,
   decodeCheck,
+  decodeDispatch,
   decodeDispatchShow,
   decodeOrcaProcessFailure,
   decodeRunCreate,
   decodeTaskCreate,
+  decodeTerminalCreate,
   decodeTaskList,
   decodeWorkerShow,
-  decodeWorkerStart,
   decodeWorkerRead,
   OrcaResponseError,
 } from "./orca-response.js";
@@ -35,6 +36,35 @@ interface CommandResult {
   stderr: string;
   json: unknown;
 }
+
+export type OrcaStartupDelay = (
+  milliseconds: number,
+  signal?: AbortSignal,
+) => Promise<void>;
+
+const STARTUP_DELAY_MS = 8_000;
+
+const abortError = (signal?: AbortSignal): Error =>
+  signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+
+const defaultStartupDelay: OrcaStartupDelay = (milliseconds, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError(signal));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 
 export class OrcaTaskExecutor implements TaskExecutor {
   private readonly transcriptStates = new Map<
@@ -52,6 +82,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
   constructor(
     private readonly executable = process.env.ORCA_CLI_COMMAND || "orca",
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
+    private readonly startupDelay: OrcaStartupDelay = defaultStartupDelay,
   ) {}
 
   async recover(
@@ -195,35 +226,64 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--json",
     ]);
     const { taskId } = this.decode(taskReceipt, decodeTaskCreate, logs);
-    const workerReceipt = await command([
-      "orchestration",
-      "worker-start",
-      "--task",
-      taskId,
+    const terminalReceipt = await command([
+      "terminal",
+      "create",
       "--worktree",
       "current",
-      "--agent",
-      "codex",
-      "--model",
-      launch.model,
+      "--command",
+      this.codexCommand(launch.model),
       "--json",
     ]);
-    const worker = this.decode(workerReceipt, decodeWorkerStart, logs);
-    if (worker.taskId !== taskId)
-      throw new TaskExecutorError(
-        `Orca worker-start returned task ${worker.taskId} instead of created task ${taskId}`,
-        { ...logs },
-      );
-    if (worker.state !== "ready")
-      throw new TaskExecutorError(
-        `Orca worker-start returned non-ready state ${worker.state}`,
-        { ...logs },
-      );
+    const { terminalHandle } = this.decode(
+      terminalReceipt,
+      decodeTerminalCreate,
+      logs,
+    );
+    let dispatch!: { taskId: string; dispatchId: string; status: string };
+    try {
+      await this.startupDelay(STARTUP_DELAY_MS, launch.signal);
+      const dispatchReceipt = await command([
+        "orchestration",
+        "dispatch",
+        "--task",
+        taskId,
+        "--run",
+        orcaRunId,
+        "--to",
+        terminalHandle,
+        "--inject",
+        "--json",
+      ]);
+      dispatch = this.decode(dispatchReceipt, decodeDispatch, logs);
+      if (dispatch.taskId !== taskId)
+        throw new TaskExecutorError(
+          `Orca dispatch returned task ${dispatch.taskId} instead of created task ${taskId}`,
+          { ...logs },
+        );
+      if (dispatch.status !== "active")
+        throw new TaskExecutorError(
+          `Orca dispatch returned non-active status ${dispatch.status}`,
+          { ...logs },
+        );
+    } catch (error) {
+      try {
+        await this.run(
+          ["terminal", "close", "--terminal", terminalHandle, "--json"],
+          launch.projectWorkspace,
+          undefined,
+          launch.diagnosticContext,
+        );
+      } catch {
+        // Preserve the launch failure; cleanup is best effort.
+      }
+      throw error;
+    }
     const references: ExecutorReferences = {
       runId: orcaRunId,
       taskId,
-      dispatchId: worker.dispatchId,
-      terminalHandle: worker.terminalHandle,
+      dispatchId: dispatch.dispatchId,
+      terminalHandle,
     };
     await onStarted(references);
     let transcriptTimer: NodeJS.Timeout | undefined;
@@ -642,6 +702,14 @@ export class OrcaTaskExecutor implements TaskExecutor {
       .map((outcome) => `- ${JSON.stringify(outcome)}`)
       .join("\n");
     return `${launch.prompt}\n\n---\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
+  }
+
+  private codexCommand(model: string): string {
+    return `codex --model ${this.shellQuote(model)} --dangerously-bypass-approvals-and-sandbox`;
+  }
+
+  private shellQuote(value: string): string {
+    return `'${value.replaceAll("'", `'\\''`)}'`;
   }
 
   private decode<T>(

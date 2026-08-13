@@ -27,6 +27,7 @@ import type { RunRepository } from "../src/ports/run-repository.js";
 import type { TaskExecutor } from "../src/ports/task-executor.js";
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
+const noStartupDelay = () => Promise.resolve();
 const temporaryDirectories: string[] = [];
 
 function normalVisit(run: RunRecord, index = 0): NormalVisitRecord {
@@ -142,7 +143,7 @@ ${states}
 function cli(projectRoot?: string) {
   let id = 0;
   const repository = new FilesystemRunRepository();
-  const executor = new OrcaTaskExecutor(fixture);
+  const executor = new OrcaTaskExecutor(fixture, undefined, noStartupDelay);
   const now = () => new Date("2026-08-11T12:00:00.000Z");
   const useCase = new ExecuteWorkflow(
     new FilesystemProjectDefinitions(),
@@ -552,7 +553,7 @@ describe("happy-machine execute", () => {
     const useCase = new ExecuteWorkflow(
       new FilesystemProjectDefinitions(),
       runs,
-      new OrcaTaskExecutor(fixture),
+      new OrcaTaskExecutor(fixture, undefined, noStartupDelay),
       () => new Date("2026-08-11T12:00:00.000Z"),
       () => `blocked-${++id}`,
       () => new Promise(() => {}),
@@ -599,7 +600,7 @@ describe("happy-machine execute", () => {
     )
       .trim()
       .split("\n");
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
   });
 
   it("fails an unknown outcome after one attempt without promoting output or workspace edits", async () => {

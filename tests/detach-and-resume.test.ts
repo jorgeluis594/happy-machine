@@ -12,7 +12,7 @@ const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 const entry = path.resolve("dist/src/main.js");
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let index = 0; index < 200; index += 1) {
+  for (let index = 0; index < 600; index += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -62,7 +62,7 @@ agents:
 defaults:
   attempt_timeout: 30s
   workflow_timeout: 2m
-  controller_lease: 5s
+  controller_lease: 20s
 `,
     );
     await writeFile(
@@ -113,7 +113,7 @@ states:
       "utf8",
     );
     expect(callsBeforeResume).not.toContain("worker-stop");
-    expect(callsBeforeResume.match(/worker-start/g)).toHaveLength(1);
+    expect(callsBeforeResume.match(/"dispatch"/g)).toHaveLength(1);
 
     const firstAttempt = stored.visits[0];
     if (firstAttempt?.type !== "agent") throw new Error("expected first visit");
@@ -132,7 +132,7 @@ states:
 
     const resuming = runProcess(["resume", runId], root);
     const resumed = await resuming.closed;
-    expect(resumed).toEqual({ code: 0, signal: null });
+    expect(resumed, resuming.stderr()).toEqual({ code: 0, signal: null });
     const completed = JSON.parse(await readFile(runPath, "utf8")) as RunRecord;
     expect(completed.status).toBe("succeeded");
     expect(completed.visits.map((visit) => visit.stateId)).toEqual([
@@ -157,6 +157,6 @@ states:
       path.join(root, ".fake-orca-calls.jsonl"),
       "utf8",
     );
-    expect(allCalls.match(/worker-start/g)).toHaveLength(2);
-  }, 20_000);
+    expect(allCalls.match(/"dispatch"/g)).toHaveLength(2);
+  }, 30_000);
 });

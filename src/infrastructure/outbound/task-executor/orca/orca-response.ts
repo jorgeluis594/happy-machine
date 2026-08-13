@@ -116,6 +116,52 @@ export function decodeTaskCreate(value: unknown): { taskId: string } {
   return { taskId: requiredString(task.id, operation, "result.task.id") };
 }
 
+export function decodeTerminalCreate(value: unknown): {
+  terminalHandle: string;
+} {
+  const operation = "create";
+  const result = resultRecord(value, operation);
+  const terminal = requiredRecord(
+    result.terminal,
+    operation,
+    "result.terminal",
+  );
+  return {
+    terminalHandle: requiredString(
+      terminal.handle,
+      operation,
+      "result.terminal.handle",
+    ),
+  };
+}
+
+export function decodeDispatch(value: unknown): {
+  taskId: string;
+  dispatchId: string;
+  status: string;
+} {
+  const operation = "dispatch";
+  const result = resultRecord(value, operation);
+  const dispatch = requiredRecord(
+    result.dispatch,
+    operation,
+    "result.dispatch",
+  );
+  return {
+    taskId: requiredString(
+      dispatch.task_id,
+      operation,
+      "result.dispatch.task_id",
+    ),
+    dispatchId: requiredString(dispatch.id, operation, "result.dispatch.id"),
+    status: requiredString(
+      dispatch.status,
+      operation,
+      "result.dispatch.status",
+    ),
+  };
+}
+
 export function decodeWorkerStart(value: unknown): {
   taskId: string;
   dispatchId: string;
