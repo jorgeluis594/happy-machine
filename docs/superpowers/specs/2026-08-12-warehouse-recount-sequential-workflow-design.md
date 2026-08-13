@@ -1,8 +1,8 @@
-# Warehouse Recount Eight-Agent Workflow Design
+# Warehouse Recount Sequential Workflow Design
 
 ## Purpose
 
-Define a Happy Machine workflow that implements the eight warehouse-recount tasks sequentially. Each task is owned by one agent. A failed task concludes the complete run, while a completed task advances to the next state.
+Define a Happy Machine workflow that implements the eight warehouse-recount tasks sequentially. Every state starts a new Codex execution through Orca, while all states reuse one Happy Machine agent configuration. A failed task concludes the complete run, while a completed task advances to the next state.
 
 Happy Machine owns the agent registry, workflow graph, prompts, policies, routing, retries, durable state, and terminal result. Orca is only the external executor used by Happy Machine to run the current state's agent through its CLI.
 
@@ -19,7 +19,7 @@ The workflow implements these task documents in order:
 7. `docs/superpowers/tasks/warehouse-recount/07-interrupt-and-resume-merge.md`
 8. `docs/superpowers/tasks/warehouse-recount/08-handle-partial-failures-recovery-and-history.md`
 
-The agents may also consult the two source specifications referenced by every task. The individual task document remains the authoritative scope for its state.
+The executing agent may also consult the two source specifications referenced by every task. The individual task document remains the authoritative scope for its state.
 
 ## Ownership Boundary
 
@@ -44,37 +44,22 @@ The Happy Machine project uses this logical layout:
 ```text
 happy-machine.yaml
 agents/
-└── warehouse-recount/
-    ├── task-01.md
-    ├── task-02.md
-    ├── task-03.md
-    ├── task-04.md
-    ├── task-05.md
-    ├── task-06.md
-    ├── task-07.md
-    └── task-08.md
+└── implementation.md
 workflows/
 └── warehouse-recount.yaml
 ```
 
-The prompts remain inline in the workflow because each is short and used by exactly one state. The agent instruction files remain separate because the project contract registers agents through Markdown files and the requested design assigns one agent to each task.
+The prompts remain inline in the workflow because each is short and used by exactly one state. The single instruction file exists because the current Happy Machine schema requires every registered agent to reference Markdown instructions. It contains reusable execution rules only; task scope remains entirely in each state prompt.
 
 ## Agent Registry
 
-All agents use `gpt-5.6-sol`.
+The registry contains one reusable agent:
 
-| Agent ID | Instruction file | Assigned state |
-| --- | --- | --- |
-| `warehouse_recount_task_01` | `agents/warehouse-recount/task-01.md` | `task_01` |
-| `warehouse_recount_task_02` | `agents/warehouse-recount/task-02.md` | `task_02` |
-| `warehouse_recount_task_03` | `agents/warehouse-recount/task-03.md` | `task_03` |
-| `warehouse_recount_task_04` | `agents/warehouse-recount/task-04.md` | `task_04` |
-| `warehouse_recount_task_05` | `agents/warehouse-recount/task-05.md` | `task_05` |
-| `warehouse_recount_task_06` | `agents/warehouse-recount/task-06.md` | `task_06` |
-| `warehouse_recount_task_07` | `agents/warehouse-recount/task-07.md` | `task_07` |
-| `warehouse_recount_task_08` | `agents/warehouse-recount/task-08.md` | `task_08` |
+| Agent ID | Instruction file | Default model | Assigned states |
+| --- | --- | --- | --- |
+| `implementation` | `agents/implementation.md` | `gpt-5.6-sol` | `task_01` through `task_08` |
 
-Each instruction file requires its agent to:
+The shared instruction file requires the executing agent to:
 
 - Implement only its assigned task and treat earlier tasks as already completed.
 - Read the target repository instructions and the assigned task before editing.
@@ -86,9 +71,25 @@ Each instruction file requires its agent to:
 - Return `failed` when the implementation or required validation cannot be completed successfully.
 - Never begin work belonging exclusively to a later task.
 
+This registry entry is a Happy Machine configuration preset, not a persistent Orca agent. Each state still launches a fresh supervised Codex worker through Orca.
+
+## Task Specification Injection
+
+Happy Machine keeps reusable instructions and state-specific work separate in its effective definition. For each attempt, it sends Orca one JSON task specification containing both fields:
+
+```json
+{
+  "instructions": "<contents of agents/implementation.md>",
+  "prompt": "<state prompt plus the Happy Machine result contract>",
+  "model": "gpt-5.6-sol"
+}
+```
+
+Orca injects the complete task specification into the fresh Codex worker. It does not read `agents/implementation.md` itself. Happy Machine reads and snapshots that file before launch. Keeping the fields separate preserves the current product contract without duplicating task-specific instructions.
+
 ## Workflow Graph
 
-Every state is a normal `agent` state. The graph contains no parallel states and no cycles.
+Every state is a normal `agent` state referencing the shared `implementation` registry entry. The graph contains no parallel states and no cycles.
 
 ```text
 task_01 ─completed→ task_02 ─completed→ task_03 ─completed→ task_04
@@ -125,7 +126,7 @@ The normative transitions are:
 
 ## Execution Policies
 
-The project runs in `worktree` mode. Happy Machine creates one managed main worktree and reuses it for every sequential state, so each agent receives the code produced by the preceding states.
+The project runs in `worktree` mode. Happy Machine creates one managed main worktree and reuses it for every sequential state, so each fresh execution receives the code produced by the preceding states.
 
 The effective project defaults are:
 
@@ -203,17 +204,17 @@ Before the workflow is considered runnable:
 6. Exercise a controlled executor fixture that returns `completed` for all states and assert the ordered eight-state successful path.
 7. Exercise a controlled `failed` outcome at each state and assert immediate `$failed` termination with no later task launch.
 
-Actual execution of the eight implementation agents is separate from definition validation because it mutates the target codebase and performs the feature work described by the tasks.
+Actual execution of the eight implementation states is separate from definition validation because it mutates the target codebase and performs the feature work described by the tasks.
 
 ## Completion Criteria
 
 The configuration is complete when:
 
-- Eight registered agents resolve to eight existing instruction files.
+- The shared `implementation` agent resolves to `agents/implementation.md` and uses `gpt-5.6-sol`.
+- All eight states reference the shared `implementation` agent.
 - The workflow validates before allocating a run.
 - The successful controlled path visits all eight states exactly once and terminates at `$succeeded`.
 - A controlled failure at any state terminates at `$failed` and launches no later state.
-- Every agent uses `gpt-5.6-sol`.
 - The effective policies match this design.
 - All prompts reference the intended task and require the approved validation scope.
 - No workflow or routing responsibility is delegated to Orca.
