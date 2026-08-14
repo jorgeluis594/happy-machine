@@ -179,7 +179,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--worktree",
       "current",
       "--command",
-      "codex --sandbox danger-full-access",
+      "codex",
       "--focus",
       "--json",
     ]);
