@@ -26,8 +26,12 @@ describe("README quick start", () => {
       example(readme, "project"),
     );
     await writeFile(
-      path.join(root, "agents", "worker.md"),
-      example(readme, "agent"),
+      path.join(root, "agents", "delivery.md"),
+      example(readme, "delivery-agent"),
+    );
+    await writeFile(
+      path.join(root, "agents", "qa.md"),
+      example(readme, "qa-agent"),
     );
     await writeFile(
       path.join(root, "workflows", "delivery.yaml"),
@@ -43,13 +47,24 @@ describe("README quick start", () => {
       workflowId: "delivery",
       initialState: "research",
       workspaceMode: "direct",
+      agents: {
+        delivery: { model: "local-default-model" },
+        qa: { model: "local-qa-model" },
+      },
       policies: {
         workflowTimeoutMs: 14_400_000,
         maxStateVisits: 3,
         maxTransitions: 20,
       },
       states: {
+        implementation: {
+          agent: {
+            id: "delivery",
+            model: "local-implementation-model",
+          },
+        },
         qa: {
+          agent: { id: "qa", model: "local-qa-model" },
           outcomes: {
             passed: "create_pr",
             failed: "implementation",

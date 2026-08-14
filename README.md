@@ -70,7 +70,8 @@ A project contains three kinds of plain-text definitions:
 your-project/
 ├── happy-machine.yaml       # agents, executor, workspace, defaults
 ├── agents/
-│   └── worker.md            # reusable agent instructions
+│   ├── delivery.md          # implementation-oriented instructions
+│   └── qa.md                # independent validation instructions
 └── workflows/
     └── delivery.yaml        # states, outcomes, and transitions
 ```
@@ -102,7 +103,9 @@ Runs can branch, cycle, retry failed attempts, execute parallel tasks, detach, r
 
 Happy Machine v1 uses Orca as its executor and Codex as its agent runtime. They are the first integrations, not intended to be permanent product limits.
 
-The planned configuration model will make the executor selectable per project. Each project-local agent will also select its runtime—such as Codex, Claude Code, or OpenCode—together with its model. That configurability is a future direction and is not implemented yet; the current closed schema accepts only Orca and the current adapter launches Codex.
+Agent selection is already project-local. `happy-machine.yaml` registers named agent profiles with an instruction file and a default model. Every normal state and parallel task selects one registered agent and may override its model, so two states in the same workflow can run with different agent instructions and model identifiers.
+
+The planned configuration model will also make the executor selectable per project and add a runtime—such as Codex, Claude Code, or OpenCode—to each agent profile. A state will select that profile and may still override its default model. Runtime selection is a future direction and is not implemented yet; the current closed schema accepts only Orca and the current adapter launches Codex.
 
 ## Getting started
 
@@ -114,7 +117,7 @@ The planned configuration model will make the executor selectable per project. E
 - Codex installed and configured in the environment where Orca opens terminals.
 - Git when using `workspace.mode: worktree`.
 
-The current Orca adapter launches the plain `codex` command. Model, permission, and sandbox behavior therefore come from your local Codex configuration; Happy Machine does not override them on launch. Other executors and agent runtimes are planned, not currently supported.
+The current Orca adapter launches the plain `codex` command. Although Happy Machine resolves and snapshots each state's agent and model, this adapter does not yet pass the resolved model to Codex. Effective model, permission, and sandbox behavior therefore come from your local Codex configuration. Other executors and agent runtimes are planned, not currently supported.
 
 ### Build the CLI from source
 
@@ -147,9 +150,12 @@ workspace:
   mode: direct
 
 agents:
-  worker:
-    instructions: agents/worker.md
-    model: local-codex-model
+  delivery:
+    instructions: agents/delivery.md
+    model: local-default-model
+  qa:
+    instructions: agents/qa.md
+    model: local-qa-model
 
 defaults:
   attempt_timeout: 30m
@@ -160,16 +166,26 @@ defaults:
   max_transitions: 20
 ```
 
-The `model` field is currently required by the project schema. The terminal-only Orca adapter still uses the model selected by your local Codex configuration. Per-agent runtime and model selection are planned for a later configuration contract.
+Each agent profile has its own instructions and default model. A workflow state or parallel task selects a profile through `agent` and can override its `model`. The current terminal-only Orca adapter does not yet forward that resolved model to Codex, so local Codex configuration remains authoritative during execution.
 
-**`agents/worker.md`**
+**`agents/delivery.md`**
 
-<!-- readme-example:agent -->
+<!-- readme-example:delivery-agent -->
 
 ```markdown
-# Delivery workflow agent
+# Delivery agent
 
 Complete only the task assigned in the current prompt. Read the supplied context before working. Keep durable findings in Markdown documents and follow the result contract injected by Happy Machine.
+```
+
+**`agents/qa.md`**
+
+<!-- readme-example:qa-agent -->
+
+```markdown
+# QA agent
+
+Validate the implementation independently. Report every reproducible problem, avoid changing product code, and follow the result contract injected by Happy Machine.
 ```
 
 **`workflows/delivery.yaml`**
@@ -189,42 +205,43 @@ policies:
 states:
   research:
     type: agent
-    agent: worker
+    agent: delivery
     prompt: Research the request and produce a concise research document.
     outcomes:
       completed: product_planning
 
   product_planning:
     type: agent
-    agent: worker
+    agent: delivery
     prompt: Turn the research into a product plan with explicit success criteria.
     outcomes:
       completed: technical_planning
 
   technical_planning:
     type: agent
-    agent: worker
+    agent: delivery
     prompt: Create an implementation-ready technical plan.
     outcomes:
       completed: task_management
 
   task_management:
     type: agent
-    agent: worker
+    agent: delivery
     prompt: Break the technical plan into ordered implementation tasks.
     outcomes:
       completed: implementation
 
   implementation:
     type: agent
-    agent: worker
+    agent: delivery
+    model: local-implementation-model
     prompt: Implement the planned tasks and validate the focused changes.
     outcomes:
       completed: qa
 
   qa:
     type: agent
-    agent: worker
+    agent: qa
     prompt: Validate the implementation and document every issue found.
     outcomes:
       passed: create_pr
@@ -232,13 +249,13 @@ states:
 
   create_pr:
     type: agent
-    agent: worker
+    agent: delivery
     prompt: Create a pull request for the validated implementation.
     outcomes:
       opened: $succeeded
 ```
 
-The `qa.failed → implementation` transition is an ordinary semantic edge, not a technical failure handler. If an attempt crashes, times out, or produces an invalid result, Happy Machine applies its retry policy instead. The global limits bound the QA correction loop.
+The `implementation` state overrides the `delivery` profile's default model, while `qa` uses the default model from the separate `qa` profile. The `qa.failed → implementation` transition is an ordinary semantic edge, not a technical failure handler. If an attempt crashes, times out, or produces an invalid result, Happy Machine applies its retry policy instead. The global limits bound the QA correction loop.
 
 ### Execute the workflow
 
