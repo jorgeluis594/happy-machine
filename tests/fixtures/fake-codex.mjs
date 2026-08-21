@@ -9,6 +9,7 @@ import readline from "node:readline";
 //   FAKE_CODEX_CONFIG={
 //     "eventOrder":"response-first|notifications-first|reverse-notifications",
 //     "interleavedNotifications":true,
+//     "unsupportedEphemeral":true,
 //     "emptyConversation":true,
 //     "invalidAnalysis":true,
 //     "malformedJsonMethods":["thread/read"],
@@ -215,7 +216,13 @@ if (args[0] === "app-server" && listenIndex >= 0) {
           {
             id: `item-file-for-${threadId}`,
             type: "fileChange",
-            changes: [{ path: "README.md", kind: "update" }],
+            changes: [
+              {
+                path: "README.md",
+                kind: { type: "update" },
+                diff: "+# Fixture",
+              },
+            ],
             status: "completed",
           },
           {
@@ -239,6 +246,14 @@ if (args[0] === "app-server" && listenIndex >= 0) {
       return;
     }
     if (request.method === "thread/start") {
+      if (config.unsupportedEphemeral && request.params?.ephemeral === true) {
+        write({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32602, message: "unknown field ephemeral" },
+        });
+        return;
+      }
       const role = roles[nextThread] ?? `extra-${String(nextThread + 1)}`;
       nextThread += 1;
       const thread = {
