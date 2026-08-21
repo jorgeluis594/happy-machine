@@ -1,0 +1,166 @@
+version: 1
+id: create-skill-poc
+initial_state: task_01
+
+states:
+  task_01:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 01, "Define the technology-independent contracts and error model", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_02
+      failed: task_01
+
+  task_02:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 02, "Serialize an observable conversation into safe Markdown", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_03
+      failed: task_02
+
+  task_03:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 03, "Build and validate the analysis and generation prompts", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_04
+      failed: task_03
+
+  task_04:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 04, "Create a deterministic fake Codex executable", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_05
+      failed: task_04
+
+  task_05:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 05, "Implement the private filesystem capture store", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_06
+      failed: task_05
+
+  task_06:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 06, "Implement exclusive create-skill ownership", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_07
+      failed: task_06
+
+  task_07:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 07, "Implement the demonstration capture stage", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_08
+      failed: task_07
+
+  task_08:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 08, "Implement isolated demonstration analysis", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_09
+      failed: task_08
+
+  task_09:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 09, "Implement the generation launch stage", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_10
+      failed: task_09
+
+  task_10:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 10, "Orchestrate the complete CreateSkill use case with fakes", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_11
+      failed: task_10
+
+  task_11:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 11, "Implement the Codex JSON-RPC control client", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_12
+      failed: task_11
+
+  task_12:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 12, "Implement Codex process and terminal lifecycle management", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_13
+      failed: task_12
+
+  task_13:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 13, "Map Codex conversations without leaking vendor data", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_14
+      failed: task_13
+
+  task_14:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 14, "Assemble the Codex app-server session adapter", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_15
+      failed: task_14
+
+  task_15:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 15, "Add the standalone create-skill CLI interaction", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_16
+      failed: task_15
+
+  task_16:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 16, "Wire the feature and prove the successful end-to-end flow", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_17
+      failed: task_16
+
+  task_17:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 17, "Harden failure, cancellation, privacy, and cleanup behavior", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Return completed only after the implementation and required validation succeed; otherwise return failed. Do not start work that belongs exclusively to a later task.
+    outcomes:
+      completed: task_18
+      failed: task_17
+
+  task_18:
+    type: agent
+    agent: create_skill_implementation
+    prompt: >-
+      /goal Implement Task 18, "Run release validation and the real Codex smoke test", from docs/superpowers/plans/2026-08-21-create-skill-poc.md. Work only on that task and satisfy all of its scope, acceptance criteria, and validation requirements. Read the referenced product design, technical design, and docs/ARCHITECTURE.md before editing. Treat earlier tasks as completed and preserve their changes. If any part of this task is underspecified, analyze the viable alternatives and autonomously choose the recommended option. Do not ask for assistance defining requirements, design, or implementation. Document the decision and continue. Run npm test, npm run typecheck, npm run lint, npm run build, and the required real-Codex manual smoke test. Return completed only after every automated check and the smoke test succeed; otherwise return failed.
+    outcomes:
+      completed: $succeeded
+      failed: task_18
