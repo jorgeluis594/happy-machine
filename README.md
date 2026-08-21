@@ -119,6 +119,8 @@ The planned configuration model will also make the executor selectable per proje
 
 The current Orca adapter launches the plain `codex` command. Although Happy Machine resolves and snapshots each state's agent and model, this adapter does not yet pass the resolved model to Codex. Effective model, permission, and sandbox behavior therefore come from your local Codex configuration. Other executors and agent runtimes are planned, not currently supported.
 
+The standalone `create-skill` command additionally requires a configured and authenticated Codex CLI compatible with the validated `0.148.0` baseline. It must expose `app-server` with a Unix listener, `app-server proxy`, and the remote TUI option. Happy Machine checks these capabilities before recording begins.
+
 ### Build the CLI from source
 
 Happy Machine is not currently published to npm. From this repository:
@@ -131,6 +133,18 @@ happy-machine help
 ```
 
 You can avoid the global link by invoking `node /path/to/happy-machine/dist/src/main.js` wherever the examples use `happy-machine`.
+
+### Create a Codex skill from a demonstration
+
+Run the standalone command from the project where you want to demonstrate a reusable workflow:
+
+```sh
+happy-machine create-skill --agent=codex
+```
+
+This command requires an interactive terminal. After you describe the workflow and consent to recording, Happy Machine opens Codex in the same terminal for the demonstration. Exit that Codex conversation normally when the demonstration is complete. Happy Machine then analyzes the captured conversation in an isolated session and automatically opens a fresh Codex session with skill generation already started.
+
+Happy Machine deletes the raw demonstration, analyzed temporary context, managed demonstration and analysis sessions, local socket, and operation lock. The skill-generation conversation is intentionally retained as normal Codex history, and Codex may ask for permission before writing the resulting skill outside the current project.
 
 ### Create a minimal project
 

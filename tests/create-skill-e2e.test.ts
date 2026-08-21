@@ -42,6 +42,7 @@ describe("create-skill successful end-to-end flow", () => {
     };
     const entryPoint = createProcessEntryPoint({
       codexExecutable: fakeCodex,
+      codexUpgradeControlTransport: (transport) => Promise.resolve(transport),
       environment: { ...process.env, FAKE_CODEX_LOG: logPath },
       temporaryDirectory: captureRoot,
       streams: {
@@ -85,34 +86,25 @@ describe("create-skill successful end-to-end flow", () => {
       threadId: "thread-demonstration",
     });
     expect(tuiStarts[0]).not.toHaveProperty("initialPrompt");
-    const resumeSpawns = log.filter(
+    const tuiSpawns = log.filter(
       (event) =>
         event.event === "spawn" &&
         Array.isArray(event.args) &&
-        event.args[0] === "resume" &&
+        event.args[0] === "--remote" &&
         !event.args.includes("--help"),
     );
-    expect(resumeSpawns.map((event) => event.args)).toEqual([
+    expect(tuiSpawns.map((event) => event.args)).toEqual([
+      ["--remote", expect.stringMatching(/^unix:\/\//)],
       [
-        "resume",
         "--remote",
         expect.stringMatching(/^unix:\/\//),
-        "thread-demonstration",
-      ],
-      [
-        "resume",
-        "--remote",
-        expect.stringMatching(/^unix:\/\//),
-        "thread-generation",
         tuiStarts[1]?.initialPrompt,
       ],
     ]);
 
     const threadStarts = protocolRequests(log, "thread/start");
-    expect(threadStarts).toHaveLength(3);
+    expect(threadStarts).toHaveLength(1);
     expect(threadStarts.map((request) => request.params)).toEqual([
-      { cwd: projectRoot, ephemeral: true },
-      { cwd: projectRoot, ephemeral: true },
       { cwd: projectRoot },
     ]);
 

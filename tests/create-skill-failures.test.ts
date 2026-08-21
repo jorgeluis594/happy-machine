@@ -67,6 +67,7 @@ async function createHarness(options: HarnessOptions = {}) {
   const entryPoint = createProcessEntryPoint({
     codexExecutable: fakeCodex,
     codexSpawnProcess: options.codexSpawnProcess,
+    codexUpgradeControlTransport: (transport) => Promise.resolve(transport),
     environment: {
       ...process.env,
       FAKE_CODEX_LOG: logPath,
@@ -238,7 +239,7 @@ describe.runIf(userId !== undefined)("create-skill terminal paths", () => {
     },
   );
 
-  it("deletes the generation thread when its TUI process cannot be spawned", async () => {
+  it("cleans up without deleting a vendor thread when the generation TUI cannot be spawned", async () => {
     const spawnWithGenerationFailure = generationSpawnFailure();
     const harness = await createHarness({
       codexSpawnProcess: spawnWithGenerationFailure,
@@ -253,7 +254,7 @@ describe.runIf(userId !== undefined)("create-skill terminal paths", () => {
       protocolRequests(log, "thread/delete").map(
         (request) => request.params?.threadId,
       ),
-    ).toContain("thread-generation");
+    ).not.toContain("thread-generation");
     expect(
       eventsNamed(log, "tui_started").some(
         (event) => event.role === "generation",
@@ -262,7 +263,7 @@ describe.runIf(userId !== undefined)("create-skill terminal paths", () => {
     await expect(readdir(harness.captureRoot)).resolves.toEqual([]);
   });
 
-  it("reports incomplete cleanup when a not-yet-started generation thread cannot be deleted", async () => {
+  it("does not attempt configured vendor deletion for an unregistered generation session", async () => {
     const harness = await createHarness({
       codexSpawnProcess: generationSpawnFailure(),
       config: { threadDeleteErrors: ["thread-generation"] },
@@ -274,12 +275,12 @@ describe.runIf(userId !== undefined)("create-skill terminal paths", () => {
     expect(harness.stderr.join("\n")).toContain(
       "[generation_start_failed] during generation",
     );
-    expect(harness.stderr.join("\n")).toContain("cleanup is incomplete");
+    expect(harness.stderr.join("\n")).toContain("cleanup completed");
     expect(
       protocolRequests(log, "thread/delete").map(
         (request) => request.params?.threadId,
       ),
-    ).toContain("thread-generation");
+    ).not.toContain("thread-generation");
     expect(
       eventsNamed(log, "tui_started").some(
         (event) => event.role === "generation",
@@ -570,7 +571,7 @@ function expectRuntimeShutdown(log: readonly Record<string, unknown>[]): void {
 
 function generationSpawnFailure(): CodexSpawn {
   return (executable, args, options) =>
-    args[0] === "resume" && args.length === 5
+    args[0] === "--remote" && args.length === 3
       ? spawn(path.join(os.tmpdir(), "missing-fake-codex"), [...args], options)
       : spawn(executable, [...args], options);
 }

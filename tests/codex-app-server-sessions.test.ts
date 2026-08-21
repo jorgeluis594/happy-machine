@@ -15,7 +15,6 @@ interface FixtureConfig {
   eventOrder?: "notifications-first" | "response-first";
   interleavedNotifications?: boolean;
   invalidAnalysis?: boolean;
-  unsupportedEphemeral?: boolean;
   jsonRpcErrors?: Record<
     string,
     { code?: number; message?: string; data?: unknown }
@@ -46,6 +45,7 @@ async function adapterFixture(
     },
     startupTimeoutMs: 2_000,
     shutdownTimeoutMs: 100,
+    upgradeControlTransport: (transport) => Promise.resolve(transport),
   });
   const adapter = new CodexAppServerSessions({
     runtime,
@@ -138,9 +138,9 @@ describe("CodexAppServerSessions", () => {
     await run.adapter.stop();
 
     expect([demonstration, analysis, generation]).toEqual([
-      "thread-demonstration",
-      "thread-analysis",
-      "thread-generation",
+      "happy-machine-session-1",
+      "happy-machine-session-2",
+      "happy-machine-session-3",
     ]);
     expect(conversation.turns).toHaveLength(1);
     expect(conversation.turns[0]?.items.map((item) => item.type)).toEqual([
@@ -172,13 +172,11 @@ describe("CodexAppServerSessions", () => {
     });
     const starts = protocolRequests(log, "thread/start");
     expect(starts.map((request) => request.params)).toEqual([
-      { cwd: run.root, ephemeral: true },
-      { cwd: run.root, ephemeral: true },
       { cwd: run.root },
     ]);
     const turnStart = protocolRequests(log, "turn/start")[0];
     expect(turnStart?.params).toEqual({
-      threadId: analysis,
+      threadId: "thread-analysis",
       input: [
         {
           type: "text",
@@ -200,17 +198,24 @@ describe("CodexAppServerSessions", () => {
     const deletes = protocolRequests(log, "thread/delete").map(
       (request) => (request.params as { threadId: string }).threadId,
     );
-    expect(deletes).toEqual([demonstration, analysis]);
-    expect(deletes).not.toContain(generation);
+    expect(deletes).toEqual(["thread-demonstration", "thread-analysis"]);
+    expect(deletes).not.toContain("thread-generation");
   });
 
-  it("falls back from unsupported ephemeral creation to managed deletion", async () => {
-    const run = await adapterFixture({ unsupportedEphemeral: true });
+  it("creates managed non-interactive sessions lazily and deletes them explicitly", async () => {
+    const run = await adapterFixture();
     await run.adapter.start();
 
     const session = await run.adapter.createSession({
       currentDirectory: run.root,
       retention: "managed",
+    });
+    await run.adapter.runTurn(session, {
+      prompt: "Analyze the demonstration",
+      filesystem: "read-only",
+      network: false,
+      expectedResult: "markdown",
+      readableResources: [],
     });
     await run.adapter.disposeSession(session);
     await run.adapter.stop();
@@ -218,7 +223,7 @@ describe("CodexAppServerSessions", () => {
     const log = await callLog(run.logPath);
     expect(
       protocolRequests(log, "thread/start").map((request) => request.params),
-    ).toEqual([{ cwd: run.root, ephemeral: true }, { cwd: run.root }]);
+    ).toEqual([{ cwd: run.root }]);
     expect(protocolRequests(log, "thread/delete")).toHaveLength(1);
   });
 
@@ -229,7 +234,6 @@ describe("CodexAppServerSessions", () => {
       currentDirectory: run.root,
       retention: "managed",
     });
-
     let thrown: unknown;
     try {
       await run.adapter.runTurn(session, {
@@ -264,6 +268,7 @@ describe("CodexAppServerSessions", () => {
       currentDirectory: run.root,
       retention: "managed",
     });
+    await run.adapter.runInteractive(session);
 
     let thrown: unknown;
     try {

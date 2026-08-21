@@ -8,6 +8,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Readable, Writable } from "node:stream";
 
 import type { InteractiveExit } from "../../../../ports/agent-sessions.js";
+import { upgradeCodexWebSocketControlTransport } from "./codex-websocket-control-transport.js";
 
 type RuntimeState = "idle" | "starting" | "started" | "stopping";
 type ProcessRole = "app-server" | "proxy" | "remote TUI";
@@ -18,7 +19,6 @@ export interface CodexControlTransport {
 }
 
 export interface CodexTuiRequest {
-  threadId: string;
   currentDirectory: string;
   initialPrompt?: string;
   signal?: AbortSignal;
@@ -39,7 +39,13 @@ export interface CodexProcessRuntimeOptions {
   shutdownTimeoutMs?: number;
   spawnProcess?: CodexSpawn;
   connectSocket?: (socketPath: string) => Socket;
+  upgradeControlTransport?: CodexControlTransportUpgrade;
 }
+
+export type CodexControlTransportUpgrade = (
+  transport: CodexControlTransport,
+  timeoutMs: number,
+) => Promise<CodexControlTransport>;
 
 export type CodexProcessRuntimeErrorCode =
   | "unavailable"
@@ -104,8 +110,8 @@ const compatibilityProbes: readonly CompatibilityProbe[] = [
     requiredPatterns: [/--sock\b/],
   },
   {
-    label: "remote resume",
-    args: ["resume", "--help"],
+    label: "remote TUI",
+    args: ["--help"],
     requiredPatterns: [/--remote\b/],
   },
 ];
@@ -120,6 +126,7 @@ export class CodexProcessRuntime {
   private readonly shutdownTimeoutMs: number;
   private readonly spawnProcess: CodexSpawn;
   private readonly connectSocket: (socketPath: string) => Socket;
+  private readonly upgradeControlTransport: CodexControlTransportUpgrade;
   private readonly activeTuis = new Set<ManagedChild>();
   private state: RuntimeState = "idle";
   private appServer?: ManagedChild;
@@ -143,6 +150,10 @@ export class CodexProcessRuntime {
     this.spawnProcess = options.spawnProcess ?? spawn;
     this.connectSocket =
       options.connectSocket ?? ((socketPath) => createConnection(socketPath));
+    this.upgradeControlTransport =
+      options.upgradeControlTransport ??
+      ((transport, timeoutMs) =>
+        upgradeCodexWebSocketControlTransport({ transport, timeoutMs }));
   }
 
   async checkCompatibility(): Promise<void> {
@@ -192,11 +203,15 @@ export class CodexProcessRuntime {
         );
       }
 
+      const controlTransport = await this.upgradeControlTransport(
+        {
+          readable: this.proxy.child.stdout,
+          writable: this.proxy.child.stdin,
+        },
+        this.startupTimeoutMs,
+      );
       this.state = "started";
-      return {
-        readable: this.proxy.child.stdout,
-        writable: this.proxy.child.stdin,
-      };
+      return controlTransport;
     } catch (cause) {
       const startupError = normalizeRuntimeError(
         cause,
@@ -221,11 +236,10 @@ export class CodexProcessRuntime {
 
   async runTui(request: CodexTuiRequest): Promise<InteractiveExit> {
     if (this.state !== "started") throw this.invalidState("run a remote TUI");
-    requireNonEmpty(request.threadId, "threadId");
     requireNonEmpty(request.currentDirectory, "currentDirectory");
     if (request.signal?.aborted) return { reason: "interrupted" };
 
-    const args = ["resume", "--remote", this.endpoint, request.threadId];
+    const args = ["--remote", this.endpoint];
     if (request.initialPrompt !== undefined) args.push(request.initialPrompt);
     const managed = this.spawnManaged("remote TUI", args, {
       cwd: request.currentDirectory,

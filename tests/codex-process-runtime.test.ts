@@ -54,6 +54,7 @@ async function runtimeFixture(
     },
     startupTimeoutMs: 2_000,
     shutdownTimeoutMs: 100,
+    upgradeControlTransport: (transport) => Promise.resolve(transport),
     ...overrides,
   });
   runtimes.add(runtime);
@@ -116,7 +117,7 @@ describe("CodexProcessRuntime", () => {
     expect(spawns.map((event) => event.args)).toEqual([
       ["app-server", "--help"],
       ["app-server", "proxy", "--help"],
-      ["resume", "--help"],
+      ["--help"],
     ]);
     expect(spawnOptions).toHaveLength(3);
     expect(spawnOptions.every((options) => options.shell === false)).toBe(true);
@@ -227,7 +228,6 @@ describe("CodexProcessRuntime", () => {
 
     await expect(
       run.runtime.runTui({
-        threadId: "thread-demonstration",
         currentDirectory: run.root,
       }),
     ).resolves.toEqual(expected);
@@ -248,7 +248,6 @@ describe("CodexProcessRuntime", () => {
       "Read /tmp/context file.md; $(touch /tmp/must-not-run) && create the skill";
 
     await run.runtime.runTui({
-      threadId: "thread-generation; echo injected",
       currentDirectory: run.root,
       initialPrompt: prompt,
     });
@@ -256,17 +255,15 @@ describe("CodexProcessRuntime", () => {
     const tuiSpawn = spawnCalls.at(-1);
     expect(tuiSpawn?.options).toMatchObject({ shell: false, stdio: "inherit" });
     expect(tuiSpawn?.args).toEqual([
-      "resume",
       "--remote",
       `unix://${run.socketPath}`,
-      "thread-generation; echo injected",
       prompt,
     ]);
     const tuiLog = (await callLog(run.logPath)).find(
       (event) => event.event === "tui_started",
     );
     expect(tuiLog).toMatchObject({
-      threadId: "thread-generation; echo injected",
+      threadId: "thread-generation",
       initialPrompt: prompt,
     });
   });
@@ -278,7 +275,6 @@ describe("CodexProcessRuntime", () => {
     await run.runtime.start();
     const abort = new AbortController();
     const tui = run.runtime.runTui({
-      threadId: "thread-demonstration",
       currentDirectory: run.root,
       signal: abort.signal,
     });
@@ -314,7 +310,6 @@ describe("CodexProcessRuntime", () => {
     );
     await run.runtime.start();
     const tui = run.runtime.runTui({
-      threadId: "thread-demonstration",
       currentDirectory: run.root,
     });
     await waitForLog(
@@ -347,7 +342,7 @@ describe("CodexProcessRuntime", () => {
     const secretPrompt = "SECRET-WORKFLOW-CONTENT";
     const spawnError = new Error("spawn failed safely");
     const failingSpawn: CodexSpawn = (_executable, args, options) => {
-      if (args[0] === "resume") throw spawnError;
+      if (args[0] === "--remote") throw spawnError;
       return spawn(fixture, args, options);
     };
     const isolated = await runtimeFixture({}, { spawnProcess: failingSpawn });
@@ -356,7 +351,6 @@ describe("CodexProcessRuntime", () => {
     let thrown: unknown;
     try {
       await isolated.runtime.runTui({
-        threadId: "thread-generation",
         currentDirectory: isolated.root,
         initialPrompt: secretPrompt,
       });

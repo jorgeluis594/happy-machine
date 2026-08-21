@@ -23,6 +23,7 @@ import { CliDiagnostics } from "./infrastructure/inbound/cli/debug-presenter.js"
 import { CodexAppServerSessions } from "./infrastructure/outbound/agent-sessions/codex-app-server/codex-app-server-sessions.js";
 import {
   CodexProcessRuntime,
+  type CodexControlTransportUpgrade,
   type CodexSpawn,
 } from "./infrastructure/outbound/agent-sessions/codex-app-server/codex-process-runtime.js";
 import { FilesystemExclusiveOperationLock } from "./infrastructure/outbound/exclusive-operation-lock/filesystem/filesystem-exclusive-operation-lock.js";
@@ -49,6 +50,7 @@ export interface ProcessEntryPointOptions {
   now?: () => Date;
   randomId?: () => string;
   codexSpawnProcess?: CodexSpawn;
+  codexUpgradeControlTransport?: CodexControlTransportUpgrade;
   streams?: {
     stdout(message: string): void;
     stderr(message: string): void;
@@ -158,6 +160,7 @@ function createCli(
     currentDirectory,
     environment,
     spawnProcess: options.codexSpawnProcess,
+    upgradeControlTransport: options.codexUpgradeControlTransport,
   });
   const sessions = new CodexAppServerSessions({ runtime });
   const createSkill = new CreateSkill(

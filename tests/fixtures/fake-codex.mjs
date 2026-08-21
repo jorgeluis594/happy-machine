@@ -107,7 +107,7 @@ if (args.includes("--help") || args.includes("-h")) {
         ? "Usage: codex app-server --listen <URI>\nCommands: proxy\n"
         : operation === "resume"
           ? "Usage: codex resume --remote <URI> <THREAD_ID> [PROMPT]\n"
-          : "Usage: codex <COMMAND>\nCommands: app-server, resume\n";
+          : "Usage: codex [OPTIONS] [PROMPT]\nOptions: --remote <URI>\nCommands: app-server, resume\n";
   process.stdout.write(help);
   process.exit(0);
 }
@@ -206,6 +206,42 @@ if (args[0] === "app-server" && listenIndex >= 0) {
     method,
     params,
   });
+  const observedTuiThreads = new Set();
+  const tuiWatcher = setInterval(() => {
+    let entries;
+    try {
+      entries = readFileSync(logPath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (
+        entry.event !== "tui_started" ||
+        typeof entry.threadId !== "string" ||
+        observedTuiThreads.has(entry.threadId)
+      )
+        continue;
+      observedTuiThreads.add(entry.threadId);
+      const thread = {
+        id: entry.threadId,
+        ephemeral: false,
+        path: `/fake/${String(entry.role)}.jsonl`,
+        turns: [],
+      };
+      threads.set(thread.id, thread);
+      write(notification("thread/started", { thread }));
+    }
+  }, 5);
   const conversationFor = (threadId) => {
     if (config.emptyConversation) return [];
     const sentinel = config.captureSentinel;
@@ -314,7 +350,10 @@ if (args[0] === "app-server" && listenIndex >= 0) {
         });
         return;
       }
-      const role = roles[nextThread] ?? `extra-${String(nextThread + 1)}`;
+      const role =
+        threads.has("thread-demonstration") && !threads.has("thread-analysis")
+          ? "analysis"
+          : (roles[nextThread] ?? `extra-${String(nextThread + 1)}`);
       nextThread += 1;
       const thread = {
         id: `thread-${role}`,
@@ -404,7 +443,7 @@ if (args[0] === "app-server" && listenIndex >= 0) {
     });
   };
 
-  installShutdown("proxy");
+  installShutdown("proxy", () => clearInterval(tuiWatcher));
   const input = readline.createInterface({ input: process.stdin });
   input.on("line", (line) => {
     log("protocol_in_raw", { line });
@@ -427,11 +466,11 @@ if (args[0] === "app-server" && listenIndex >= 0) {
   });
   log("ready", { role: "proxy" });
   sendReady("proxy");
-} else if (args[0] === "resume") {
+} else if (args[0] === "--remote") {
   const remoteIndex = args.indexOf("--remote");
-  const threadId = remoteIndex < 0 ? undefined : args[remoteIndex + 2];
-  const initialPrompt = remoteIndex < 0 ? undefined : args[remoteIndex + 3];
+  const initialPrompt = remoteIndex < 0 ? undefined : args[remoteIndex + 2];
   const role = initialPrompt === undefined ? "demonstration" : "generation";
+  const threadId = `thread-${role}`;
   const contextReference =
     role === "generation"
       ? parseGenerationContextReference(initialPrompt)
@@ -452,7 +491,8 @@ if (args[0] === "app-server" && listenIndex >= 0) {
         }),
   });
   if (lifecycleFor(role).exit !== "signal") installShutdown(role);
-  exitFromLifecycle(role);
+  if (lifecycleFor(role).exit === "wait") exitFromLifecycle(role);
+  else setTimeout(() => exitFromLifecycle(role), 25);
 } else {
   process.stderr.write(`unexpected fake Codex invocation: ${args.join(" ")}\n`);
   process.exit(2);

@@ -93,14 +93,16 @@ The process topology is:
 Happy Machine
 ├── codex app-server --listen unix://<socket>
 ├── codex app-server proxy --sock <socket>
-│     \-- JSONL control connection used by Happy Machine
-├── codex resume --remote unix://<socket> <demonstration-thread-id>
-└── codex resume --remote unix://<socket> <generation-thread-id> <prompt>
+│     \-- WebSocket-upgraded JSON-RPC control connection used by Happy Machine
+├── codex --remote unix://<socket>
+└── codex --remote unix://<socket> <generation-prompt>
 ```
 
 Happy Machine launches all processes without a shell and passes every argument as a separate spawn argument. The app-server process and control connection live for the complete `create-skill` flow.
 
-The control client sends `initialize`, waits for its response, and then sends `initialized` before any other JSON-RPC method. It correlates responses by request ID and consumes thread, turn, and item notifications independently of response order.
+The Unix app-server endpoint accepts a standard HTTP WebSocket upgrade. The proxy only relays bytes, so the adapter performs the upgrade and WebSocket framing before its JSON-RPC client sends `initialize`, waits for its response, and sends `initialized`. The client correlates responses by request ID and consumes thread, turn, and item notifications independently of response order.
+
+Codex `0.148.0` cannot resume a controller-created thread before that thread has a rollout. Interactive sessions therefore begin as fresh remote TUIs. The adapter observes `thread/started` on the shared control connection and binds Happy Machine's logical session ID to the vendor thread ID. Non-interactive analysis creates its thread lazily through `thread/start`.
 
 ## End-to-End Sequence
 
@@ -119,7 +121,7 @@ The control client sends `initialize`, waits for its response, and then sends `i
 13. Observable items are serialized chronologically to `demonstration.md`.
 14. `AnalyzeDemonstration` creates a fresh, non-interactive analysis session and starts one read-only turn whose prompt references `demonstration.md`.
 15. The adapter waits for `turn/completed`, validates the structured response, and writes the returned Markdown to `skill-context.md`.
-16. The raw Markdown and demonstration thread are deleted before generation begins. The analysis session is disposed or allowed to disappear with the runtime when implemented as an ephemeral thread.
+16. The raw Markdown and managed demonstration and analysis threads are explicitly deleted before generation begins.
 17. `LaunchSkillGeneration` creates a fresh persistent session and launches the second TUI with one initial prompt referencing `skill-context.md`.
 18. Happy Machine waits only for the generation TUI process lifecycle. It sends no more messages and does not inspect the skill result.
 19. On every terminal path, cleanup removes temporary artifacts, stops app-server, removes the socket, and releases the lock.
@@ -355,7 +357,7 @@ The filesystem implementation obtains ownership atomically. A second active invo
 - `codex-conversation-mapper.ts` converts Codex thread, turn, and item representations into `AgentConversation`.
 - `codex-app-server-errors.ts` converts missing capabilities, failed turns, protocol failures, and process exits into port errors.
 
-The demonstration thread is managed and explicitly deleted after analysis. The analysis thread should be ephemeral when the installed Codex version supports the required remote lifecycle; otherwise it is a managed persisted thread that is explicitly deleted. The generation thread is persistent.
+The demonstration and analysis threads are managed persisted threads and are explicitly deleted after analysis. The generation thread is persistent. Interactive thread IDs come from `thread/started`; the controller creates only the non-interactive analysis thread directly.
 
 The analysis turn uses Codex's turn-scoped structured output internally. Its final assistant message must conform to an object with one non-empty `markdown` string. The JSON Schema is adapter-local; Application receives only the extracted content.
 
@@ -583,14 +585,14 @@ Before capture, the adapter verifies:
 - the `codex` executable is available;
 - `app-server` accepts a Unix socket listener;
 - the app-server proxy can connect to that socket;
-- `resume --remote` is available; and
+- the root remote TUI option, `codex --remote`, is available; and
 - the expected CLI argument forms are present.
 
 After consent and runtime startup, the adapter verifies:
 
 - the JSON-RPC initialization handshake;
-- fresh thread creation;
-- thread resume/read/delete behavior needed by managed sessions;
+- fresh interactive thread notification and controller thread creation;
+- thread read/delete behavior needed by managed sessions;
 - turn start and completion notifications; and
 - that the installed protocol schema exposes the turn-scoped structured-output field required by the analyzer.
 
@@ -599,6 +601,8 @@ The actual structured response is validated when the analysis turn runs; compati
 Runtime handshake or capability failure after consent still occurs before a demonstration thread is opened. It triggers full cleanup and asks the user to start a new attempt after fixing Codex.
 
 Codex app-server and some transports are documented as experimental. All protocol assumptions remain isolated in the Codex adapter, and the command fails clearly on unsupported versions rather than falling back to hooks or transcript scraping.
+
+The release smoke test against Codex CLI `0.148.0` established the concrete baseline above: the Unix proxy requires WebSocket framing, empty controller-created threads cannot be resumed by the TUI, and a local WebSocket close is required so control-client shutdown does not wait indefinitely for the remote peer.
 
 ## Test Strategy
 

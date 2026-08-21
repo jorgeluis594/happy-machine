@@ -13,7 +13,6 @@ import {
 import {
   cleanupError,
   CodexAppServerSessionsError,
-  isUnsupportedEphemeralError,
   mapCompatibilityError,
   mapStartupError,
   sessionOperationError,
@@ -32,11 +31,11 @@ import {
 } from "./codex-process-runtime.js";
 
 type AdapterState = "idle" | "started" | "stopping";
-type EphemeralSupport = "unknown" | "supported" | "unsupported";
 
 interface SessionRecord {
   currentDirectory: string;
   retention: "managed" | "persistent";
+  agentSessionId?: string;
 }
 
 export interface CodexAppServerSessionsOptions {
@@ -68,7 +67,7 @@ export class CodexAppServerSessions implements AgentSessions {
   private state: AdapterState = "idle";
   private client?: CodexJsonRpcClient;
   private stopping?: Promise<void>;
-  private ephemeralSupport: EphemeralSupport = "unknown";
+  private nextSessionId = 0;
 
   constructor(options: CodexAppServerSessionsOptions) {
     this.runtime = options.runtime;
@@ -140,52 +139,73 @@ export class CodexAppServerSessions implements AgentSessions {
     }
   }
 
-  async createSession(options: AgentSessionOptions): Promise<AgentSessionId> {
-    const client = this.requireClient("create a session");
-    requireNonEmpty(options.currentDirectory, "currentDirectory");
-
-    let result: CodexJsonRpcValue;
-    try {
-      result = await this.startThread(client, options);
-    } catch (error) {
-      throw sessionOperationError("create a session", error);
-    }
-
-    const thread = requireRecord(result, "thread/start result").thread;
-    const id = requireIdentifier(
-      requireRecord(thread, "thread/start result.thread").id,
-      "thread/start result.thread.id",
-    );
-    if (this.sessions.has(id)) {
-      throw new CodexAppServerSessionsError(
-        "protocol_error",
-        "The Codex app-server returned a duplicate session identifier.",
-      );
-    }
-    this.sessions.set(id, {
-      currentDirectory: options.currentDirectory,
-      retention: options.retention,
+  createSession(options: AgentSessionOptions): Promise<AgentSessionId> {
+    return Promise.resolve().then(() => {
+      this.requireClient("create a session");
+      requireNonEmpty(options.currentDirectory, "currentDirectory");
+      const id = `happy-machine-session-${String(++this.nextSessionId)}`;
+      this.sessions.set(id, {
+        currentDirectory: options.currentDirectory,
+        retention: options.retention,
+      });
+      return id;
     });
-    return id;
   }
 
   async runInteractive(
     sessionId: AgentSessionId,
     request: AgentInteractiveRequest = {},
   ): Promise<InteractiveExit> {
+    const client = this.requireClient("run an interactive session");
     const session = this.requireSession(
       sessionId,
       "run an interactive session",
     );
+    if (request.signal?.aborted) return { reason: "interrupted" };
+    if (session.agentSessionId !== undefined) {
+      throw new CodexAppServerSessionsError(
+        "invalid_state",
+        "The Codex app-server cannot start the same interactive session twice.",
+      );
+    }
+
+    let resolveStarted!: (agentSessionId: string) => void;
+    let rejectStarted!: (error: Error) => void;
+    const started = new Promise<string>((resolve, reject) => {
+      resolveStarted = resolve;
+      rejectStarted = reject;
+    });
+    const unsubscribe = client.onNotification(
+      "thread/started",
+      (notification) => {
+        try {
+          resolveStarted(parseStartedThreadId(notification.params));
+        } catch (error) {
+          rejectStarted(normalizeError(error));
+        }
+      },
+    );
     try {
-      return await this.runtime.runTui({
-        threadId: sessionId,
+      const interactive = this.runtime.runTui({
         currentDirectory: session.currentDirectory,
         initialPrompt: request.initialPrompt,
         signal: request.signal,
       });
+      const agentSessionId = await Promise.race([
+        started,
+        interactive.then(() => {
+          throw new CodexAppServerSessionsError(
+            "protocol_error",
+            "The Codex remote TUI ended before registering its session.",
+          );
+        }),
+      ]);
+      session.agentSessionId = agentSessionId;
+      return await interactive;
     } catch (error) {
       throw sessionOperationError("run an interactive session", error);
+    } finally {
+      unsubscribe();
     }
   }
 
@@ -195,13 +215,15 @@ export class CodexAppServerSessions implements AgentSessions {
   ): Promise<AgentTurnResult> {
     const client = this.requireClient("run a turn");
     const session = this.requireSession(sessionId, "run a turn");
+    let agentSessionId: string | undefined;
     let turnId: string | undefined;
 
     try {
+      agentSessionId = await this.ensureAgentSession(client, session);
       const started = await client.request(
         "turn/start",
         {
-          threadId: sessionId,
+          threadId: agentSessionId,
           input: [{ type: "text", text: request.prompt }],
           cwd: session.currentDirectory,
           approvalPolicy: "never",
@@ -224,14 +246,16 @@ export class CodexAppServerSessions implements AgentSessions {
         ).id,
         "turn/start result.turn.id",
       );
-      const completion = await client.waitForTurnCompletion(sessionId, turnId, {
-        signal: request.signal,
-      });
+      const completion = await client.waitForTurnCompletion(
+        agentSessionId,
+        turnId,
+        { signal: request.signal },
+      );
       return mapTurnResult(completion);
     } catch (error) {
       if (isAbortError(error, request.signal)) {
-        if (turnId !== undefined)
-          await this.interruptTurn(client, sessionId, turnId);
+        if (agentSessionId !== undefined && turnId !== undefined)
+          await this.interruptTurn(client, agentSessionId, turnId);
         return { status: "interrupted" };
       }
       throw sessionOperationError("complete the analysis turn", error);
@@ -242,10 +266,11 @@ export class CodexAppServerSessions implements AgentSessions {
     sessionId: AgentSessionId,
   ): Promise<AgentConversation> {
     const client = this.requireClient("read a conversation");
-    this.requireSession(sessionId, "read a conversation");
+    const session = this.requireSession(sessionId, "read a conversation");
     try {
+      const agentSessionId = requireBoundAgentSessionId(session);
       const result = await client.request("thread/read", {
-        threadId: sessionId,
+        threadId: agentSessionId,
         includeTurns: true,
       });
       return mapCodexConversation(
@@ -259,9 +284,15 @@ export class CodexAppServerSessions implements AgentSessions {
   async disposeSession(sessionId: AgentSessionId): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session === undefined) return;
+    if (session.agentSessionId === undefined) {
+      this.sessions.delete(sessionId);
+      return;
+    }
     const client = this.requireClient("dispose a session");
     try {
-      await client.request("thread/delete", { threadId: sessionId });
+      await client.request("thread/delete", {
+        threadId: session.agentSessionId,
+      });
       this.sessions.delete(sessionId);
     } catch (error) {
       throw sessionOperationError("dispose a session", error);
@@ -280,33 +311,34 @@ export class CodexAppServerSessions implements AgentSessions {
       this.state = "idle";
       this.client = undefined;
       this.sessions.clear();
-      this.ephemeralSupport = "unknown";
     }
   }
 
-  private async startThread(
+  private async ensureAgentSession(
     client: CodexJsonRpcClient,
-    options: AgentSessionOptions,
-  ): Promise<CodexJsonRpcValue> {
-    if (options.retention === "persistent") {
-      return client.request("thread/start", { cwd: options.currentDirectory });
+    session: SessionRecord,
+  ): Promise<string> {
+    if (session.agentSessionId !== undefined) return session.agentSessionId;
+    const result = await client.request("thread/start", {
+      cwd: session.currentDirectory,
+    });
+    const thread = requireRecord(result, "thread/start result").thread;
+    const agentSessionId = requireIdentifier(
+      requireRecord(thread, "thread/start result.thread").id,
+      "thread/start result.thread.id",
+    );
+    if (
+      [...this.sessions.values()].some(
+        (candidate) => candidate.agentSessionId === agentSessionId,
+      )
+    ) {
+      throw new CodexAppServerSessionsError(
+        "protocol_error",
+        "The Codex app-server returned a duplicate session identifier.",
+      );
     }
-    if (this.ephemeralSupport === "unsupported") {
-      return client.request("thread/start", { cwd: options.currentDirectory });
-    }
-
-    try {
-      const result = await client.request("thread/start", {
-        cwd: options.currentDirectory,
-        ephemeral: true,
-      });
-      this.ephemeralSupport = "supported";
-      return result;
-    } catch (error) {
-      if (!isUnsupportedEphemeralError(error)) throw error;
-      this.ephemeralSupport = "unsupported";
-      return client.request("thread/start", { cwd: options.currentDirectory });
-    }
+    session.agentSessionId = agentSessionId;
+    return agentSessionId;
   }
 
   private async interruptTurn(
@@ -326,11 +358,18 @@ export class CodexAppServerSessions implements AgentSessions {
     const client = this.client;
     if (client !== undefined) {
       const managedIds = [...this.sessions]
-        .filter(([, session]) => session.retention === "managed")
-        .map(([id]) => id);
-      for (const id of managedIds) {
+        .filter(
+          ([, session]) =>
+            session.retention === "managed" &&
+            session.agentSessionId !== undefined,
+        )
+        .map(([id, session]) => ({
+          id,
+          agentSessionId: session.agentSessionId!,
+        }));
+      for (const { id, agentSessionId } of managedIds) {
         try {
-          await client.request("thread/delete", { threadId: id });
+          await client.request("thread/delete", { threadId: agentSessionId });
           this.sessions.delete(id);
         } catch (error) {
           errors.push(error);
@@ -477,6 +516,25 @@ function requireIdentifier(value: unknown, path: string): string {
       `The Codex app-server returned a missing identifier at ${path}.`,
     );
   return value;
+}
+
+function parseStartedThreadId(value: unknown): string {
+  const params = requireRecord(value, "thread/started params");
+  const thread = requireRecord(params.thread, "thread/started params.thread");
+  return requireIdentifier(thread.id, "thread/started params.thread.id");
+}
+
+function requireBoundAgentSessionId(session: SessionRecord): string {
+  if (session.agentSessionId === undefined)
+    throw new CodexAppServerSessionsError(
+      "invalid_state",
+      "The Codex app-server session has not been started.",
+    );
+  return session.agentSessionId;
+}
+
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function requireNonEmpty(value: string, label: string): void {

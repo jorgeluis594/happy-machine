@@ -365,10 +365,9 @@ describe("fake Codex executable", () => {
       { code: null, signal: "SIGTERM" },
     ],
   ] as const)("models a %s TUI exit", async (_label, lifecycle, expected) => {
-    const run = await startFixture(
-      ["resume", "--remote", "unix:///tmp/fake.sock", "thread-demonstration"],
-      { lifecycle: { demonstration: lifecycle } },
-    );
+    const run = await startFixture(["--remote", "unix:///tmp/fake.sock"], {
+      lifecycle: { demonstration: lifecycle },
+    });
     await expect(waitForExit(run.child)).resolves.toEqual(expected);
     const log = await callLog(run.logPath);
     expect(log).toContainEqual(
@@ -383,10 +382,8 @@ describe("fake Codex executable", () => {
   it("records a generation prompt and delays process shutdown deterministically", async () => {
     const run = await startFixture(
       [
-        "resume",
         "--remote",
         "unix:///tmp/fake.sock",
-        "thread-generation",
         "Create the reusable skill from /tmp/skill-context.md",
       ],
       {
