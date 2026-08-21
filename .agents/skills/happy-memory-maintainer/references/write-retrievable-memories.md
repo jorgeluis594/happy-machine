@@ -8,7 +8,8 @@ Assume that recall:
 
 - Matches only the current active title and content.
 - Splits queries into literal whitespace-delimited terms joined with AND.
-- Does not infer meaning, expand synonyms, or search tags and attributes.
+- Does not infer meaning or expand synonyms; exact and tokenized tag filters
+  constrain candidates but cannot satisfy a title or content term.
 - Weights title text more strongly than content text.
 - Uses accurate importance and confidence as secondary ranking signals.
 - Returns content verbatim and omits the version required for mutation.

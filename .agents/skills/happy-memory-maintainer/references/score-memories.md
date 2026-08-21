@@ -2,6 +2,8 @@
 
 Assign required importance and confidence values independently after defining the atomic memory's current title and content.
 
+Score only after the candidate satisfies the durable-memory boundary. Importance and confidence describe a qualifying memory; neither is an admission threshold, and a low value does not independently justify discarding it.
+
 ## Assign Importance
 
 Measure the future impact of forgetting the information:
@@ -27,6 +29,7 @@ Measure the reliability and current validity of the stored assertion:
 - Judge importance by the consequence of forgetting, not by evidence quantity.
 - Judge confidence by evidence and currency, not by impact.
 - Lower confidence for ambiguity without automatically lowering importance.
+- Make uncertainty explicit in the stored assertion; low confidence does not make unsupported speculation presented as fact acceptable.
 - Split content when its parts need different scores.
 - Re-score on update only when evidence, currency, or future impact changes.
 - Score the rewritten current assertion when marking previous knowledge obsolete.

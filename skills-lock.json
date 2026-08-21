@@ -11,13 +11,13 @@
       "source": "jorgeluis594/happy-memory",
       "sourceType": "github",
       "skillPath": "skills/happy-memory-maintainer/SKILL.md",
-      "computedHash": "e33b6f46816a05532670408411be9d243320b73fb2a445e4025c3d174b4973d2"
+      "computedHash": "abf346bcabda351f4392262feed701ee6b617b11178840ebd388f64e868d578b"
     },
     "happy-memory-recall": {
       "source": "jorgeluis594/happy-memory",
       "sourceType": "github",
       "skillPath": "skills/happy-memory-recall/SKILL.md",
-      "computedHash": "5277ba049bcf9b520e15225f31649f8f8dd5886c87413175c06765c4ba8ea4d4"
+      "computedHash": "580dec9d6756d4bf361aff385c6b3f1a1cc96f221b8ac0d4a97e9f14fc5f75f1"
     }
   }
 }

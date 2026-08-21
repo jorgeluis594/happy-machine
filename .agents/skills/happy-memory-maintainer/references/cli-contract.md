@@ -10,7 +10,7 @@ Search related active memories:
 happy-memory search "<query>" [filters] --limit 10
 ```
 
-Use one non-empty textual query. Search matches current titles and content, joins terms with AND, and does not infer synonyms. Add `--type`, repeated `--tag`, `--min-importance`, or `--min-confidence` only when the maintenance case requires them.
+Use one non-empty textual query. Search matches current titles and content, joins terms with AND, and does not infer synonyms. Add `--type`, repeated `--tag`, `--specific-tags`, `--min-importance`, or `--min-confidence` only when the maintenance case requires them.
 
 Search results do not contain the current version. Before updating or deleting, run:
 

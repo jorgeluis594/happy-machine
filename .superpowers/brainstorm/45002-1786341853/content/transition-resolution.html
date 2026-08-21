@@ -1,0 +1,73 @@
+<style>
+  .pipeline { display:grid; grid-template-columns:1fr 48px 1.2fr 48px 1fr; align-items:center; gap:9px; margin:24px 0; }
+  .box { border:2px solid #7c6cf2; border-radius:14px; padding:18px; background:#f5f3ff; color:#332b75; text-align:center; }
+  .box.result { border-color:#d48612; background:#fff7e8; color:#754700; }
+  .box.engine { border-color:#1c8a68; background:#eafbf4; color:#105943; }
+  .arrow { text-align:center; color:var(--text-secondary); font-size:24px; font-weight:800; }
+  .graph { display:grid; grid-template-columns:1fr 1.3fr 1fr; gap:16px; align-items:center; margin-top:24px; }
+  .state { border:2px solid #7c6cf2; border-radius:12px; padding:15px; text-align:center; background:var(--surface); font-weight:700; }
+  .routes { display:flex; flex-direction:column; gap:12px; }
+  .route { border:1px solid var(--border); border-radius:10px; padding:12px; background:var(--surface-secondary); text-align:center; }
+  .route strong { color:#1c8a68; }
+  .code { margin-top:24px; display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  pre { margin:0; padding:16px; border-radius:12px; background:#151722; color:#e8eaf6; font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:auto; }
+  .rules { margin-top:20px; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .rule { border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--surface); font-size:13px; }
+  .rule b { display:block; margin-bottom:5px; }
+  @media(max-width:780px){.pipeline,.graph,.code,.rules{grid-template-columns:1fr}.pipeline>.arrow{transform:rotate(90deg)}}
+</style>
+
+<h2>Cómo un estado determina la siguiente ruta</h2>
+<p class="subtitle">El estado emite un outcome; la configuración lo traduce a una transición; el motor agenda el destino.</p>
+
+<div class="pipeline">
+  <div class="box"><strong>1. Estado evaluar</strong><br><small>Orca ejecuta la operación</small></div>
+  <div class="arrow">→</div>
+  <div class="box result"><strong>2. Resultado</strong><br><code>outcome: needs_revision</code><br><small>+ data + artefactos</small></div>
+  <div class="arrow">→</div>
+  <div class="box engine"><strong>3. Motor</strong><br><small>persiste y busca una transición compatible</small></div>
+</div>
+
+<div class="graph">
+  <div class="state">evaluar</div>
+  <div class="routes">
+    <div class="route"><strong>approved</strong> → transición hacia adelante</div>
+    <div class="route"><strong>needs_revision</strong> → transición hacia atrás</div>
+    <div class="route"><strong>blocked</strong> → estado de espera</div>
+  </div>
+  <div>
+    <div class="state" style="margin-bottom:12px">publicar</div>
+    <div class="state" style="margin-bottom:12px">redactar otra vez</div>
+    <div class="state">esperar humano</div>
+  </div>
+</div>
+
+<div class="code">
+  <pre># Definición del estado
+states:
+  evaluar:
+    operation:
+      agent: reviewer
+    outputs:
+      outcomes:
+        - approved
+        - needs_revision
+        - blocked</pre>
+  <pre># Rutas permitidas
+transitions:
+  - from: evaluar
+    on: approved
+    to: publicar
+  - from: evaluar
+    on: needs_revision
+    to: redactar
+  - from: evaluar
+    on: blocked
+    to: esperar_aprobacion</pre>
+</div>
+
+<div class="rules">
+  <div class="rule"><b>Una coincidencia</b>El motor elige exactamente una transición normal.</div>
+  <div class="rule"><b>Ninguna coincidencia</b>La ejecución se detiene con un error de transición no contemplada.</div>
+  <div class="rule"><b>Varias coincidencias</b>La definición es ambigua y debe rechazarse o aplicar prioridad explícita.</div>
+</div>
