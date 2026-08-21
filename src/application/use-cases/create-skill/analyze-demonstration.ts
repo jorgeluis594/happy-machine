@@ -25,6 +25,7 @@ export interface AnalyzeDemonstrationRequest {
 export type AnalyzeDemonstrationResult =
   | {
       outcome: "analyzed";
+      sessionId: AgentSessionId;
       artifact: CaptureArtifact;
     }
   | {
@@ -100,7 +101,7 @@ export class AnalyzeDemonstration {
       request.demonstrationArtifact,
     );
 
-    return { outcome: "analyzed", artifact };
+    return { outcome: "analyzed", sessionId: analysisSessionId, artifact };
   }
 
   private async createAnalysisSession(

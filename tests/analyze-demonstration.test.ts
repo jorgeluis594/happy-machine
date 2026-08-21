@@ -146,6 +146,7 @@ describe("AnalyzeDemonstration", () => {
 
     await expect(stage.analyze({ ...request, signal })).resolves.toEqual({
       outcome: "analyzed",
+      sessionId: "analysis-session",
       artifact: contextArtifact,
     });
 

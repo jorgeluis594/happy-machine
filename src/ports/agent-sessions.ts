@@ -32,6 +32,14 @@ export interface AgentTurnResult {
   content?: string;
 }
 
+export class AgentRuntimeUnavailableError extends Error {
+  override readonly name = "AgentRuntimeUnavailableError";
+}
+
+export class AgentRuntimeIncompatibleError extends Error {
+  override readonly name = "AgentRuntimeIncompatibleError";
+}
+
 interface AgentConversationItemBase {
   id: string;
 }
