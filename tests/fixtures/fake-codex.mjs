@@ -366,15 +366,42 @@ if (args[0] === "app-server" && listenIndex >= 0) {
   const threadId = remoteIndex < 0 ? undefined : args[remoteIndex + 2];
   const initialPrompt = remoteIndex < 0 ? undefined : args[remoteIndex + 3];
   const role = initialPrompt === undefined ? "demonstration" : "generation";
+  const contextReference =
+    role === "generation"
+      ? parseGenerationContextReference(initialPrompt)
+      : undefined;
   log("tui_started", {
     role,
     remote: remoteIndex < 0 ? undefined : args[remoteIndex + 1],
     threadId,
     ...(initialPrompt === undefined ? {} : { initialPrompt }),
+    ...(contextReference === undefined
+      ? {}
+      : {
+          contextReference,
+          contextExists: existsSync(contextReference),
+          demonstrationExists: existsSync(
+            path.join(path.dirname(contextReference), "demonstration.md"),
+          ),
+        }),
   });
   if (lifecycleFor(role).exit !== "signal") installShutdown(role);
   exitFromLifecycle(role);
 } else {
   process.stderr.write(`unexpected fake Codex invocation: ${args.join(" ")}\n`);
   process.exit(2);
+}
+
+function parseGenerationContextReference(initialPrompt) {
+  const prefix = "Analyzed workflow context reference: ";
+  const line = initialPrompt
+    ?.split("\n")
+    .find((candidate) => candidate.startsWith(prefix));
+  if (line === undefined) return undefined;
+  try {
+    const value = JSON.parse(line.slice(prefix.length));
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
