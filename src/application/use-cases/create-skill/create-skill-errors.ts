@@ -25,6 +25,7 @@ export type CreateSkillStage = (typeof createSkillStages)[number];
 export interface CreateSkillErrorOptions {
   cause?: unknown;
   cleanupFailures?: readonly unknown[];
+  remainingWorkspaces?: readonly string[];
 }
 
 export class CreateSkillError extends Error {
@@ -38,9 +39,11 @@ export class CreateSkillError extends Error {
   ) {
     super(message, options);
     this.cleanupFailures = options.cleanupFailures ?? [];
+    this.remainingWorkspaces = options.remainingWorkspaces ?? [];
   }
 
   readonly cleanupFailures: readonly unknown[];
+  readonly remainingWorkspaces: readonly string[];
 }
 
 export function isCreateSkillError(error: unknown): error is CreateSkillError {

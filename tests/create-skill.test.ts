@@ -16,7 +16,10 @@ import {
   ExclusiveOperationAlreadyActiveError,
   type ExclusiveOperationLock,
 } from "../src/ports/exclusive-operation-lock.js";
-import type { SkillCaptureStore } from "../src/ports/skill-capture-store.js";
+import {
+  SkillCaptureCleanupError,
+  type SkillCaptureStore,
+} from "../src/ports/skill-capture-store.js";
 
 const lease = { id: "lease-1" };
 const workspace = { id: "workspace-1" };
@@ -300,6 +303,21 @@ describe("CreateSkill", () => {
     },
   );
 
+  it("preserves remaining abandoned workspace references for safe CLI reporting", async () => {
+    const abandonedWorkspace = "/private/abandoned-capture";
+    const { request, useCase } = fixture({
+      abandonedCleanupError: new AggregateError([
+        new SkillCaptureCleanupError(abandonedWorkspace),
+      ]),
+    });
+
+    await expect(useCase.execute(request)).rejects.toMatchObject({
+      code: "cleanup_failed",
+      stage: "cleanup",
+      remainingWorkspaces: [abandonedWorkspace],
+    });
+  });
+
   it("maps a live exclusive owner to the stable busy error", async () => {
     const { events, request, useCase } = fixture({
       acquireError: new ExclusiveOperationAlreadyActiveError("create-skill"),
@@ -439,6 +457,7 @@ describe("CreateSkill", () => {
             cleanupError,
             releaseError,
           ],
+          remainingWorkspaces: [workspace.id],
         });
         const cause = (error as CreateSkillError).cause;
         expect(cause).toBeInstanceOf(AggregateError);
@@ -468,6 +487,7 @@ describe("CreateSkill", () => {
       code: "cleanup_failed",
       stage: "cleanup",
       cleanupFailures: [stopError, cleanupError, releaseError],
+      remainingWorkspaces: [workspace.id],
     });
     expect(events.slice(-3)).toEqual([
       "stop-runtime",

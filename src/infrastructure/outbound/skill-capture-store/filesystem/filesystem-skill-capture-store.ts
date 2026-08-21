@@ -16,6 +16,7 @@ import type {
   CaptureWorkspace,
   SkillCaptureStore,
 } from "../../../../ports/skill-capture-store.js";
+import { SkillCaptureCleanupError } from "../../../../ports/skill-capture-store.js";
 
 const workspacePrefix = "happy-machine-create-skill-";
 const ownerFilename = ".capture-owner.json";
@@ -36,17 +37,15 @@ export interface FilesystemSkillCaptureStoreOptions {
   userId?: number;
 }
 
-export class FilesystemSkillCaptureCleanupError extends Error {
+export class FilesystemSkillCaptureCleanupError extends SkillCaptureCleanupError {
   override readonly name = "FilesystemSkillCaptureCleanupError";
 
   constructor(
     readonly remainingWorkspacePath: string,
     options: ErrorOptions = {},
   ) {
-    super(
-      `Private capture workspace could not be completely removed: ${remainingWorkspacePath}`,
-      options,
-    );
+    super(remainingWorkspacePath, options);
+    this.message = `Private capture workspace could not be completely removed: ${remainingWorkspacePath}`;
   }
 }
 

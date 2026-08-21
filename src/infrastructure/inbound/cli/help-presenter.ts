@@ -57,6 +57,23 @@ const commandHelp = [
     ],
   },
   {
+    name: "create-skill",
+    description:
+      "Capture a demonstrated workflow with happy-machine create-skill --agent=codex.",
+    usage: "happy-machine create-skill --agent=codex",
+    arguments: [],
+    options: [
+      {
+        label: "--agent=codex",
+        description: "Use Codex. Required; no other form or value is accepted.",
+      },
+      {
+        label: "-h, --help",
+        description: "Show help for this command.",
+      },
+    ],
+  },
+  {
     name: "resume",
     description: "Resume control of a detached run.",
     usage: "happy-machine resume RUN_ID [--debug]",
@@ -201,6 +218,7 @@ export class HelpPresenter {
   }
 
   private items(items: readonly HelpItem[]): string[] {
+    if (items.length === 0) return ["  none"];
     const labelWidth = Math.max(...items.map((item) => item.label.length));
     return items.map(
       (item) => `  ${item.label.padEnd(labelWidth)}  ${item.description}`,

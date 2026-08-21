@@ -12,6 +12,7 @@ import type {
   CaptureWorkspace,
   SkillCaptureStore,
 } from "../../../ports/skill-capture-store.js";
+import { SkillCaptureCleanupError } from "../../../ports/skill-capture-store.js";
 import type {
   AnalyzeDemonstration,
   AnalyzeDemonstrationResult,
@@ -65,6 +66,11 @@ interface ExecutionResources {
   demonstrationSessionId?: AgentSessionId;
 }
 
+interface CleanupResult {
+  failures: unknown[];
+  remainingWorkspaces: string[];
+}
+
 export class CreateSkill {
   constructor(
     private readonly lock: ExclusiveOperationLock,
@@ -79,25 +85,28 @@ export class CreateSkill {
     const resources: ExecutionResources = { runtimeOwned: false };
     let result: CreateSkillResult | undefined;
     let primaryError: CreateSkillError | undefined;
-    let cleanupFailures!: unknown[];
+    let cleanupResult!: CleanupResult;
 
     try {
       result = await this.run(request, resources);
     } catch (error) {
       primaryError = normalizeUnexpectedError(error);
     } finally {
-      cleanupFailures = await this.cleanup(resources);
+      cleanupResult = await this.cleanup(resources);
     }
 
     if (primaryError) {
-      if (cleanupFailures.length > 0) {
-        throw attachCleanupFailures(primaryError, cleanupFailures);
+      if (cleanupResult.failures.length > 0) {
+        throw attachCleanupFailures(primaryError, cleanupResult);
       }
       throw primaryError;
     }
 
-    if (cleanupFailures.length > 0) {
-      throw cleanupFailed(cleanupFailures);
+    if (cleanupResult.failures.length > 0) {
+      throw cleanupFailed(
+        cleanupResult.failures,
+        cleanupResult.remainingWorkspaces,
+      );
     }
 
     if (!result) {
@@ -278,8 +287,9 @@ export class CreateSkill {
     }
   }
 
-  private async cleanup(resources: ExecutionResources): Promise<unknown[]> {
+  private async cleanup(resources: ExecutionResources): Promise<CleanupResult> {
     const failures: unknown[] = [];
+    const remainingWorkspaces: string[] = [];
     const attempt = async (
       operation: () => Promise<void>,
     ): Promise<boolean> => {
@@ -307,6 +317,8 @@ export class CreateSkill {
       const workspace = resources.workspace;
       if (await attempt(() => this.store.cleanup(workspace))) {
         resources.workspace = undefined;
+      } else {
+        remainingWorkspaces.push(workspace.id);
       }
     }
     if (resources.lease) {
@@ -316,7 +328,7 @@ export class CreateSkill {
       }
     }
 
-    return failures;
+    return { failures, remainingWorkspaces };
   }
 }
 
@@ -354,7 +366,10 @@ function normalizeUnexpectedError(error: unknown): CreateSkillError {
       );
 }
 
-function cleanupFailed(failures: readonly unknown[]): CreateSkillError {
+function cleanupFailed(
+  failures: readonly unknown[],
+  knownRemainingWorkspaces: readonly string[] = [],
+): CreateSkillError {
   return new CreateSkillError(
     "cleanup_failed",
     "cleanup",
@@ -365,14 +380,19 @@ function cleanupFailed(failures: readonly unknown[]): CreateSkillError {
         "Create-skill cleanup was incomplete.",
       ),
       cleanupFailures: failures,
+      remainingWorkspaces: collectRemainingWorkspaces(
+        failures,
+        knownRemainingWorkspaces,
+      ),
     },
   );
 }
 
 function attachCleanupFailures(
   primary: CreateSkillError,
-  cleanupFailures: readonly unknown[],
+  cleanup: CleanupResult,
 ): CreateSkillError {
+  const cleanupFailures = cleanup.failures;
   const allCleanupFailures = [...primary.cleanupFailures, ...cleanupFailures];
   return new CreateSkillError(primary.code, primary.stage, primary.message, {
     cause: new AggregateError(
@@ -380,5 +400,26 @@ function attachCleanupFailures(
       "Create-skill failed and cleanup was incomplete.",
     ),
     cleanupFailures: allCleanupFailures,
+    remainingWorkspaces: collectRemainingWorkspaces(allCleanupFailures, [
+      ...primary.remainingWorkspaces,
+      ...cleanup.remainingWorkspaces,
+    ]),
   });
+}
+
+function collectRemainingWorkspaces(
+  failures: readonly unknown[],
+  known: readonly string[],
+): string[] {
+  const workspaces = new Set(known);
+  const visit = (failure: unknown): void => {
+    if (failure instanceof SkillCaptureCleanupError) {
+      workspaces.add(failure.remainingWorkspace);
+    }
+    if (failure instanceof AggregateError) {
+      for (const nested of failure.errors) visit(nested);
+    }
+  };
+  for (const failure of failures) visit(failure);
+  return [...workspaces];
 }

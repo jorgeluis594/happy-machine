@@ -9,6 +9,7 @@ import { runIsTerminal } from "../../../domain/execution/run.js";
 import { HelpPresenter, type HelpCommandName } from "./help-presenter.js";
 import { RunPresenter } from "./run-presenter.js";
 import type { DiagnosticScope } from "../../../ports/diagnostics.js";
+import type { CreateSkillCommand } from "./create-skill-command.js";
 
 export interface CliStreams {
   stdout(message: string): void;
@@ -31,7 +32,8 @@ type OperationRequest =
   | { command: "cancel"; runId: string; debug: boolean }
   | { command: "cleanup"; runId: string }
   | { command: "status"; runId: string }
-  | { command: "history"; runId?: string };
+  | { command: "history"; runId?: string }
+  | { command: "create-skill"; args: string[] };
 
 type RequestResult =
   | { kind: "operation"; request: OperationRequest }
@@ -54,6 +56,7 @@ export class Cli {
     private readonly cleanupPrompt?: CleanupPrompt,
     private readonly helpPresenter = new HelpPresenter(),
     private readonly diagnostics?: DiagnosticScope,
+    private readonly createSkillCommand?: CreateSkillCommand,
   ) {}
 
   async run(
@@ -73,6 +76,13 @@ export class Cli {
     if (result.kind === "error") return this.presentRequestError(result);
     const request = result.request;
     try {
+      if (request.command === "create-skill") {
+        return await this.requireCreateSkillCommand().run(
+          request.args,
+          currentDirectory,
+          signal,
+        );
+      }
       if (request.command === "status") {
         this.streams.stdout(
           this.presenter.status(
@@ -171,6 +181,9 @@ export class Cli {
   }
 
   private operationRequest(argv: string[]): OperationRequest | undefined {
+    if (argv[0] === "create-skill") {
+      return { command: "create-skill", args: argv.slice(1) };
+    }
     if (
       ["status", "history", "cleanup"].includes(argv[0] ?? "") &&
       argv
@@ -303,5 +316,11 @@ export class Cli {
     if (!this.cleanupWorktrees)
       throw new Error("Worktree cleanup is not configured");
     return this.cleanupWorktrees;
+  }
+
+  private requireCreateSkillCommand(): CreateSkillCommand {
+    if (!this.createSkillCommand)
+      throw new Error("The create-skill command is not configured");
+    return this.createSkillCommand;
   }
 }
