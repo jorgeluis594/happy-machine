@@ -30,11 +30,11 @@ export function mapCompatibilityError(error: unknown): Error {
     if (error.code === "unavailable")
       return new AgentRuntimeUnavailableError(
         "The Codex executable is unavailable.",
-        { cause: error },
+        { cause: error, cleanupFailures: error.cleanupFailures },
       );
     return new AgentRuntimeIncompatibleError(
       "Codex does not provide the app-server capabilities required by create-skill.",
-      { cause: error },
+      { cause: error, cleanupFailures: error.cleanupFailures },
     );
   }
   return new AgentRuntimeUnavailableError(
@@ -43,18 +43,20 @@ export function mapCompatibilityError(error: unknown): Error {
   );
 }
 
-export function mapStartupError(error: unknown): Error {
+export function mapStartupError(
+  error: unknown,
+): AgentRuntimeUnavailableError | AgentRuntimeIncompatibleError {
   if (error instanceof AgentRuntimeUnavailableError) return error;
   if (error instanceof AgentRuntimeIncompatibleError) return error;
   if (error instanceof CodexProcessRuntimeError) {
     return error.code === "unavailable" || error.code === "spawn_failed"
       ? new AgentRuntimeUnavailableError(
           "The Codex app-server runtime could not be started.",
-          { cause: error },
+          { cause: error, cleanupFailures: error.cleanupFailures },
         )
       : new AgentRuntimeIncompatibleError(
           "Codex could not establish the required app-server control connection.",
-          { cause: error },
+          { cause: error, cleanupFailures: error.cleanupFailures },
         );
   }
   return new AgentRuntimeIncompatibleError(

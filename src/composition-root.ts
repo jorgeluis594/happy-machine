@@ -21,7 +21,10 @@ import {
 import { CreateSkillPresenter } from "./infrastructure/inbound/cli/create-skill-presenter.js";
 import { CliDiagnostics } from "./infrastructure/inbound/cli/debug-presenter.js";
 import { CodexAppServerSessions } from "./infrastructure/outbound/agent-sessions/codex-app-server/codex-app-server-sessions.js";
-import { CodexProcessRuntime } from "./infrastructure/outbound/agent-sessions/codex-app-server/codex-process-runtime.js";
+import {
+  CodexProcessRuntime,
+  type CodexSpawn,
+} from "./infrastructure/outbound/agent-sessions/codex-app-server/codex-process-runtime.js";
 import { FilesystemExclusiveOperationLock } from "./infrastructure/outbound/exclusive-operation-lock/filesystem/filesystem-exclusive-operation-lock.js";
 import { FilesystemProjectDefinitions } from "./infrastructure/outbound/project-definitions/filesystem/filesystem-project-definitions.js";
 import { GitProjectWorkspaces } from "./infrastructure/outbound/project-workspaces/git/git-project-workspaces.js";
@@ -45,6 +48,7 @@ export interface ProcessEntryPointOptions {
   processIsAlive?: (processId: number) => boolean;
   now?: () => Date;
   randomId?: () => string;
+  codexSpawnProcess?: CodexSpawn;
   streams?: {
     stdout(message: string): void;
     stderr(message: string): void;
@@ -153,6 +157,7 @@ function createCli(
     socketPath: path.join(temporaryDirectory, `hm-cs-${randomId()}.sock`),
     currentDirectory,
     environment,
+    spawnProcess: options.codexSpawnProcess,
   });
   const sessions = new CodexAppServerSessions({ runtime });
   const createSkill = new CreateSkill(

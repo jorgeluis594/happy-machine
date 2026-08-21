@@ -32,12 +32,30 @@ export interface AgentTurnResult {
   content?: string;
 }
 
+export interface AgentRuntimeErrorOptions extends ErrorOptions {
+  cleanupFailures?: readonly unknown[];
+}
+
 export class AgentRuntimeUnavailableError extends Error {
   override readonly name = "AgentRuntimeUnavailableError";
+
+  constructor(message?: string, options: AgentRuntimeErrorOptions = {}) {
+    super(message, options);
+    this.cleanupFailures = options.cleanupFailures ?? [];
+  }
+
+  readonly cleanupFailures: readonly unknown[];
 }
 
 export class AgentRuntimeIncompatibleError extends Error {
   override readonly name = "AgentRuntimeIncompatibleError";
+
+  constructor(message?: string, options: AgentRuntimeErrorOptions = {}) {
+    super(message, options);
+    this.cleanupFailures = options.cleanupFailures ?? [];
+  }
+
+  readonly cleanupFailures: readonly unknown[];
 }
 
 interface AgentConversationItemBase {

@@ -98,6 +98,7 @@ export class LaunchSkillGeneration {
             [primaryError.cause ?? primaryError, cleanupCause],
             "Generation startup failed and its incomplete session could not be disposed.",
           ),
+          cleanupFailures: [cleanupCause],
         },
       );
     }

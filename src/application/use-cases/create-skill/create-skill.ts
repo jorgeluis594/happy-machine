@@ -1,5 +1,6 @@
 import {
   AgentRuntimeIncompatibleError,
+  AgentRuntimeUnavailableError,
   type AgentSessionId,
   type AgentSessions,
 } from "../../../ports/agent-sessions.js";
@@ -334,13 +335,18 @@ export class CreateSkill {
 
 function runtimeError(cause: unknown): CreateSkillError {
   const incompatible = cause instanceof AgentRuntimeIncompatibleError;
+  const cleanupFailures =
+    cause instanceof AgentRuntimeIncompatibleError ||
+    cause instanceof AgentRuntimeUnavailableError
+      ? cause.cleanupFailures
+      : [];
   return new CreateSkillError(
     incompatible ? "agent_runtime_incompatible" : "agent_runtime_unavailable",
     "setup",
     incompatible
       ? "The agent runtime is incompatible with create-skill."
       : "The agent runtime is unavailable.",
-    { cause },
+    { cause, cleanupFailures },
   );
 }
 

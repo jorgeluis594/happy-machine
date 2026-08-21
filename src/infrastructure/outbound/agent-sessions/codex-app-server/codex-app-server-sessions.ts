@@ -123,9 +123,14 @@ export class CodexAppServerSessions implements AgentSessions {
         }
       }
       const startupError = mapStartupError(error);
-      if (cleanupFailures.length > 0) {
+      const allCleanupFailures = [
+        ...startupError.cleanupFailures,
+        ...cleanupFailures,
+      ];
+      if (allCleanupFailures.length > 0) {
         const options = {
           cause: new AggregateError([error, ...cleanupFailures]),
+          cleanupFailures: allCleanupFailures,
         };
         throw startupError instanceof AgentRuntimeUnavailableError
           ? new AgentRuntimeUnavailableError(startupError.message, options)

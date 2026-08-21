@@ -49,16 +49,23 @@ export type CodexProcessRuntimeErrorCode =
   | "startup_failed"
   | "shutdown_failed";
 
+export interface CodexProcessRuntimeErrorOptions extends ErrorOptions {
+  cleanupFailures?: readonly unknown[];
+}
+
 export class CodexProcessRuntimeError extends Error {
   override readonly name = "CodexProcessRuntimeError";
 
   constructor(
     readonly code: CodexProcessRuntimeErrorCode,
     message: string,
-    options: ErrorOptions = {},
+    options: CodexProcessRuntimeErrorOptions = {},
   ) {
     super(message, options);
+    this.cleanupFailures = options.cleanupFailures ?? [];
   }
+
+  readonly cleanupFailures: readonly unknown[];
 }
 
 interface ProcessExit {
@@ -202,7 +209,10 @@ export class CodexProcessRuntime {
         throw new CodexProcessRuntimeError(
           startupError.code,
           startupError.message,
-          { cause: new AggregateError([startupError, ...cleanupErrors]) },
+          {
+            cause: new AggregateError([startupError, ...cleanupErrors]),
+            cleanupFailures: cleanupErrors,
+          },
         );
       }
       throw startupError;
@@ -276,7 +286,7 @@ export class CodexProcessRuntime {
       throw new CodexProcessRuntimeError(
         "shutdown_failed",
         "Codex runtime shutdown did not complete cleanly.",
-        { cause: new AggregateError(errors) },
+        { cause: new AggregateError(errors), cleanupFailures: errors },
       );
     }
   }

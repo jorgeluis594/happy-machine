@@ -1,5 +1,14 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
@@ -12,11 +21,17 @@ import readline from "node:readline";
 //     "unsupportedEphemeral":true,
 //     "emptyConversation":true,
 //     "invalidAnalysis":true,
+//     "analysisWait":true,
+//     "captureSentinel":"sensitive-test-value",
+//     "corruptCaptureOwnerOnMethod":"turn/start",
+//     "replaceDemonstrationWithDirectoryOnMethod":"turn/start",
 //     "malformedJsonMethods":["thread/read"],
 //     "jsonRpcErrors":{"turn/start":{"code":-32001,"message":"failed"}},
+//     "threadDeleteErrors":["thread-generation"],
 //     "lifecycle":{"demonstration|generation|appServer|proxy":{
 //       "exit":"normal|nonzero|signal|wait", "code":17,
-//       "signal":"SIGTERM", "shutdownDelayMs":25
+//       "signal":"SIGTERM", "shutdownDelayMs":25,
+//       "replaceSocketWithFileOnShutdown":true
 //     }}
 //   }
 const args = process.argv.slice(2);
@@ -110,6 +125,10 @@ if (args[0] === "app-server" && listenIndex >= 0) {
   const cleanup = () => {
     server.close();
     if (existsSync(socketPath)) unlinkSync(socketPath);
+    if (lifecycleFor("appServer").replaceSocketWithFileOnShutdown)
+      writeFileSync(socketPath, "configured shutdown residue\n", {
+        mode: 0o600,
+      });
   };
   installShutdown("appServer", cleanup);
   server.listen(socketPath, () => {
@@ -137,7 +156,15 @@ if (args[0] === "app-server" && listenIndex >= 0) {
     return true;
   };
   const rpcError = (request) => {
-    const configured = config.jsonRpcErrors?.[request.method];
+    const configured =
+      config.jsonRpcErrors?.[request.method] ??
+      (request.method === "thread/delete" &&
+      config.threadDeleteErrors?.includes(request.params?.threadId)
+        ? {
+            code: -32006,
+            message: `configured delete failure for ${String(request.params?.threadId)}`,
+          }
+        : undefined);
     if (!configured) return false;
     write({
       jsonrpc: "2.0",
@@ -181,6 +208,7 @@ if (args[0] === "app-server" && listenIndex >= 0) {
   });
   const conversationFor = (threadId) => {
     if (config.emptyConversation) return [];
+    const sentinel = config.captureSentinel;
     return [
       {
         id: `turn-demonstration-for-${threadId}`,
@@ -189,18 +217,23 @@ if (args[0] === "app-server" && listenIndex >= 0) {
           {
             id: `item-user-for-${threadId}`,
             type: "userMessage",
-            content: [{ type: "text", text: "Inspect the failing workflow" }],
+            content: [
+              {
+                type: "text",
+                text: sentinel ?? "Inspect the failing workflow",
+              },
+            ],
           },
           {
             id: `item-agent-for-${threadId}`,
             type: "agentMessage",
-            text: "I inspected it.",
+            text: sentinel ?? "I inspected it.",
           },
           {
             id: `item-command-for-${threadId}`,
             type: "commandExecution",
             command: "npm test",
-            aggregatedOutput: "all tests passed",
+            aggregatedOutput: sentinel ?? "all tests passed",
             exitCode: 0,
             status: "completed",
           },
@@ -210,7 +243,9 @@ if (args[0] === "app-server" && listenIndex >= 0) {
             server: "fixture",
             tool: "read_file",
             arguments: { path: "README.md" },
-            result: { content: [{ type: "text", text: "# Fixture" }] },
+            result: {
+              content: [{ type: "text", text: sentinel ?? "# Fixture" }],
+            },
             status: "completed",
           },
           {
@@ -234,9 +269,34 @@ if (args[0] === "app-server" && listenIndex >= 0) {
       },
     ];
   };
+  const applyConfiguredCaptureSabotage = (request) => {
+    const corruptOwner = config.corruptCaptureOwnerOnMethod === request.method;
+    const replaceDemonstration =
+      config.replaceDemonstrationWithDirectoryOnMethod === request.method;
+    if (!corruptOwner && !replaceDemonstration) return;
+    const prompt = request.params?.input?.find?.(
+      (item) => item?.type === "text" && typeof item.text === "string",
+    )?.text;
+    const reference = parseAnalysisDemonstrationReference(prompt);
+    if (reference === undefined) return;
+    if (corruptOwner) {
+      const markerPath = path.join(
+        path.dirname(reference),
+        ".capture-owner.json",
+      );
+      chmodSync(markerPath, 0o644);
+      log("capture_owner_corrupted", { markerPath });
+    }
+    if (replaceDemonstration) {
+      rmSync(reference, { force: true });
+      mkdirSync(reference, { mode: 0o700 });
+      log("demonstration_artifact_replaced", { reference });
+    }
+  };
   const handle = (request) => {
     log("protocol_in", { message: request });
     if (request.id === undefined) return;
+    applyConfiguredCaptureSabotage(request);
     if (malformed(request.method) || rpcError(request)) return;
     if (request.method === "initialize") {
       emitRequestEvents(request, {
@@ -311,6 +371,12 @@ if (args[0] === "app-server" && listenIndex >= 0) {
             }),
       };
       const completedTurn = { ...turn, status: "completed", items: [item] };
+      if (config.analysisWait) {
+        emitRequestEvents(request, { turn }, [
+          notification("turn/started", { threadId, turn }),
+        ]);
+        return;
+      }
       emitRequestEvents(request, { turn }, [
         notification("turn/started", { threadId, turn }),
         notification("item/started", {
@@ -395,6 +461,21 @@ if (args[0] === "app-server" && listenIndex >= 0) {
 function parseGenerationContextReference(initialPrompt) {
   const prefix = "Analyzed workflow context reference: ";
   const line = initialPrompt
+    ?.split("\n")
+    .find((candidate) => candidate.startsWith(prefix));
+  if (line === undefined) return undefined;
+  try {
+    const value = JSON.parse(line.slice(prefix.length));
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseAnalysisDemonstrationReference(prompt) {
+  const prefix =
+    "Read the workflow demonstration from this opaque agent-readable reference: ";
+  const line = prompt
     ?.split("\n")
     .find((candidate) => candidate.startsWith(prefix));
   if (line === undefined) return undefined;

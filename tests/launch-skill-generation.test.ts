@@ -218,6 +218,7 @@ describe("LaunchSkillGeneration", () => {
       expect(error).toMatchObject({
         code: "generation_start_failed",
         stage: "generation",
+        cleanupFailures: [cleanupCause],
       });
       expect((error as CreateSkillError).cause).toBeInstanceOf(AggregateError);
       const aggregate = (error as CreateSkillError).cause as AggregateError;
