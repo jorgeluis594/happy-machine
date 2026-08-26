@@ -78,9 +78,9 @@ A project is a self-contained unit containing its configuration, local agent reg
 An agent is a project-local identifier associated with:
 
 - A Markdown instruction file.
-- A default model.
+- An optional runtime: `codex` or `opencode`.
 
-A workflow state or parallel task MAY override the default model. Tools, environment, and executor behavior come from the project and its Orca environment rather than from a global Happy Machine registry.
+The runtime defaults to `codex` when omitted. A workflow state or parallel task selects a registered agent profile and MUST NOT override its runtime. Happy Machine selects only the CLI; models, internal agents, tools, permissions, and sandbox behavior come from the selected runtime's local configuration and environment.
 
 If an agent should commit source changes, that behavior MUST be declared in its instructions by the project author. Happy Machine itself never creates a commit.
 
@@ -197,19 +197,18 @@ workspace:
 agents:
   writer:
     instructions: agents/writer.md
-    model: model-id
+    runtime: codex
   reviewer:
     instructions: agents/reviewer.md
-    model: model-id
+    runtime: opencode
   qa:
     instructions: agents/qa.md
-    model: model-id
   security:
     instructions: agents/security.md
-    model: model-id
+    runtime: codex
   publisher:
     instructions: agents/publisher.md
-    model: model-id
+    runtime: opencode
 
 defaults:
   attempt_timeout: 30m
@@ -227,13 +226,18 @@ defaults:
 - `version` MUST be `1`.
 - `agents` MUST contain every agent referenced by a workflow.
 - Each agent MUST declare an existing Markdown `instructions` file.
-- Each agent MUST declare a non-empty default `model`.
+- Each agent MAY declare `runtime` as exactly `codex` or `opencode`; omission resolves to `codex`.
+- `model` is not part of the closed project, state, or task schema.
+
+`AgentRuntime` is the closed set `"codex" | "opencode"`. Happy Machine does not configure a model or an internal agent for either runtime.
+
+The migration from the earlier draft schema keeps `version: 1`: new definitions MUST replace profile-level `model` with an optional `runtime` and MUST remove state or task model overrides. A new definition containing `model` is rejected. When loading an existing durable snapshot whose resolved agents have no runtime, Happy Machine MUST use `codex` and ignore any legacy `model` value.
 
 ### 7.2 Executor
 
 `executor.type` defaults to `orca` when omitted. V1 does not require any other executor.
 
-Happy Machine treats the configured project environment as executor input. It MUST NOT persist secret values merely to make a run snapshot. The run snapshot records declarative configuration and selected model identifiers; externally supplied secret values remain an operational dependency.
+Happy Machine treats the configured project environment as executor input. It MUST NOT persist secret values merely to make a run snapshot. The run snapshot records declarative configuration and effective runtime identifiers; externally supplied secret values remain an operational dependency.
 
 ### 7.3 Workspace Mode
 
@@ -351,7 +355,7 @@ Every state MUST declare:
 - A non-empty `outcomes` map.
 - Exactly one of `prompt` or `prompt_file` when the state directly defines agent work.
 
-A state or task MAY declare a model override and supported policy overrides.
+A state or task MAY declare supported policy overrides. It MUST NOT declare `model` or a runtime override.
 
 `prompt` and `prompt_file` are mutually exclusive. The selected prompt is combined with the registered agent instructions and the generated context contract; it does not replace the agent instructions.
 
@@ -369,7 +373,7 @@ A parallel state uses `type: parallel` and MUST declare one or more uniquely nam
 
 - A registered `agent`.
 - Exactly one of `prompt` or `prompt_file`.
-- Optional model and retry policy overrides.
+- Optional retry policy overrides.
 
 The state's outcomes map MUST contain exactly these keys:
 
@@ -445,7 +449,7 @@ At run creation, Happy Machine snapshots:
 - The workflow file and effective policies.
 - Every referenced agent instruction file.
 - Every referenced prompt file and inline prompt.
-- Resolved agent IDs, models, and model overrides.
+- Resolved agent IDs and effective runtimes.
 - CLI input documents.
 
 `resume` always uses this snapshot. Editing the project definition affects only later `execute` commands.
@@ -493,7 +497,7 @@ Before launching an attempt, Happy Machine materializes:
 - The required `result.json` path.
 - The selected project workspace path.
 - The merged agent instructions and task prompt.
-- The effective model, timeout, and attempt number.
+- The effective runtime, timeout, and attempt number.
 
 Happy Machine automatically appends the required structured-result contract to
 the effective task prompt. The generated block includes the exact output and
@@ -595,7 +599,7 @@ A normal state follows this sequence:
 
 1. Verify the run is active, controlled, within its deadline, and below all limits.
 2. Create the state visit and immutable context snapshot.
-3. Resolve the registered agent, prompt, model, and policies from the run snapshot.
+3. Resolve the registered agent, prompt, runtime, and policies from the run snapshot.
 4. Create and persist the attempt identity.
 5. Launch or recover the Orca execution.
 6. Wait for a terminal executor result or attempt timeout.
@@ -828,7 +832,7 @@ If a crash happens after files are written but before the commit, those files ar
 
 ### 19.4 Snapshot Reproducibility
 
-Editing configuration, workflows, prompts, agent instructions, or model defaults after `execute` does not change an existing run. `resume` always uses the original snapshot.
+Editing configuration, workflows, prompts, agent instructions, or runtimes after `execute` does not change an existing run. `resume` always uses the original snapshot.
 
 Source changes in a direct workspace and external environment values are not immutable product-definition snapshots. Reproducing those dependencies remains the project author's responsibility.
 
@@ -838,6 +842,9 @@ Happy Machine integrates with Orca through a technology-specific adapter while p
 
 The adapter MUST:
 
+- Translate the effective runtime through the closed mapping `codex` → `--command codex` and `opencode` → `--command opencode`.
+- Reject any runtime outside the closed set without constructing an arbitrary command.
+- Pass no model, internal-agent, prompt, permission, or sandbox flags to the selected CLI; task input is sent separately through terminal control.
 - Use machine-readable JSON responses for lifecycle operations.
 - Associate each Orca task and dispatch with the stable Happy Machine attempt identity.
 - Persist the Orca task ID, dispatch ID, and terminal handle when available.

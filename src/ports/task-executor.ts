@@ -4,6 +4,7 @@ import type {
   ExternalExecutionStatus,
 } from "../domain/execution/run.js";
 import type { DiagnosticContext } from "./diagnostics.js";
+import type { AgentRuntime } from "./project-definitions.js";
 
 export interface TaskLaunch {
   identity: string;
@@ -14,7 +15,7 @@ export interface TaskLaunch {
   instructions: string;
   prompt: string;
   allowedOutcomes: readonly string[];
-  model: string;
+  runtime: AgentRuntime;
   timeoutMs: number;
   attemptNumber: number;
   signal?: AbortSignal;

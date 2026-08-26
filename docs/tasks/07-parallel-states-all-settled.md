@@ -15,7 +15,7 @@ A workflow can run independent reviews, tests, or analyses concurrently without 
 ## Scope
 
 - Create one durable task for every task ID declared in a parallel state.
-- Resolve each task's agent, instructions, prompt or prompt_file, model, and effective policies, including valid overrides.
+- Resolve each task's agent, instructions, prompt or prompt_file, runtime, and effective policies, including mixed Codex/OpenCode profiles and valid policy overrides.
 - Fix one context snapshot before fan-out.
 - Give every task in the visit the same committed context, even when concurrency limits delay some starts.
 - Prevent a task from seeing sibling documents while the join remains open.

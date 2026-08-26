@@ -51,7 +51,7 @@ workspace:
 agents:
   worker:
     instructions: agents/worker.md
-    model: test-model
+    runtime: codex
 defaults:
   attempt_timeout: 5s
   max_attempts: 1

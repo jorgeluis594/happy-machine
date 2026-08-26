@@ -63,7 +63,7 @@ async function project(
       "agents:",
       "  worker:",
       "    instructions: agents/worker.md",
-      "    model: test-model",
+      "    runtime: codex",
       "defaults:",
       "  attempt_timeout: 5s",
       "",
@@ -683,14 +683,12 @@ describe("happy-machine execute", () => {
       `  review:
     type: agent
     agent: worker
-    model: review-model
     prompt: Review snapshot prompt
     outcomes:
       approved: publish
   publish:
     type: agent
     agent: worker
-    model: publish-model
     prompt: Publish snapshot prompt
     attempt_timeout: 2s
     outcomes:
@@ -996,7 +994,7 @@ describe("happy-machine execute", () => {
         "agents:",
         "  worker:",
         "    instructions: ../outside-agent.md",
-        "    model: test-model",
+        "    runtime: codex",
         "",
       ].join("\n"),
     );
@@ -1024,8 +1022,14 @@ describe("happy-machine execute", () => {
     ]);
   });
 
-  it("snapshots prompt files, overrides, policies, and later definition edits", async () => {
+  it("snapshots runtimes, prompt files, policies, and later definition edits", async () => {
     const setup = await project();
+    await writeFile(
+      path.join(setup.root, "happy-machine.yaml"),
+      (
+        await readFile(path.join(setup.root, "happy-machine.yaml"), "utf8")
+      ).replace("runtime: codex", "runtime: opencode"),
+    );
     await mkdir(path.join(setup.root, "prompts"));
     await writeFile(
       path.join(setup.root, "prompts", "review.md"),
@@ -1043,7 +1047,6 @@ describe("happy-machine execute", () => {
         "  review:",
         "    type: agent",
         "    agent: worker",
-        "    model: override-model",
         "    prompt_file: prompts/review.md",
         "    outcomes:",
         "      approved: $succeeded",
@@ -1081,7 +1084,8 @@ describe("happy-machine execute", () => {
         "utf8",
       ),
     ).resolves.toBe("# File prompt\n");
-    expect(firstEffective).toContain('"model": "override-model"');
+    expect(firstEffective).toContain('"runtime": "opencode"');
+    expect(firstEffective).not.toContain('"model"');
     expect(firstEffective).toContain('"maxAttempts": 6');
     expect(firstEffective).toContain("# File prompt");
 
@@ -1092,19 +1096,12 @@ describe("happy-machine execute", () => {
     await writeFile(
       path.join(setup.root, "happy-machine.yaml"),
       (await readFile(path.join(setup.root, "happy-machine.yaml"), "utf8"))
-        .replace("test-model", "new-default-model")
+        .replace("runtime: opencode", "runtime: codex")
         .replace("attempt_timeout: 5s", "attempt_timeout: 9s"),
     );
     await writeFile(
       path.join(setup.root, "prompts", "review.md"),
       "# Edited prompt\n",
-    );
-    await writeFile(
-      setup.workflow,
-      (await readFile(setup.workflow, "utf8")).replace(
-        "override-model",
-        "new-model",
-      ),
     );
     expect(await app.cli.run(["execute", setup.workflow], setup.root)).toBe(0);
     const second = await storedRunById(setup.root, "run_id-2");
@@ -1132,8 +1129,8 @@ describe("happy-machine execute", () => {
       ),
       "utf8",
     );
-    expect(secondEffective).toContain('"model": "new-model"');
-    expect(secondEffective).toContain('"model": "new-default-model"');
+    expect(secondEffective).toContain('"runtime": "codex"');
+    expect(secondEffective).not.toContain('"model"');
     expect(secondEffective).toContain('"attemptTimeoutMs": 9000');
     expect(secondEffective).toContain("# Edited instructions");
     expect(secondEffective).toContain("# Edited prompt");

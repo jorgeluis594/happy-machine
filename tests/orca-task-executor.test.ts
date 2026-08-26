@@ -28,7 +28,7 @@ async function launchFixture(root: string): Promise<TaskLaunch> {
     instructions: "configured agent instructions",
     prompt: "configured prompt",
     allowedOutcomes: ["approved", "needs_revision"],
-    model: "model",
+    runtime: "codex",
     timeoutMs: 5_000,
     attemptNumber: 1,
   };
@@ -118,10 +118,30 @@ describe("Orca terminal-only task executor", () => {
     expect(command).not.toContain(launch.prompt);
   });
 
-  it("never interpolates dynamic or shell-like content into the Codex command", async () => {
+  it("launches OpenCode with the exact closed command", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-opencode-"));
+    const launch = await launchFixture(root);
+    launch.runtime = "opencode";
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+
+    await executor.execute(launch, () => Promise.resolve());
+
+    expect((await calls(root))[0]).toEqual([
+      "terminal",
+      "create",
+      "--worktree",
+      "current",
+      "--command",
+      "opencode",
+      "--focus",
+      "--json",
+    ]);
+  });
+
+  it("never interpolates dynamic or shell-like content into the runtime command", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-quote-"));
     const launch = await launchFixture(root);
-    launch.model = "gpt-special' $(never-run)";
+    launch.runtime = "opencode";
     launch.prompt = '/goal don\'t run `code` $(anything) --flag\n"double"';
     launch.instructions = "don't replace $(anything) or `this`\n--dangerous";
     const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
@@ -130,14 +150,25 @@ describe("Orca terminal-only task executor", () => {
 
     const create = (await calls(root))[0];
     const command = create[create.indexOf("--command") + 1];
-    expect(command).toBe("codex");
-    expect(create).not.toContain(launch.model);
+    expect(command).toBe("opencode");
     expect(create).not.toContain(launch.instructions);
     expect(create).not.toContain(launch.prompt);
     expect(create).toContain("--focus");
     const sent = await readFile(path.join(root, ".fake-prompt"), "utf8");
     expect(sent.startsWith(launch.prompt)).toBe(true);
     expect(sent).toContain(launch.instructions);
+  });
+
+  it("rejects an unexpected runtime before constructing an Orca command", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-runtime-"));
+    const launch = await launchFixture(root);
+    Object.assign(launch, { runtime: "codex; arbitrary-command" });
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+
+    await expect(
+      executor.execute(launch, () => Promise.resolve()),
+    ).rejects.toThrow("Unsupported agent runtime: codex; arbitrary-command");
+    expect(existsSync(path.join(root, ".fake-orca-calls.jsonl"))).toBe(false);
   });
 
   it("never invokes Orca orchestration or terminal wait", async () => {

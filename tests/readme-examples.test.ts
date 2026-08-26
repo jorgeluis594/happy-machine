@@ -48,8 +48,8 @@ describe("README quick start", () => {
       initialState: "research",
       workspaceMode: "direct",
       agents: {
-        delivery: { model: "local-default-model" },
-        qa: { model: "local-qa-model" },
+        delivery: { runtime: "codex" },
+        qa: { runtime: "opencode" },
       },
       policies: {
         workflowTimeoutMs: 14_400_000,
@@ -60,11 +60,11 @@ describe("README quick start", () => {
         implementation: {
           agent: {
             id: "delivery",
-            model: "local-implementation-model",
+            runtime: "codex",
           },
         },
         qa: {
-          agent: { id: "qa", model: "local-qa-model" },
+          agent: { id: "qa", runtime: "opencode" },
           outcomes: {
             passed: "create_pr",
             failed: "implementation",

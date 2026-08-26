@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { parse } from "yaml";
 import type {
   AgentDefinition,
+  AgentRuntime,
   DefinitionArtifactSource,
   EffectivePolicies,
   EffectiveExecutionDefinition,
@@ -210,7 +211,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     for (const [id, value] of Object.entries(rawAgents)) {
       this.id(id, `agent ID ${id}`);
       const raw = this.map(value, `project.agents.${id}`);
-      this.keys(raw, ["instructions", "model"], `project.agents.${id}`);
+      this.keys(raw, ["instructions", "runtime"], `project.agents.${id}`);
       const instructions = await this.markdown(
         root,
         raw.instructions,
@@ -224,7 +225,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       result[id] = {
         id,
         instructions,
-        model: this.string(raw.model, `project.agents.${id}.model`),
+        runtime: this.runtime(raw.runtime, `project.agents.${id}.runtime`),
       };
     }
     return result;
@@ -249,7 +250,6 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
           "prompt",
           "prompt_file",
           "outcomes",
-          "model",
           "attempt_timeout",
           "max_attempts",
           "retry_delay",
@@ -325,7 +325,6 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
             "agent",
             "prompt",
             "prompt_file",
-            "model",
             "attempt_timeout",
             "max_attempts",
             "retry_delay",
@@ -391,10 +390,6 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       throw new DefinitionError(
         `${label}.agent references unknown agent: ${agentId}`,
       );
-    const agent =
-      raw.model === undefined
-        ? registered
-        : { ...registered, model: this.string(raw.model, `${label}.model`) };
     const hasPrompt = Object.hasOwn(raw, "prompt");
     const hasPromptFile = Object.hasOwn(raw, "prompt_file");
     if (hasPrompt === hasPromptFile)
@@ -409,7 +404,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       logicalId: label,
       content: prompt,
     });
-    return { agent, prompt, policies };
+    return { agent: registered, prompt, policies };
   }
 
   private outcomes(value: unknown, label: string): Record<string, string> {
@@ -660,6 +655,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
   private string(value: unknown, label: string): string {
     if (typeof value !== "string" || value.trim() === "")
       throw new DefinitionError(`${label} must be a non-empty string`);
+    return value;
+  }
+
+  private runtime(value: unknown, label: string): AgentRuntime {
+    if (value === undefined) return "codex";
+    if (value !== "codex" && value !== "opencode")
+      throw new DefinitionError(`${label} must be codex or opencode`);
     return value;
   }
   private id(value: string, label: string): void {

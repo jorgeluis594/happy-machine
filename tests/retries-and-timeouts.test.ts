@@ -130,7 +130,7 @@ async function definition(
       worker: {
         id: "worker",
         instructions: "Immutable instructions\n",
-        model: "test-model",
+        runtime: "codex",
       },
     },
     policies: effectivePolicies,
@@ -142,7 +142,7 @@ async function definition(
         agent: {
           id: "worker",
           instructions: "Immutable instructions\n",
-          model: "test-model",
+          runtime: "codex",
         },
         prompt: "Immutable prompt",
         policies: effectivePolicies,

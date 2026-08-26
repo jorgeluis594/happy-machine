@@ -9,10 +9,12 @@ export interface EffectivePolicies {
   controllerLeaseMs: number;
 }
 
+export type AgentRuntime = "codex" | "opencode";
+
 export interface AgentDefinition {
   id: string;
   instructions: string;
-  model: string;
+  runtime: AgentRuntime;
 }
 
 export type DefinitionArtifactKind =

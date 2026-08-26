@@ -25,7 +25,7 @@ Happy Machine stops being a single-task launcher and becomes a decision coordina
 - Use provenance paths equivalent to states/{state-id}/visits/{visit-number}/tasks/{task-id}/documents/{name}.md.
 - Allow the same basename in different states, visits, or tasks without overwriting an earlier version.
 - Create a new immutable context.md for each visit.
-- Resolve instructions, prompt, model, and policies from the snapshot while applying valid state overrides.
+- Resolve instructions, prompt, runtime, and policies from the snapshot while applying valid policy overrides.
 - Do not start the next state until the prior result, documents, outcome, and transition are durable.
 - Keep workflow documents separate from changes an agent makes in the project workspace.
 - Do not infer outcomes from prose, semantically merge documents, or create commits, merges, reverts, or source-tree rollback.

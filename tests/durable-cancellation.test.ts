@@ -52,7 +52,7 @@ function definition(): EffectiveExecutionDefinition {
     agent: {
       id: `${id}-agent`,
       instructions: `Handle ${id}`,
-      model: "test-model",
+      runtime: "codex" as const,
     },
     prompt: id,
     policies: effective,

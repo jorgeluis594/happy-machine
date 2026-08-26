@@ -23,7 +23,11 @@ function definition(): EffectiveExecutionDefinition {
   };
   const work = (id: string) => ({
     id,
-    agent: { id: `${id}-agent`, instructions: id, model: "model" },
+    agent: {
+      id: `${id}-agent`,
+      instructions: id,
+      runtime: "codex" as const,
+    },
     prompt: id,
     policies,
   });

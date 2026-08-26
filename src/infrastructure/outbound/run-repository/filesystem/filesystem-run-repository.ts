@@ -151,7 +151,7 @@ export class FilesystemRunRepository implements RunRepository {
           "utf8",
         ),
       ) as Record<string, unknown>;
-      definition = manifest.effectiveDefinition as RecoveredRun["definition"];
+      definition = this.normalizeDefinition(manifest.effectiveDefinition);
     } catch (error) {
       throw new Error(
         `Durable run storage is corrupt: ${error instanceof Error ? error.message : String(error)}`,
@@ -167,6 +167,41 @@ export class FilesystemRunRepository implements RunRepository {
     )
       throw new Error("Durable run storage is inconsistent");
     return { run, definition };
+  }
+
+  private normalizeDefinition(value: unknown): RecoveredRun["definition"] {
+    const definition = structuredClone(value) as RecoveredRun["definition"];
+    if (!definition || typeof definition !== "object") return definition;
+
+    const normalizeAgent = (agent: unknown): void => {
+      if (!agent || typeof agent !== "object" || Array.isArray(agent)) return;
+      const record = agent as Record<string, unknown>;
+      if (record.runtime === undefined) record.runtime = "codex";
+      delete record.model;
+    };
+
+    if (
+      definition.agents &&
+      typeof definition.agents === "object" &&
+      !Array.isArray(definition.agents)
+    )
+      for (const agent of Object.values(definition.agents))
+        normalizeAgent(agent);
+
+    if (
+      definition.states &&
+      typeof definition.states === "object" &&
+      !Array.isArray(definition.states)
+    )
+      for (const state of Object.values(definition.states)) {
+        if (!state || typeof state !== "object") continue;
+        if (state.type === "agent") normalizeAgent(state.agent);
+        else if (state.type === "parallel")
+          for (const task of Object.values(state.tasks ?? {}))
+            normalizeAgent(task.agent);
+      }
+
+    return definition;
   }
 
   async discoverProjectRoot(currentDirectory: string): Promise<string> {

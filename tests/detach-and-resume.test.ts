@@ -58,7 +58,7 @@ describe("detach and resume CLI", () => {
 agents:
   worker:
     instructions: agents/worker.md
-    model: original-model
+    runtime: codex
 defaults:
   attempt_timeout: 30s
   workflow_timeout: 2m

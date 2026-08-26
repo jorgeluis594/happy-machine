@@ -1005,7 +1005,7 @@ export class RecoverWorkflow {
       instructions: work.agent.instructions,
       prompt: work.prompt,
       allowedOutcomes,
-      model: work.agent.model,
+      runtime: work.agent.runtime,
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,
       signal: controlled.signal,

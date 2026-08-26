@@ -54,7 +54,7 @@ describe("create-skill implementation workflow", () => {
         controllerLeaseMs: 30_000,
       },
       agents: {
-        create_skill_implementation: { model: "gpt-5.6-sol" },
+        create_skill_implementation: { runtime: "codex" },
       },
     });
 
