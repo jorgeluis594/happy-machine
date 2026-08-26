@@ -103,9 +103,9 @@ Runs can branch, cycle, retry failed attempts, execute parallel tasks, detach, r
 
 Happy Machine v1 uses Orca as its executor and supports Codex and OpenCode as agent runtimes. These are the first integrations, not intended to be permanent product limits.
 
-Agent selection is project-local. `happy-machine.yaml` registers named profiles with an instruction file and an optional `runtime: codex | opencode`; omitted runtimes default to `codex`. Every normal state and parallel task selects one registered profile, so a workflow can mix Codex and OpenCode tasks without runtime overrides in the workflow itself.
+Agent selection is project-local. `happy-machine.yaml` registers named profiles with an instruction file, an optional `runtime: codex | opencode`, and an optional open-ended `reasoning` string; omitted runtimes default to `codex`. Every normal state and parallel task selects one registered profile, so a workflow can mix Codex and OpenCode tasks without runtime or reasoning overrides in the workflow itself.
 
-Happy Machine selects only the CLI. Models, internal agents, permissions, and sandbox behavior remain the responsibility of each CLI's local configuration. The project executor is currently limited to Orca.
+Happy Machine selects the CLI and, when configured on the profile, its reasoning effort or variant. Models, internal agents, permissions, and sandbox behavior remain the responsibility of each CLI's local configuration. The project executor is currently limited to Orca.
 
 ## Getting started
 
@@ -117,7 +117,7 @@ Happy Machine selects only the CLI. Models, internal agents, permissions, and sa
 - Codex and/or OpenCode installed, authenticated, and configured for every runtime used by the project.
 - Git when using `workspace.mode: worktree`.
 
-The Orca adapter launches exactly `codex` or `opencode` according to the selected profile. It does not pass model, internal-agent, prompt, permission, or sandbox flags to either CLI; the prompt is delivered separately after terminal startup. Missing executables use the normal technical-failure and retry handling.
+Without profile reasoning, the Orca adapter launches exactly `codex` or `opencode`. With it, Codex receives `-c model_reasoning_effort=...` and OpenCode receives `run --interactive --variant ...`; values are safely serialized and quoted. It does not pass model, internal-agent, prompt, permission, or sandbox flags to either CLI, and the prompt is delivered separately after terminal startup. Missing executables and CLI-rejected reasoning values use the normal technical-failure and retry handling.
 
 The standalone `create-skill` command additionally requires a configured and authenticated Codex CLI compatible with the validated `0.148.0` baseline. It must expose `app-server` with a Unix listener, `app-server proxy`, and the remote TUI option. Happy Machine checks these capabilities before recording begins.
 
@@ -167,9 +167,11 @@ agents:
   delivery:
     instructions: agents/delivery.md
     runtime: codex
+    reasoning: high
   qa:
     instructions: agents/qa.md
     runtime: opencode
+    reasoning: max
 
 defaults:
   attempt_timeout: 30m
@@ -180,7 +182,7 @@ defaults:
   max_transitions: 20
 ```
 
-Each agent profile has its own instructions and runtime. A workflow state or parallel task selects a profile through `agent`; runtime overrides are not supported at state or task scope. `runtime` is optional and defaults to `codex`.
+Each agent profile has its own instructions, runtime, and optional reasoning value. A workflow state or parallel task selects a profile through `agent`; runtime and reasoning overrides are not supported at state or task scope. `runtime` is optional and defaults to `codex`; `reasoning` is an optional non-empty string and is passed through without enum or model-compatibility validation.
 
 To migrate an older definition, remove every `model` field from agent profiles, states, and parallel tasks, then set `runtime: codex` or `runtime: opencode` on each profile that needs an explicit CLI. New definitions containing `model` are rejected. Existing durable snapshots without `runtime` remain recoverable as Codex runs; their legacy `model` value is ignored.
 

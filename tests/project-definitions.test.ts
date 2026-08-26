@@ -212,6 +212,69 @@ describe("agents, prompts, states, tasks, and outcomes", () => {
     },
   );
 
+  it.each(["codex", "opencode"] as const)(
+    "accepts open-ended reasoning for the %s agent runtime",
+    async (runtime) => {
+      const project = validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md\n    runtime: ${runtime}\n    reasoning: deep custom effort`,
+      );
+      const setup = await fixture(project);
+      const definition = await loader.load(setup.workflowPath, setup.root);
+
+      expect(definition.agents.worker).toMatchObject({
+        runtime,
+        reasoning: "deep custom effort",
+      });
+      expect(definition.states.start).toMatchObject({
+        agent: { runtime, reasoning: "deep custom effort" },
+      });
+    },
+  );
+
+  it.each([
+    ["reasoning: ''", /reasoning must be a non-empty string/],
+    ["reasoning: 7", /reasoning must be a non-empty string/],
+    ["reasoning: false", /reasoning must be a non-empty string/],
+  ])("rejects invalid agent %s", async (reasoning, message) => {
+    await rejection(
+      validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md\n    ${reasoning}`,
+      ),
+      validWorkflow,
+      message,
+    );
+  });
+
+  it("rejects reasoning overrides in states and parallel tasks", async () => {
+    await rejection(
+      validProject,
+      validWorkflow.replace(
+        "    outcomes:",
+        "    reasoning: high\n    outcomes:",
+      ),
+      /Unknown workflow\.states\.start field: reasoning/,
+    );
+    await rejection(
+      validProject,
+      `version: 1
+id: reasoning-override
+initial_state: batch
+states:
+  batch:
+    type: parallel
+    tasks:
+      one:
+        agent: worker
+        reasoning: high
+        prompt: Work
+    outcomes: {succeeded: $succeeded, failed: $failed}
+`,
+      /Unknown workflow\.states\.batch\.tasks\.one field: reasoning/,
+    );
+  });
+
   it("rejects model fields in agents, states, and parallel tasks", async () => {
     await rejection(
       validProject.replace(
@@ -633,7 +696,7 @@ describe("snapshot sources and explicit inputs", () => {
     );
     const project = validProject.replace(
       "    instructions: agents/worker.md",
-      "    instructions: agents/worker.md\n    runtime: opencode",
+      "    instructions: agents/worker.md\n    runtime: opencode\n    reasoning: max",
     );
     const setup = await fixture(project, workflow);
     const definition = await loader.load(setup.workflowPath, setup.root);
@@ -660,7 +723,7 @@ describe("snapshot sources and explicit inputs", () => {
     expect(
       definition.snapshotSource.effectiveDefinition.states.start,
     ).toMatchObject({
-      agent: { id: "worker", runtime: "opencode" },
+      agent: { id: "worker", runtime: "opencode", reasoning: "max" },
       policies: { attemptTimeoutMs: 420_000 },
     });
   });

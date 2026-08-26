@@ -639,6 +639,7 @@ export class ExecuteWorkflow {
           prompt: work.prompt,
           allowedOutcomes,
           runtime: work.agent.runtime,
+          reasoning: work.agent.reasoning,
           timeoutMs: work.policies.attemptTimeoutMs,
           attemptNumber,
           signal,

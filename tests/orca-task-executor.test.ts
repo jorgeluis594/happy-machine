@@ -138,6 +138,56 @@ describe("Orca terminal-only task executor", () => {
     ]);
   });
 
+  it.each([
+    ["codex" as const, "high", `codex -c 'model_reasoning_effort="high"'`],
+    ["opencode" as const, "max", "opencode run --interactive --variant 'max'"],
+  ])(
+    "launches %s with configured reasoning",
+    async (runtime, reasoning, command) => {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "happy-orca-reasoning-"),
+      );
+      const launch = await launchFixture(root);
+      launch.runtime = runtime;
+      launch.reasoning = reasoning;
+      const executor = new OrcaTaskExecutor(
+        fixture,
+        undefined,
+        noDelay,
+        noDelay,
+      );
+
+      await executor.execute(launch, () => Promise.resolve());
+
+      expect((await calls(root))[0]).toContain(command);
+    },
+  );
+
+  it.each([
+    "space value",
+    `quote ' and "`,
+    "$(touch nope)",
+    "`touch nope`",
+    "line one\nline two",
+  ])("quotes adversarial reasoning as literal data: %j", async (reasoning) => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-orca-safe-reasoning-"),
+    );
+    const launch = await launchFixture(root);
+    launch.reasoning = reasoning;
+    const executor = new OrcaTaskExecutor(fixture, undefined, noDelay, noDelay);
+
+    await executor.execute(launch, () => Promise.resolve());
+
+    const create = (await calls(root))[0];
+    const command = create[create.indexOf("--command") + 1];
+    const serialized = JSON.stringify(reasoning);
+    expect(command).toBe(
+      `codex -c '${`model_reasoning_effort=${serialized}`.replaceAll("'", `'"'"'`)}'`,
+    );
+    expect(existsSync(path.join(root, "nope"))).toBe(false);
+  });
+
   it("never interpolates dynamic or shell-like content into the runtime command", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-quote-"));
     const launch = await launchFixture(root);

@@ -32,6 +32,7 @@ agents:
   worker:
     instructions: agents/worker.md
     runtime: opencode
+    reasoning: max
 defaults:
   max_attempts: 4
 `,
@@ -141,11 +142,11 @@ describe("filesystem run snapshots", () => {
     expect(manifest.effectiveDefinition).toMatchObject({
       executorType: "orca",
       workspaceMode: "direct",
-      agents: { worker: { runtime: "opencode" } },
+      agents: { worker: { runtime: "opencode", reasoning: "max" } },
       policies: { maxAttempts: 4 },
       states: {
         start: {
-          agent: { runtime: "opencode" },
+          agent: { runtime: "opencode", reasoning: "max" },
           prompt: "Original prompt",
         },
       },
@@ -168,6 +169,45 @@ describe("filesystem run snapshots", () => {
       source: definition.snapshotSource,
     });
     expect(repeated.record.identity).toBe(created.record.identity);
+  });
+
+  it("includes reasoning in snapshot content and identity", async () => {
+    const setup = await fixture();
+    const definitions = new FilesystemProjectDefinitions();
+    const repository = new FilesystemRunRepository();
+    const firstDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const first = await repository.createSnapshot({
+      runId: "run-reasoning-max",
+      projectRoot: setup.root,
+      workflowId: firstDefinition.workflowId,
+      source: firstDefinition.snapshotSource,
+    });
+
+    const projectPath = path.join(setup.root, "happy-machine.yaml");
+    await writeFile(
+      projectPath,
+      (await readFile(projectPath, "utf8")).replace(
+        "reasoning: max",
+        "reasoning: high",
+      ),
+    );
+    const secondDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const second = await repository.createSnapshot({
+      runId: "run-reasoning-high",
+      projectRoot: setup.root,
+      workflowId: secondDefinition.workflowId,
+      source: secondDefinition.snapshotSource,
+    });
+
+    expect(first.definition.agents.worker.reasoning).toBe("max");
+    expect(second.definition.agents.worker.reasoning).toBe("high");
+    expect(second.record.identity).not.toBe(first.record.identity);
   });
 
   it("loads legacy snapshots without runtime as Codex and ignores model", async () => {
@@ -217,10 +257,12 @@ describe("filesystem run snapshots", () => {
       >;
     };
     delete effective.agents.worker.runtime;
+    delete effective.agents.worker.reasoning;
     effective.agents.worker.model = "legacy-default-model";
     const normal = effective.states.start;
     if (normal.type !== "agent") throw new Error("expected legacy agent state");
     delete normal.agent.runtime;
+    delete normal.agent.reasoning;
     normal.agent.model = "legacy-override-model";
     effective.states.legacy_parallel = {
       type: "parallel",
@@ -241,6 +283,7 @@ describe("filesystem run snapshots", () => {
 
     const recovered = await repository.load(setup.root, run.id);
     expect(recovered.definition.agents.worker.runtime).toBe("codex");
+    expect(recovered.definition.agents.worker.reasoning).toBeUndefined();
     expect(recovered.definition.agents.worker).not.toHaveProperty("model");
     const state = recovered.definition.states.start;
     expect(state.type).toBe("agent");

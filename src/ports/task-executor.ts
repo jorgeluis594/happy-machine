@@ -16,6 +16,7 @@ export interface TaskLaunch {
   prompt: string;
   allowedOutcomes: readonly string[];
   runtime: AgentRuntime;
+  reasoning?: string;
   timeoutMs: number;
   attemptNumber: number;
   signal?: AbortSignal;

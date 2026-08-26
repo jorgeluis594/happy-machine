@@ -15,6 +15,7 @@ export interface AgentDefinition {
   id: string;
   instructions: string;
   runtime: AgentRuntime;
+  reasoning?: string;
 }
 
 export type DefinitionArtifactKind =

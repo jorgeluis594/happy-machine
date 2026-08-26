@@ -211,7 +211,11 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     for (const [id, value] of Object.entries(rawAgents)) {
       this.id(id, `agent ID ${id}`);
       const raw = this.map(value, `project.agents.${id}`);
-      this.keys(raw, ["instructions", "runtime"], `project.agents.${id}`);
+      this.keys(
+        raw,
+        ["instructions", "runtime", "reasoning"],
+        `project.agents.${id}`,
+      );
       const instructions = await this.markdown(
         root,
         raw.instructions,
@@ -226,6 +230,14 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         id,
         instructions,
         runtime: this.runtime(raw.runtime, `project.agents.${id}.runtime`),
+        ...(raw.reasoning === undefined
+          ? {}
+          : {
+              reasoning: this.string(
+                raw.reasoning,
+                `project.agents.${id}.reasoning`,
+              ),
+            }),
       };
     }
     return result;

@@ -131,6 +131,7 @@ async function definition(
         id: "worker",
         instructions: "Immutable instructions\n",
         runtime: "codex",
+        reasoning: "high",
       },
     },
     policies: effectivePolicies,
@@ -143,6 +144,7 @@ async function definition(
           id: "worker",
           instructions: "Immutable instructions\n",
           runtime: "codex",
+          reasoning: "high",
         },
         prompt: "Immutable prompt",
         policies: effectivePolicies,
@@ -336,6 +338,11 @@ describe("retries and timeouts", () => {
       ["approved"],
       ["approved"],
       ["approved"],
+    ]);
+    expect(executor.launches.map((launch) => launch.reasoning)).toEqual([
+      "high",
+      "high",
+      "high",
     ]);
     expect(await readFile(path.join(setup.root, "source.ts"), "utf8")).toBe(
       "preserved\n",
