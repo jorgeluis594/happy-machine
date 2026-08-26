@@ -4,7 +4,10 @@ import type {
   ExternalExecutionStatus,
 } from "../domain/execution/run.js";
 import type { DiagnosticContext } from "./diagnostics.js";
-import type { AgentRuntime } from "./project-definitions.js";
+import type {
+  AgentRuntime,
+  StructuredOutputDefinition,
+} from "./project-definitions.js";
 
 export interface TaskLaunch {
   identity: string;
@@ -15,6 +18,7 @@ export interface TaskLaunch {
   instructions: string;
   prompt: string;
   allowedOutcomes: readonly string[];
+  structuredOutputs?: Record<string, StructuredOutputDefinition>;
   runtime: AgentRuntime;
   reasoning?: string;
   timeoutMs: number;

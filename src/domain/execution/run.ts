@@ -70,6 +70,21 @@ export interface TaskRecord {
   attempts: AttemptRecord[];
 }
 
+export interface StructuredOutputRecord {
+  stateId: string;
+  visitNumber: number;
+  name: string;
+  type: "work_items";
+  itemCount: number;
+  durablePath: string;
+  sha256: string;
+}
+
+export interface DynamicTaskBinding {
+  workItem: { [key: string]: JsonValue };
+  source: { stateId: string; visitNumber: number; outputName: string };
+}
+
 export interface WorktreeProvenance {
   stateId: string;
   visitNumber: number;
@@ -129,6 +144,7 @@ export interface NormalVisitRecord {
   task: TaskRecord;
   outcome?: string;
   target?: string;
+  outputs?: StructuredOutputRecord[];
 }
 
 export type ParallelTaskStatus =
@@ -140,6 +156,7 @@ export interface ParallelTaskRecord extends TaskRecord {
   failure?: AttemptFailure;
   documents: DocumentRecord[];
   workspace: TaskWorkspaceRecord;
+  dynamic?: DynamicTaskBinding;
 }
 
 export interface ParallelVisitRecord {
@@ -151,6 +168,7 @@ export interface ParallelVisitRecord {
   tasks: ParallelTaskRecord[];
   outcome?: "succeeded" | "failed";
   target?: string;
+  dynamicSource?: DynamicTaskBinding["source"];
 }
 
 export type VisitRecord = NormalVisitRecord | ParallelVisitRecord;
@@ -218,6 +236,7 @@ export interface RunRecord {
   failure?: AttemptFailure;
   visits: VisitRecord[];
   documents: DocumentRecord[];
+  structuredOutputs?: StructuredOutputRecord[];
   events: Array<{
     sequence: number;
     type: string;

@@ -6,6 +6,7 @@ import type {
   GlobalLimitEvaluation,
   NormalVisitRecord,
   ParallelVisitRecord,
+  JsonValue,
   RunRecord,
   TaskRecord,
   VisitRecord,
@@ -23,6 +24,7 @@ import type {
   AgentWorkDefinition,
   NormalStateDefinition,
   ParallelStateDefinition,
+  StructuredOutputDefinition,
   ProjectDefinitions,
 } from "../../ports/project-definitions.js";
 import type { RunRepository } from "../../ports/run-repository.js";
@@ -76,6 +78,15 @@ type TaskFailureResult = {
 };
 
 const reconciliationPollMs = 100;
+
+class DynamicSourceError extends Error {
+  constructor(
+    readonly code: "dynamic_source_unavailable" | "dynamic_source_corrupt",
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export class ExecuteWorkflow {
   constructor(
@@ -197,27 +208,42 @@ export class ExecuteWorkflow {
                 contextPath: "",
                 task: { id: `${state.id}-task`, attempts: [] },
               }
-            : {
-                type: "parallel",
-                stateId: state.id,
-                number: visitNumber,
-                contextPath: "",
-                tasks: Object.values(state.tasks).map((task) => ({
-                  id: task.id,
-                  status: "queued",
-                  attempts: [],
-                  documents: [],
-                  workspace:
-                    workspaceMode(run) === "worktree"
-                      ? { mode: "worktree", path: "" }
-                      : { mode: "direct", path: definition.projectRoot },
-                })),
-              };
+            : state.mode === "dynamic"
+              ? await this.materializeDynamicVisit(
+                  run,
+                  state,
+                  visitNumber,
+                  definition.projectRoot,
+                )
+              : {
+                  type: "parallel",
+                  stateId: state.id,
+                  number: visitNumber,
+                  contextPath: "",
+                  tasks: Object.values(state.tasks).map((task) => ({
+                    id: task.id,
+                    status: "queued",
+                    attempts: [],
+                    documents: [],
+                    workspace:
+                      workspaceMode(run) === "worktree"
+                        ? { mode: "worktree", path: "" }
+                        : { mode: "direct", path: definition.projectRoot },
+                  })),
+                };
         run.visits.push(visit);
         this.event(run, "state_entered", timestamp(), {
           stateId: state.id,
           visitNumber,
         });
+        if (visit.type === "parallel" && visit.dynamicSource)
+          this.event(run, "dynamic_tasks_materialized", timestamp(), {
+            stateId: state.id,
+            visitNumber,
+            source: visit.dynamicSource,
+            itemIds: visit.tasks.map((task) => task.id),
+            count: visit.tasks.length,
+          });
         const queuedTasks = visit.type === "agent" ? [visit.task] : visit.tasks;
         for (const task of queuedTasks)
           this.event(run, "task_queued", timestamp(), {
@@ -262,6 +288,11 @@ export class ExecuteWorkflow {
         }
 
         const { outcome, target, documents } = result;
+        const structuredOutputs =
+          visit.type === "agent" && result.outputs
+            ? await this.requireStructuredOutputRepository()
+                .stageStructuredOutputs!(run, visit, result.outputs)
+            : [];
         if (visit.type === "agent") {
           const attempt = visit.task.attempts.at(-1)!;
           attempt.outcome = outcome;
@@ -292,6 +323,20 @@ export class ExecuteWorkflow {
         committedVisit.outcome = outcome;
         committedVisit.target = target;
         committed.documents.push(...documents);
+        committed.structuredOutputs ??= [];
+        committed.structuredOutputs.push(...structuredOutputs);
+        if (committedVisit.type === "agent")
+          committedVisit.outputs = structuredOutputs;
+        for (const output of structuredOutputs)
+          this.event(committed, "structured_output_committed", timestamp(), {
+            stateId: output.stateId,
+            visitNumber: output.visitNumber,
+            outputName: output.name,
+            type: output.type,
+            itemCount: output.itemCount,
+            durablePath: output.durablePath,
+            sha256: output.sha256,
+          });
         for (const document of documents)
           this.event(committed, "document_committed", timestamp(), {
             stateId: document.stateId,
@@ -365,6 +410,14 @@ export class ExecuteWorkflow {
           }
         throw error;
       }
+      if (error instanceof DynamicSourceError) {
+        await this.terminateRun(
+          run,
+          { code: error.code, message: error.message },
+          timestamp,
+        );
+        return run;
+      }
       run.status = "failed";
       let failure = this.failure(error);
       try {
@@ -397,6 +450,7 @@ export class ExecuteWorkflow {
         target: string;
         documents: RunRecord["documents"];
         diagnostic?: AttemptRecord["error"];
+        outputs?: Record<string, JsonValue>;
       }
     | TaskFailureResult
   > {
@@ -410,6 +464,7 @@ export class ExecuteWorkflow {
       projectWorkspaceForTask(run, visit, visit.task),
       timestamp,
       signal,
+      state.produces,
     );
     if (workspaceMode(run) === "worktree")
       await this.coordinator().observeTask(run, visit, visit.task, timestamp);
@@ -437,6 +492,7 @@ export class ExecuteWorkflow {
         documents: RunRecord["documents"];
         attempt?: AttemptRecord;
         diagnostic?: AttemptRecord["error"];
+        outputs?: Record<string, JsonValue>;
       }
     | TaskFailureResult
   > {
@@ -467,7 +523,8 @@ export class ExecuteWorkflow {
           nextIndex += 1;
           if (index >= visit.tasks.length) return;
           const task = visit.tasks[index];
-          const definition = state.tasks[task.id];
+          const definition =
+            state.mode === "dynamic" ? state.task : state.tasks[task.id];
           task.status = "running";
           this.event(run, "parallel_task_started", timestamp(), {
             stateId: state.id,
@@ -561,6 +618,7 @@ export class ExecuteWorkflow {
     projectWorkspace: string,
     timestamp: () => string,
     signal?: AbortSignal,
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): Promise<
     | {
         kind: "completed";
@@ -568,6 +626,7 @@ export class ExecuteWorkflow {
         outcome: string;
         documents: RunRecord["documents"];
         diagnostic?: AttemptRecord["error"];
+        outputs?: Record<string, JsonValue>;
       }
     | TaskFailureResult
   > {
@@ -638,6 +697,7 @@ export class ExecuteWorkflow {
           instructions: work.agent.instructions,
           prompt: work.prompt,
           allowedOutcomes,
+          structuredOutputs: outputDefinitions,
           runtime: work.agent.runtime,
           reasoning: work.agent.reasoning,
           timeoutMs: work.policies.attemptTimeoutMs,
@@ -663,6 +723,7 @@ export class ExecuteWorkflow {
             paths.resultPath,
             paths.outputDirectory,
             allowedOutcomes,
+            outputDefinitions,
           );
           if (declaredFailedRetryable && result.outcome === "failed") {
             const failure = {
@@ -698,6 +759,9 @@ export class ExecuteWorkflow {
             outcome: result.outcome,
             documents,
             ...(result.error === undefined ? {} : { diagnostic: result.error }),
+            ...(result.outputs === undefined
+              ? {}
+              : { outputs: result.outputs }),
           };
         } catch (error) {
           if (!(error instanceof ResultValidationError)) throw error;
@@ -1206,10 +1270,91 @@ export class ExecuteWorkflow {
       return { code: error.code, message: error.message };
     if (error instanceof TaskExecutorError)
       return { code: error.code, message: error.message };
+    if (error instanceof DynamicSourceError)
+      return { code: error.code, message: error.message };
     return {
       code: "engine_failure",
       message: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  private requireStructuredOutputRepository(): RunRepository {
+    if (!this.runs.stageStructuredOutputs || !this.runs.readStructuredOutput)
+      throw new Error("Run repository does not support structured outputs");
+    return this.runs;
+  }
+
+  private async materializeDynamicVisit(
+    run: RunRecord,
+    state: Extract<ParallelStateDefinition, { mode: "dynamic" }>,
+    visitNumber: number,
+    projectRoot: string,
+  ): Promise<ParallelVisitRecord> {
+    const source = [...(run.structuredOutputs ?? [])]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.stateId === state.forEach.stateId &&
+          candidate.name === state.forEach.outputName,
+      );
+    if (!source)
+      throw new DynamicSourceError(
+        "dynamic_source_unavailable",
+        `No committed output ${state.forEach.stateId}.outputs.${state.forEach.outputName} is available`,
+      );
+    let value: JsonValue;
+    try {
+      value =
+        await this.requireStructuredOutputRepository().readStructuredOutput!(
+          source,
+        );
+    } catch (error) {
+      throw new DynamicSourceError(
+        "dynamic_source_corrupt",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (!Array.isArray(value))
+      throw new DynamicSourceError(
+        "dynamic_source_corrupt",
+        "Committed work_items output is not an array",
+      );
+    const dynamicSource = {
+      stateId: source.stateId,
+      visitNumber: source.visitNumber,
+      outputName: source.name,
+    };
+    const visit: ParallelVisitRecord = {
+      type: "parallel",
+      stateId: state.id,
+      number: visitNumber,
+      contextPath: "",
+      dynamicSource,
+      tasks: value.map((item) => {
+        if (
+          !item ||
+          typeof item !== "object" ||
+          Array.isArray(item) ||
+          typeof item.id !== "string"
+        )
+          throw new DynamicSourceError(
+            "dynamic_source_corrupt",
+            "Committed work_items output contains an invalid item",
+          );
+        return {
+          id: item.id,
+          status: "queued",
+          attempts: [],
+          documents: [],
+          dynamic: { workItem: item, source: dynamicSource },
+          workspace:
+            workspaceMode(run) === "worktree"
+              ? { mode: "worktree", path: "" }
+              : { mode: "direct", path: projectRoot },
+        };
+      }),
+    };
+    return visit;
   }
 
   private coordinator(): ProjectWorkspaceCoordinator {

@@ -2,6 +2,7 @@ import type {
   DefinitionSnapshotRecord,
   DocumentRecord,
   JsonValue,
+  StructuredOutputRecord,
   TaskRecord,
   VisitRecord,
   RunRecord,
@@ -68,10 +69,14 @@ export interface ValidatedNormalResult {
   outcome: string;
   documents: string[];
   error?: JsonValue;
+  outputs?: Record<string, JsonValue>;
 }
 
 export type ResultValidationCode =
-  "result_missing_or_invalid" | "outcome_invalid" | "documents_invalid";
+  | "result_missing_or_invalid"
+  | "outcome_invalid"
+  | "documents_invalid"
+  | "structured_outputs_invalid";
 
 export class ResultValidationError extends Error {
   constructor(
@@ -135,7 +140,14 @@ export interface RunRepository {
     resultPath: string,
     outputDirectory: string,
     allowedOutcomes: readonly string[],
+    outputDefinitions?: import("./project-definitions.js").NormalStateDefinition["produces"],
   ): Promise<ValidatedNormalResult>;
+  stageStructuredOutputs?(
+    run: RunRecord,
+    visit: VisitRecord,
+    outputs: Readonly<Record<string, JsonValue>>,
+  ): Promise<StructuredOutputRecord[]>;
+  readStructuredOutput?(output: StructuredOutputRecord): Promise<JsonValue>;
   stageDocuments(
     run: RunRecord,
     visit: VisitRecord,
