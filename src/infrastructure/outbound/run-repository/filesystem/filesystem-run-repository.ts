@@ -19,6 +19,8 @@ import type {
   ControllerLease,
   DocumentRecord,
   RunRecord,
+  JsonValue,
+  StructuredOutputRecord,
   TaskRecord,
   VisitRecord,
 } from "../../../../domain/execution/run.js";
@@ -45,6 +47,7 @@ import type {
   SnapshotCreationResult,
   ValidatedNormalResult,
 } from "../../../../ports/run-repository.js";
+import type { StructuredOutputDefinition } from "../../../../ports/project-definitions.js";
 
 interface StoredArtifact {
   kind: string;
@@ -151,7 +154,7 @@ export class FilesystemRunRepository implements RunRepository {
           "utf8",
         ),
       ) as Record<string, unknown>;
-      definition = manifest.effectiveDefinition as RecoveredRun["definition"];
+      definition = this.normalizeDefinition(manifest.effectiveDefinition);
     } catch (error) {
       throw new Error(
         `Durable run storage is corrupt: ${error instanceof Error ? error.message : String(error)}`,
@@ -167,6 +170,43 @@ export class FilesystemRunRepository implements RunRepository {
     )
       throw new Error("Durable run storage is inconsistent");
     return { run, definition };
+  }
+
+  private normalizeDefinition(value: unknown): RecoveredRun["definition"] {
+    const definition = structuredClone(value) as RecoveredRun["definition"];
+    if (!definition || typeof definition !== "object") return definition;
+
+    const normalizeAgent = (agent: unknown): void => {
+      if (!agent || typeof agent !== "object" || Array.isArray(agent)) return;
+      const record = agent as Record<string, unknown>;
+      if (record.runtime === undefined) record.runtime = "codex";
+      delete record.model;
+    };
+
+    if (
+      definition.agents &&
+      typeof definition.agents === "object" &&
+      !Array.isArray(definition.agents)
+    )
+      for (const agent of Object.values(definition.agents))
+        normalizeAgent(agent);
+
+    if (
+      definition.states &&
+      typeof definition.states === "object" &&
+      !Array.isArray(definition.states)
+    )
+      for (const state of Object.values(definition.states)) {
+        if (!state || typeof state !== "object") continue;
+        if (state.type === "agent") normalizeAgent(state.agent);
+        else if (state.type === "parallel")
+          for (const task of Object.values(state.tasks ?? {}))
+            normalizeAgent(task.agent);
+        if (state.type === "parallel" && state.mode === "dynamic")
+          normalizeAgent(state.task?.agent);
+      }
+
+    return definition;
   }
 
   async discoverProjectRoot(currentDirectory: string): Promise<string> {
@@ -637,9 +677,27 @@ export class FilesystemRunRepository implements RunRepository {
       String(attemptNumber),
     );
     const outputDirectory = path.join(controlWorkspace, "output");
-    const contextPath = visit.contextPath;
-    const resultPath = path.join(controlWorkspace, "result.json");
     await mkdir(outputDirectory, { recursive: true });
+    let contextPath = visit.contextPath;
+    if (visit.type === "parallel") {
+      const selected = visit.tasks.find((candidate) => candidate === task);
+      if (selected?.dynamic) {
+        contextPath = path.join(path.dirname(controlWorkspace), "context.md");
+        const base = await readFile(visit.contextPath, "utf8");
+        const content = `${base}\n\n## Work item\n\n\`\`\`json\n${JSON.stringify(this.canonical(selected.dynamic.workItem), null, 2)}\n\`\`\`\n`;
+        await writeFile(contextPath, content, {
+          encoding: "utf8",
+          flag: "wx",
+        }).catch(async (error: NodeJS.ErrnoException) => {
+          if (
+            error.code !== "EEXIST" ||
+            (await readFile(contextPath, "utf8")) !== content
+          )
+            throw error;
+        });
+      }
+    }
+    const resultPath = path.join(controlWorkspace, "result.json");
     return { controlWorkspace, contextPath, outputDirectory, resultPath };
   }
 
@@ -647,6 +705,7 @@ export class FilesystemRunRepository implements RunRepository {
     resultPath: string,
     outputDirectory: string,
     allowedOutcomes: readonly string[],
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): Promise<ValidatedNormalResult> {
     let value: unknown;
     try {
@@ -663,6 +722,17 @@ export class FilesystemRunRepository implements RunRepository {
         "result.json must contain an object",
       );
     const result = value as Record<string, unknown>;
+    const allowedFields = new Set([
+      "outcome",
+      "documents",
+      "error",
+      ...(outputDefinitions ? ["outputs"] : []),
+    ]);
+    if (Object.keys(result).some((key) => !allowedFields.has(key)))
+      throw new ResultValidationError(
+        "result_missing_or_invalid",
+        "result.json contains unknown fields",
+      );
     if (
       typeof result.outcome !== "string" ||
       !allowedOutcomes.includes(result.outcome)
@@ -685,11 +755,139 @@ export class FilesystemRunRepository implements RunRepository {
         "result_missing_or_invalid",
         "result.json error must be serializable diagnostic data",
       );
+    let outputs: Record<string, JsonValue> | undefined;
+    if (outputDefinitions) {
+      if (
+        !result.outputs ||
+        typeof result.outputs !== "object" ||
+        Array.isArray(result.outputs)
+      )
+        throw new ResultValidationError(
+          "structured_outputs_invalid",
+          "result.json must contain all declared outputs",
+        );
+      const rawOutputs = result.outputs as Record<string, unknown>;
+      if (
+        Object.keys(rawOutputs).sort().join("\0") !==
+        Object.keys(outputDefinitions).sort().join("\0")
+      )
+        throw new ResultValidationError(
+          "structured_outputs_invalid",
+          "result.json outputs must exactly match declared outputs",
+        );
+      outputs = {};
+      for (const [name, definition] of Object.entries(outputDefinitions)) {
+        const collection = rawOutputs[name];
+        if (
+          !Array.isArray(collection) ||
+          collection.length > definition.maxItems
+        )
+          throw new ResultValidationError(
+            "structured_outputs_invalid",
+            `Output ${name} must be an array of at most ${definition.maxItems} items`,
+          );
+        const ids = new Set<string>();
+        for (const item of collection) {
+          if (
+            !item ||
+            typeof item !== "object" ||
+            Array.isArray(item) ||
+            !this.isJsonValue(item)
+          )
+            throw new ResultValidationError(
+              "structured_outputs_invalid",
+              `Output ${name} contains an invalid work item`,
+            );
+          const id = (item as Record<string, unknown>).id;
+          if (
+            typeof id !== "string" ||
+            id.trim() === "" ||
+            id.startsWith("$") ||
+            ids.has(id)
+          )
+            throw new ResultValidationError(
+              "structured_outputs_invalid",
+              `Output ${name} contains a missing, invalid, or duplicate item id`,
+            );
+          ids.add(id);
+        }
+        outputs[name] = collection as JsonValue;
+      }
+    }
     return {
       outcome: result.outcome,
       documents: result.documents as string[],
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(outputs === undefined ? {} : { outputs }),
     } as ValidatedNormalResult;
+  }
+
+  async stageStructuredOutputs(
+    run: RunRecord,
+    visit: VisitRecord,
+    outputs: Readonly<Record<string, JsonValue>>,
+  ): Promise<StructuredOutputRecord[]> {
+    const records: StructuredOutputRecord[] = [];
+    for (const [name, value] of Object.entries(outputs)) {
+      const internalPath = path.posix.join(
+        "states",
+        this.segment(visit.stateId),
+        "visits",
+        String(visit.number),
+        "outputs",
+        `${this.segment(name)}.json`,
+      );
+      const durablePath = this.durablePath(
+        this.runDirectory(run),
+        internalPath,
+      );
+      const content = `${JSON.stringify(this.canonical(value), null, 2)}\n`;
+      await mkdir(path.dirname(durablePath), { recursive: true });
+      await writeFile(durablePath, content, {
+        encoding: "utf8",
+        flag: "wx",
+      }).catch(async (error: NodeJS.ErrnoException) => {
+        if (
+          error.code !== "EEXIST" ||
+          (await readFile(durablePath, "utf8")) !== content
+        )
+          throw error;
+      });
+      records.push({
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        name,
+        type: "work_items",
+        itemCount: Array.isArray(value) ? value.length : 0,
+        durablePath,
+        sha256: this.sha256(content),
+      });
+    }
+    return records;
+  }
+
+  async readStructuredOutput(
+    output: StructuredOutputRecord,
+  ): Promise<JsonValue> {
+    let content: string;
+    try {
+      content = await readFile(output.durablePath, "utf8");
+    } catch {
+      throw new Error(
+        "dynamic_source_corrupt: structured output artifact is missing",
+      );
+    }
+    if (this.sha256(content) !== output.sha256)
+      throw new Error(
+        "dynamic_source_corrupt: structured output artifact hash mismatch",
+      );
+    try {
+      return JSON.parse(content) as JsonValue;
+    } catch {
+      throw new Error(
+        "dynamic_source_corrupt: structured output artifact is invalid JSON",
+      );
+    }
   }
 
   async stageDocuments(

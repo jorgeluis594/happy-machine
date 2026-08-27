@@ -1,0 +1,59 @@
+<style>
+  .options-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin:22px 0; }
+  .arch-option { border:1px solid var(--border); border-radius:14px; padding:17px; background:var(--surface); }
+  .arch-option.selected { border:3px solid #1c8a68; background:#eafbf4; color:#105943; }
+  .badge { display:inline-block; border-radius:999px; padding:4px 9px; margin-bottom:9px; background:#d8f5ea; color:#105943; font-size:11px; font-weight:800; }
+  .arch-option h3 { margin:0 0 8px; }
+  .arch-option p { margin:0 0 12px; font-size:13px; color:var(--text-secondary); }
+  .arch-option pre { margin:0; padding:12px; background:#151722; color:#e8eaf6; border-radius:9px; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:auto; }
+  .flow { display:grid; grid-template-columns:1fr 45px 1fr 45px 1fr; align-items:center; gap:9px; margin-top:24px; }
+  .layer { border:2px solid #7c6cf2; border-radius:12px; padding:16px; background:#f5f3ff; color:#332b75; text-align:center; }
+  .layer.core { border-color:#1c8a68; background:#eafbf4; color:#105943; }
+  .arrow { text-align:center; font-size:24px; color:var(--text-secondary); font-weight:800; }
+  .rule { margin-top:20px; padding:14px 17px; border-left:4px solid #1c8a68; background:#eafbf4; border-radius:7px; color:#105943; }
+  @media(max-width:820px){.options-grid,.flow{grid-template-columns:1fr}.flow>.arrow{transform:rotate(90deg)}}
+</style>
+
+<h2>Alternativas de organización del repositorio</h2>
+<p class="subtitle">Las tres pueden funcionar; las decisiones tomadas favorecen un monolito modular con fronteras internas.</p>
+
+<div class="options-grid">
+  <section class="arch-option selected">
+    <span class="badge">RECOMENDADA · ACORDADA</span>
+    <h3>A. Capas en /src</h3>
+    <p>Un solo paquete, dependencias hacia el dominio y adaptadores en los bordes.</p>
+    <pre>src/
+  domain/
+  application/
+  ports/
+  infrastructure/</pre>
+  </section>
+  <section class="arch-option">
+    <h3>B. Feature-first</h3>
+    <p>Archivos cerca por funcionalidad, pero las fronteras dominio/infra quedan menos visibles.</p>
+    <pre>src/
+  workflows/
+  runs/
+  agents/
+  cli/</pre>
+  </section>
+  <section class="arch-option">
+    <h3>C. Monorepo ahora</h3>
+    <p>Gran aislamiento y publicación independiente, con coste de tooling y estructura prematura.</p>
+    <pre>apps/cli/
+packages/engine/
+packages/sqlite/
+packages/orca/</pre>
+  </section>
+</div>
+
+<h3>Dirección de dependencias</h3>
+<div class="flow">
+  <div class="layer"><strong>Controllers y adapters</strong><br><small>CLI · YAML · SQLite · filesystem · Orca</small></div>
+  <div class="arrow">→</div>
+  <div class="layer core"><strong>Application</strong><br><small>execute · resume · status · cancel · history</small></div>
+  <div class="arrow">→</div>
+  <div class="layer core"><strong>Domain</strong><br><small>máquina · outcomes · join · retry · invariantes</small></div>
+</div>
+
+<div class="rule"><strong>Regla de arquitectura:</strong> dominio y aplicación no importan YAML, SQLite, filesystem, Orca ni el framework del CLI. Los consumen mediante puertos.</div>

@@ -1,0 +1,76 @@
+<style>
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin:16px 0 24px; color:var(--text-secondary); font-size:13px; }
+  .dot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:6px; }
+  .architecture { display:grid; grid-template-columns:1fr 52px 1.25fr 52px 1fr; align-items:center; gap:10px; margin:20px 0; }
+  .agent-box,.engine-box { border:2px solid #7c6cf2; border-radius:14px; padding:18px; background:#f5f3ff; color:#332b75; text-align:center; }
+  .engine-box { border-color:#1c8a68; background:#eafbf4; color:#105943; }
+  .arrow-stack { text-align:center; font-weight:800; color:var(--text-secondary); font-size:21px; }
+  .arrow-stack small { display:block; font-size:10px; font-weight:600; line-height:1.2; }
+  .stores { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:26px 0 12px; }
+  .store { border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--surface); }
+  .store strong { display:block; margin-bottom:7px; }
+  .store p { margin:0; color:var(--text-secondary); font-size:13px; }
+  .store.primary { border:2px solid #1c8a68; }
+  .store.secondary { border:2px solid #d48612; }
+  .store.cache { opacity:.7; }
+  .envelopes { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:22px; }
+  .envelope { border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  .envelope h3 { margin:0; padding:12px 15px; background:var(--surface-secondary); font-size:15px; }
+  .envelope pre { margin:0; padding:15px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:#151722; color:#e8eaf6; overflow:auto; }
+  .rule { margin-top:20px; padding:14px 17px; border-left:4px solid #7c6cf2; background:#f5f3ff; border-radius:7px; color:#332b75; }
+  @media(max-width:800px){ .architecture{grid-template-columns:1fr}.arrow-stack{transform:rotate(90deg)}.stores,.envelopes{grid-template-columns:1fr} }
+</style>
+
+<h2>Comunicación durable entre estados</h2>
+<p class="subtitle">Markdown puede ser contenido; la memoria puede ser caché. Ninguno debería ser el protocolo durable.</p>
+
+<div class="architecture">
+  <div class="agent-box"><strong>Estado A / Orca</strong><br><small>produce resultado + archivos</small></div>
+  <div class="arrow-stack">→<small>ResultEnvelope</small></div>
+  <div class="engine-box"><strong>Motor durable</strong><br><small>valida · persiste · decide transición<br>materializa la siguiente entrada</small></div>
+  <div class="arrow-stack">→<small>InputEnvelope</small></div>
+  <div class="agent-box"><strong>Estado B / Orca</strong><br><small>recibe contexto preparado</small></div>
+</div>
+
+<div class="stores">
+  <div class="store primary">
+    <strong>Base durable — fuente de verdad</strong>
+    <p>Ejecuciones, estados, intentos, eventos, outcomes y referencias. SQLite inicialmente.</p>
+  </div>
+  <div class="store secondary">
+    <strong>Artefactos — contenido</strong>
+    <p>Markdown, código, imágenes y archivos grandes, identificados por referencias estables.</p>
+  </div>
+  <div class="store cache">
+    <strong>Memoria — descartable</strong>
+    <p>Cachés, procesos activos y límites de concurrencia. Todo se reconstruye al reiniciar.</p>
+  </div>
+</div>
+
+<div class="envelopes">
+  <div class="envelope">
+    <h3>Salida del estado A</h3>
+    <pre>{
+  "status": "completed",
+  "outcome": "needs_revision",
+  "data": { "score": 0.55 },
+  "artifacts": [
+    { "ref": "artifact:feedback.md" }
+  ]
+}</pre>
+  </div>
+  <div class="envelope">
+    <h3>Entrada materializada para B</h3>
+    <pre>{
+  "state": "redactar",
+  "attempt": 2,
+  "data": { "topic": "..." },
+  "artifacts": [
+    { "role": "feedback", "ref": "..." },
+    { "role": "previous_draft", "ref": "..." }
+  ]
+}</pre>
+  </div>
+</div>
+
+<div class="rule"><strong>Regla:</strong> A nunca escribe directamente en B. A entrega un resultado al motor; el motor lo confirma y construye la entrada inmutable de B.</div>

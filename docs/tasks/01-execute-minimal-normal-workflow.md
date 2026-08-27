@@ -17,14 +17,14 @@ None.
 - Expose the command happy-machine execute WORKFLOW_PATH.
 - Discover the project by searching upward for the nearest happy-machine.yaml, starting from the workflow path or current directory.
 - Resolve the directory containing happy-machine.yaml as the project root.
-- Support schema version 1, one local agent with a Markdown instruction file and default model, and a workflow containing one agent state.
+- Support schema version 1, one local agent with a Markdown instruction file and optional Codex/OpenCode runtime defaulting to Codex, and a workflow containing one agent state.
 - Support either an inline prompt or prompt_file, combining it with the agent instructions and the generated context contract.
 - Use Orca when executor.type is omitted or set to orca.
 - Use workspace.mode direct when the mode is omitted or set to direct.
 - Resolve the default values needed for the initial attempt.
 - Create project-local storage under .happy-machine, allocate and print a run ID, and persist the run before starting external work.
 - Create a visit, the normal state's implicit task, an isolated control workspace, and a stable attempt identity.
-- Communicate the project workspace, context.md, output directory, result.json, instructions, prompt, model, timeout, and attempt number to Orca unambiguously.
+- Communicate the project workspace, context.md, output directory, result.json, instructions, prompt, runtime, timeout, and attempt number to Orca unambiguously.
 - Consume machine-readable Orca lifecycle responses and retain their basic identifiers and logs.
 - Accept a valid result.json containing a configured outcome and an empty documents array.
 - Ignore stdout and stderr when selecting the outcome.

@@ -5,21 +5,19 @@ description: "Autonomously maintain durable, atomic repository memories through 
 
 # Maintain happy-memory Knowledge
 
-Maintain the active project knowledge without turning memory into an activity log.
+Maintain broad durable project knowledge without turning memory into an activity log.
 
 ## Define Durable Information
 
-Treat information as durable when it will probably remain useful after the current task or conversation and will prevent a future agent from rediscovering it.
+Treat information as durable when it is expected to outlast the current task or conversation and may reasonably help future project work.
 
 Require durable information to:
 
 - Relate to the project, product, architecture, workflow, or applicable preferences.
-- Influence future decisions, implementation, or diagnosis.
-- Remain useful across tasks, sessions, or agents.
 - Express at least one complete idea outside its original conversational context.
-- Describe more than the momentary state of work.
+- Describe reusable project knowledge rather than the momentary state of work.
 
-Keep durability separate from certainty and impact. Represent uncertainty with confidence and future impact with importance.
+Do not require immediate relevance, known future impact, or demonstrated prevention of rediscovery. Keep durability separate from certainty and impact: state uncertainty explicitly, represent it with confidence, and represent the consequence of forgetting with importance. Low importance or confidence does not independently disqualify an otherwise eligible memory.
 
 ## Preserve Atomicity
 
@@ -29,7 +27,7 @@ Split information when its parts can change independently, have different types,
 
 ## Consolidate Autonomously
 
-Observe candidates during work and maintain them at natural consolidation points: after confirming durable knowledge, correcting a prior belief, completing a refactor or logic change, or before handing off reusable knowledge.
+Observe all complete durable candidates during work and maintain them at natural consolidation points: after confirming durable knowledge, correcting a prior belief, completing a refactor or logic change, or before handing off reusable knowledge.
 
 Decide autonomously whether to create, update, divide, delete, or do nothing. Do not request confirmation for a qualifying mutation. Limit discovery and maintenance to knowledge related to the current work.
 

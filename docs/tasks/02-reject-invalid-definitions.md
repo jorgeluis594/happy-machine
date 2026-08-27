@@ -43,7 +43,7 @@ Users can trust that execute will not start work with ambiguous, unsafe, or nont
 1. **No side effects:** For every definition error covered by PRODUCT.md Section 9, when execute is invoked, then it returns exit code 1 and creates no run ID, durable record, managed workspace, or Orca call.
 2. **Closed schema:** Given an unknown field or a version other than 1 in the project or workflow definition, when validation runs, then it reports the error location and rejects execution.
 3. **Unambiguous YAML:** Given a duplicate configuration, state, task, or outcome key, when the document is parsed, then it is rejected even if the YAML parser would otherwise retain only one value.
-4. **Valid local registry:** Given a workflow that references an unknown agent, an empty model, or a missing instruction file, when validation runs, then it is rejected before run creation.
+4. **Valid local registry:** Given a workflow that references an unknown agent, declares an invalid runtime or legacy model field, or uses a missing instruction file, when validation runs, then it is rejected before run creation.
 5. **Mutually exclusive prompts:** Given a state or task with both prompt and prompt_file, or neither, when validation runs, then it is rejected with an error attributable to that state or task.
 6. **Valid graph:** Given an unknown initial_state, unknown target, unreachable state, or reachable state without a path to a terminal, when validation runs, then the definition is rejected.
 7. **Cycles allowed:** Given a cyclic graph where every state is reachable and can reach a terminal, when validation runs, then the cycle alone does not cause rejection.

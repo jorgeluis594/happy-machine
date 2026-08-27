@@ -132,7 +132,7 @@ async function staticDefinitions(options: {
     agent: {
       id: "worker",
       instructions: "Work within global limits",
-      model: "test-model",
+      runtime: "codex",
     },
     prompt: "work",
     policies: effectivePolicies,
@@ -191,7 +191,7 @@ async function parallelDefinitions(): Promise<{
         agent: {
           id: `${id}-agent`,
           instructions: `Instructions for ${id}`,
-          model: "test-model",
+          runtime: "codex",
         },
         prompt: id,
         policies: effectivePolicies,
@@ -294,7 +294,7 @@ async function cycleProject(): Promise<{ root: string; workflow: string }> {
 agents:
   worker:
     instructions: agents/worker.md
-    model: cycle-model
+    runtime: codex
 defaults:
   attempt_timeout: 5s
   max_attempts: 1

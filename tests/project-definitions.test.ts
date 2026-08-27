@@ -10,7 +10,6 @@ const validProject = `version: 1
 agents:
   worker:
     instructions: agents/worker.md
-    model: test-model
 `;
 
 const validWorkflow = `version: 1
@@ -67,8 +66,8 @@ describe("closed definition schema", () => {
     ],
     [
       validProject.replace(
-        "    model: test-model",
-        "    model: test-model\n    command: pwd",
+        "    instructions: agents/worker.md",
+        "    instructions: agents/worker.md\n    command: pwd",
       ),
       validWorkflow,
       /Unknown project\.agents\.worker field: command/,
@@ -136,9 +135,12 @@ states:
 describe("agents, prompts, states, tasks, and outcomes", () => {
   it.each([
     [
-      validProject.replace("    model: test-model", "    model: ''"),
+      validProject.replace(
+        "    instructions: agents/worker.md",
+        "    instructions: agents/worker.md\n    runtime: claude",
+      ),
       validWorkflow,
-      /model must be a non-empty string/,
+      /runtime must be codex or opencode/,
     ],
     [
       validProject,
@@ -182,6 +184,132 @@ describe("agents, prompts, states, tasks, and outcomes", () => {
       await rejection(project, workflow, message);
     },
   );
+
+  it("defaults an omitted agent runtime to Codex", async () => {
+    const setup = await fixture();
+    const definition = await loader.load(setup.workflowPath, setup.root);
+
+    expect(definition.agents.worker.runtime).toBe("codex");
+    expect(definition.states.start).toMatchObject({
+      agent: { id: "worker", runtime: "codex" },
+    });
+  });
+
+  it.each(["codex", "opencode"] as const)(
+    "accepts the %s agent runtime",
+    async (runtime) => {
+      const project = validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md\n    runtime: ${runtime}`,
+      );
+      const setup = await fixture(project);
+      const definition = await loader.load(setup.workflowPath, setup.root);
+
+      expect(definition.agents.worker.runtime).toBe(runtime);
+      expect(definition.states.start).toMatchObject({
+        agent: { id: "worker", runtime },
+      });
+    },
+  );
+
+  it.each(["codex", "opencode"] as const)(
+    "accepts open-ended reasoning for the %s agent runtime",
+    async (runtime) => {
+      const project = validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md\n    runtime: ${runtime}\n    reasoning: deep custom effort`,
+      );
+      const setup = await fixture(project);
+      const definition = await loader.load(setup.workflowPath, setup.root);
+
+      expect(definition.agents.worker).toMatchObject({
+        runtime,
+        reasoning: "deep custom effort",
+      });
+      expect(definition.states.start).toMatchObject({
+        agent: { runtime, reasoning: "deep custom effort" },
+      });
+    },
+  );
+
+  it.each([
+    ["reasoning: ''", /reasoning must be a non-empty string/],
+    ["reasoning: 7", /reasoning must be a non-empty string/],
+    ["reasoning: false", /reasoning must be a non-empty string/],
+  ])("rejects invalid agent %s", async (reasoning, message) => {
+    await rejection(
+      validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md\n    ${reasoning}`,
+      ),
+      validWorkflow,
+      message,
+    );
+  });
+
+  it("rejects reasoning overrides in states and parallel tasks", async () => {
+    await rejection(
+      validProject,
+      validWorkflow.replace(
+        "    outcomes:",
+        "    reasoning: high\n    outcomes:",
+      ),
+      /Unknown workflow\.states\.start field: reasoning/,
+    );
+    await rejection(
+      validProject,
+      `version: 1
+id: reasoning-override
+initial_state: batch
+states:
+  batch:
+    type: parallel
+    tasks:
+      one:
+        agent: worker
+        reasoning: high
+        prompt: Work
+    outcomes: {succeeded: $succeeded, failed: $failed}
+`,
+      /Unknown workflow\.states\.batch\.tasks\.one field: reasoning/,
+    );
+  });
+
+  it("rejects model fields in agents, states, and parallel tasks", async () => {
+    await rejection(
+      validProject.replace(
+        "    instructions: agents/worker.md",
+        "    instructions: agents/worker.md\n    model: legacy-model",
+      ),
+      validWorkflow,
+      /Unknown project\.agents\.worker field: model/,
+    );
+    await rejection(
+      validProject,
+      validWorkflow.replace(
+        "    outcomes:",
+        "    model: legacy-model\n    outcomes:",
+      ),
+      /Unknown workflow\.states\.start field: model/,
+    );
+    await rejection(
+      validProject,
+      `version: 1
+id: legacy-model
+initial_state: batch
+states:
+  batch:
+    type: parallel
+    tasks:
+      one:
+        agent: worker
+        model: legacy-model
+        prompt: Work
+    outcomes: {succeeded: $succeeded, failed: $failed}
+`,
+      /Unknown workflow\.states\.batch\.tasks\.one field: model/,
+    );
+  });
 
   it("accepts normal outcomes named succeeded and failed", async () => {
     const setup = await fixture(
@@ -564,16 +692,20 @@ describe("snapshot sources and explicit inputs", () => {
   it("captures raw declarative artifacts and all effective values", async () => {
     const workflow = validWorkflow.replace(
       "    outcomes:",
-      "    model: override-model\n    attempt_timeout: 7m\n    outcomes:",
+      "    attempt_timeout: 7m\n    outcomes:",
     );
-    const setup = await fixture(validProject, workflow);
+    const project = validProject.replace(
+      "    instructions: agents/worker.md",
+      "    instructions: agents/worker.md\n    runtime: opencode\n    reasoning: max",
+    );
+    const setup = await fixture(project, workflow);
     const definition = await loader.load(setup.workflowPath, setup.root);
 
     expect(definition.snapshotSource.artifacts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "project_configuration",
-          content: validProject,
+          content: project,
         }),
         expect.objectContaining({ kind: "workflow", content: workflow }),
         {
@@ -591,7 +723,7 @@ describe("snapshot sources and explicit inputs", () => {
     expect(
       definition.snapshotSource.effectiveDefinition.states.start,
     ).toMatchObject({
-      agent: { id: "worker", model: "override-model" },
+      agent: { id: "worker", runtime: "opencode", reasoning: "max" },
       policies: { attemptTimeoutMs: 420_000 },
     });
   });

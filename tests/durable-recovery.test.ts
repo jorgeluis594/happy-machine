@@ -52,7 +52,8 @@ function normalState(): StateDefinition {
     agent: {
       id: "worker",
       instructions: "Recover the work",
-      model: "recovery-model",
+      runtime: "codex" as const,
+      reasoning: "high",
     },
     prompt: "work",
     policies: effective,
@@ -68,7 +69,8 @@ function parallelState(): StateDefinition {
     agent: {
       id: `${id}-agent`,
       instructions: `Recover ${id}`,
-      model: "recovery-model",
+      runtime: "codex" as const,
+      reasoning: "max",
     },
     prompt: id,
     policies: effective,
@@ -766,6 +768,9 @@ describe("durable recovery", () => {
     ]);
     expect(executor.launches.map((launch) => launch.allowedOutcomes)).toEqual([
       ["succeeded", "failed"],
+    ]);
+    expect(executor.launches.map((launch) => launch.reasoning)).toEqual([
+      "max",
     ]);
   });
 

@@ -26,7 +26,7 @@ Agent-based coordinators introduced another source of uncertainty: the coordinat
 
 Happy Machine moves those responsibilities out of the conversation:
 
-- Each task runs in a fresh Codex session with a bounded prompt and immutable workflow context.
+- Each task runs in a fresh Codex or OpenCode session with a bounded prompt and immutable workflow context.
 - The task returns a structured `result.json` with one allowed outcome.
 - Happy Machine validates the result and follows the transition declared for that outcome.
 - Run state, documents, retries, limits, and execution history remain durable outside the agent session.
@@ -81,7 +81,7 @@ When you execute a workflow, Happy Machine:
 1. Finds the nearest `happy-machine.yaml` and validates the complete graph.
 2. Snapshots the workflow, agent instructions, prompts, policies, and input documents.
 3. Creates durable run state under `.happy-machine/`.
-4. Uses the current Orca adapter to launch the task in a fresh Codex terminal.
+4. Uses the Orca adapter to launch the task in a fresh terminal for the profile's runtime.
 5. Injects the immutable context and the required structured-result contract.
 6. Validates the resulting outcome and Markdown documents.
 7. Commits the result, follows exactly one declared transition, and repeats.
@@ -101,11 +101,11 @@ Runs can branch, cycle, retry failed attempts, execute parallel tasks, detach, r
 
 ## Current integrations and direction
 
-Happy Machine v1 uses Orca as its executor and Codex as its agent runtime. They are the first integrations, not intended to be permanent product limits.
+Happy Machine v1 uses Orca as its executor and supports Codex and OpenCode as agent runtimes. These are the first integrations, not intended to be permanent product limits.
 
-Agent selection is already project-local. `happy-machine.yaml` registers named agent profiles with an instruction file and a default model. Every normal state and parallel task selects one registered agent and may override its model, so two states in the same workflow can run with different agent instructions and model identifiers.
+Agent selection is project-local. `happy-machine.yaml` registers named profiles with an instruction file, an optional `runtime: codex | opencode`, and an optional open-ended `reasoning` string; omitted runtimes default to `codex`. Every normal state and parallel task selects one registered profile, so a workflow can mix Codex and OpenCode tasks without runtime or reasoning overrides in the workflow itself.
 
-The planned configuration model will also make the executor selectable per project and add a runtime—such as Codex, Claude Code, or OpenCode—to each agent profile. A state will select that profile and may still override its default model. Runtime selection is a future direction and is not implemented yet; the current closed schema accepts only Orca and the current adapter launches Codex.
+Happy Machine selects the CLI and, when configured on the profile, its reasoning effort or variant. Models, internal agents, permissions, and sandbox behavior remain the responsibility of each CLI's local configuration. The project executor is currently limited to Orca.
 
 ## Getting started
 
@@ -114,10 +114,12 @@ The planned configuration model will also make the executor selectable per proje
 - Node.js 22.18 or newer.
 - npm.
 - The Orca CLI available as `orca`, or its path set through `ORCA_CLI_COMMAND`.
-- Codex installed and configured in the environment where Orca opens terminals.
+- Codex and/or OpenCode installed, authenticated, and configured for every runtime used by the project.
 - Git when using `workspace.mode: worktree`.
 
-The current Orca adapter launches the plain `codex` command. Although Happy Machine resolves and snapshots each state's agent and model, this adapter does not yet pass the resolved model to Codex. Effective model, permission, and sandbox behavior therefore come from your local Codex configuration. Other executors and agent runtimes are planned, not currently supported.
+Without profile reasoning, the Orca adapter launches exactly `codex` or `opencode`. With it, Codex receives `-c model_reasoning_effort=...` and OpenCode receives `run --interactive --variant ...`; values are safely serialized and quoted. It does not pass model, internal-agent, prompt, permission, or sandbox flags to either CLI, and the prompt is delivered separately after terminal startup. Missing executables and CLI-rejected reasoning values use the normal technical-failure and retry handling.
+
+The standalone `create-skill` command additionally requires a configured and authenticated Codex CLI compatible with the validated `0.148.0` baseline. It must expose `app-server` with a Unix listener, `app-server proxy`, and the remote TUI option. Happy Machine checks these capabilities before recording begins.
 
 ### Build the CLI from source
 
@@ -131,6 +133,18 @@ happy-machine help
 ```
 
 You can avoid the global link by invoking `node /path/to/happy-machine/dist/src/main.js` wherever the examples use `happy-machine`.
+
+### Create a Codex skill from a demonstration
+
+Run the standalone command from the project where you want to demonstrate a reusable workflow:
+
+```sh
+happy-machine create-skill --agent=codex
+```
+
+This command requires an interactive terminal. After you describe the workflow and consent to recording, Happy Machine opens Codex in the same terminal for the demonstration. Exit that Codex conversation normally when the demonstration is complete. Happy Machine then analyzes the captured conversation in an isolated session and automatically opens a fresh Codex session with skill generation already started.
+
+Happy Machine deletes the raw demonstration, analyzed temporary context, managed demonstration and analysis sessions, local socket, and operation lock. The skill-generation conversation is intentionally retained as normal Codex history, and Codex may ask for permission before writing the resulting skill outside the current project.
 
 ### Create a minimal project
 
@@ -152,10 +166,12 @@ workspace:
 agents:
   delivery:
     instructions: agents/delivery.md
-    model: local-default-model
+    runtime: codex
+    reasoning: high
   qa:
     instructions: agents/qa.md
-    model: local-qa-model
+    runtime: opencode
+    reasoning: max
 
 defaults:
   attempt_timeout: 30m
@@ -166,7 +182,9 @@ defaults:
   max_transitions: 20
 ```
 
-Each agent profile has its own instructions and default model. A workflow state or parallel task selects a profile through `agent` and can override its `model`. The current terminal-only Orca adapter does not yet forward that resolved model to Codex, so local Codex configuration remains authoritative during execution.
+Each agent profile has its own instructions, runtime, and optional reasoning value. A workflow state or parallel task selects a profile through `agent`; runtime and reasoning overrides are not supported at state or task scope. `runtime` is optional and defaults to `codex`; `reasoning` is an optional non-empty string and is passed through without enum or model-compatibility validation.
+
+To migrate an older definition, remove every `model` field from agent profiles, states, and parallel tasks, then set `runtime: codex` or `runtime: opencode` on each profile that needs an explicit CLI. New definitions containing `model` are rejected. Existing durable snapshots without `runtime` remain recoverable as Codex runs; their legacy `model` value is ignored.
 
 **`agents/delivery.md`**
 
@@ -234,7 +252,6 @@ states:
   implementation:
     type: agent
     agent: delivery
-    model: local-implementation-model
     prompt: Implement the planned tasks and validate the focused changes.
     outcomes:
       completed: qa
@@ -255,7 +272,7 @@ states:
       opened: $succeeded
 ```
 
-The `implementation` state overrides the `delivery` profile's default model, while `qa` uses the default model from the separate `qa` profile. The `qa.failed → implementation` transition is an ordinary semantic edge, not a technical failure handler. If an attempt crashes, times out, or produces an invalid result, Happy Machine applies its retry policy instead. The global limits bound the QA correction loop.
+The delivery states run with Codex, while `qa` runs with OpenCode through its separate profile. The `qa.failed → implementation` transition is an ordinary semantic edge, not a technical failure handler. If an attempt crashes, times out, or produces an invalid result, Happy Machine applies its retry policy instead. The global limits bound the QA correction loop.
 
 ### Execute the workflow
 

@@ -19,8 +19,8 @@ A run preserves exactly the rules and inputs with which it started. Later change
 - Permit inputs outside the project root only when explicitly supplied through --input.
 - Copy all inputs into the run's immutable store before starting the initial state.
 - Support duplicate basenames by assigning each input a stable internal ID.
-- Snapshot happy-machine.yaml, effective project configuration, workflow, effective policies, all referenced agent instructions, inline or file prompts, resolved agents and models, overrides, and inputs.
-- Exclude secrets supplied through the environment; persist only declarative configuration and model identifiers.
+- Snapshot happy-machine.yaml, effective project configuration, workflow, effective policies, all referenced agent instructions, inline or file prompts, resolved agents and runtimes, and inputs.
+- Exclude secrets supplied through the environment; persist only declarative configuration and runtime identifiers.
 - Do not copy the complete source tree as part of the definition snapshot.
 - Assign a verifiable identity to the snapshot and associate it durably with the run.
 - Generate an immutable context.md for the first visit containing an index of every input and its stable internal path.
@@ -43,7 +43,7 @@ A run preserves exactly the rules and inputs with which it started. Later change
 3. **Input validation:** Given a missing, unreadable, nonregular, or non-Markdown input, when execute runs, then it fails with exit code 1 before starting the agent.
 4. **Duplicate basenames:** Given two inputs named brief.md in different directories, when the snapshot is created, then both appear exactly once in context.md with distinct IDs and internal paths.
 5. **Input immutability:** Given an already-created run, when the original input is changed or removed before the agent reads it, then the agent still sees the content captured during run creation.
-6. **Definition immutability:** Given an already-created run, when the workflow, configuration, instructions, prompt, or default model changes, then the run snapshot does not change and a new execute captures the edited version.
+6. **Definition immutability:** Given an already-created run, when the workflow, configuration, instructions, prompt, or agent runtime changes, then the run snapshot does not change and a new execute captures the edited version.
 7. **Complete snapshot:** Given a valid workflow, when its snapshot is inspected, then it contains all and only the declarative artifacts listed in scope together with their effective values.
 8. **Secrets excluded:** Given a secret available in the executor environment, when the snapshot is created, then the value does not appear in the durable database, snapshot files, context.md, or events.
 9. **Stable context:** Given the initial state, when multiple attempts run for the same visit, then the context.md path and content remain immutable.
@@ -53,7 +53,7 @@ A run preserves exactly the rules and inputs with which it started. Later change
 
 - Integration tests with internal, external, duplicate, invalid, and mid-run modified inputs.
 - Snapshot test with an inline prompt and another with prompt_file.
-- Snapshot test with a model override and effective policies.
+- Snapshot tests with an effective runtime, legacy Codex fallback, and effective policies.
 - Nonleakage test that injects a sentinel secret into the environment and searches every persisted artifact for it.
 - End-to-end test proving the agent receives the copied content rather than the modified original.
 

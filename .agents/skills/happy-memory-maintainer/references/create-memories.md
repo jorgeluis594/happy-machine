@@ -1,13 +1,14 @@
 # Create Memories
 
-Create a memory only when the candidate is durable, complete, atomic, and not already represented by active project memory.
+Create a memory when the candidate is durable, complete, atomic, has confirmed or reasonably plausible future reuse, and is not already represented by active project memory.
 
 ## Qualify Candidates
 
 1. Restate each candidate as one context-independent idea.
 2. Separate candidates that can change, score, tag, or disappear independently.
-3. Exclude momentary work state and incomplete fragments.
-4. Identify the nature of the idea so the CLI type reflects meaning rather than topic.
+3. Exclude momentary work state, incomplete fragments, raw conversation, and incidental details without a reusable assertion.
+4. Allow coherent uncertainty when it is explicit in the assertion and scored honestly; never present unsupported speculation as fact.
+5. Identify the nature of the idea so the CLI type reflects meaning rather than topic.
 
 Allow one consolidation point to produce multiple candidates. Keep each candidate on its own creation path.
 

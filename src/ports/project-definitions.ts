@@ -9,10 +9,13 @@ export interface EffectivePolicies {
   controllerLeaseMs: number;
 }
 
+export type AgentRuntime = "codex" | "opencode";
+
 export interface AgentDefinition {
   id: string;
   instructions: string;
-  model: string;
+  runtime: AgentRuntime;
+  reasoning?: string;
 }
 
 export type DefinitionArtifactKind =
@@ -40,10 +43,18 @@ export interface AgentWorkDefinition {
   policies: EffectivePolicies;
 }
 
+export interface WorkItemsOutputDefinition {
+  type: "work_items";
+  maxItems: number;
+}
+
+export type StructuredOutputDefinition = WorkItemsOutputDefinition;
+
 export interface NormalStateDefinition extends AgentWorkDefinition {
   id: string;
   type: "agent";
   outcomes: Record<string, string>;
+  produces?: Record<string, StructuredOutputDefinition>;
   /** Task 01 compatibility until the multi-state executor is delivered. */
   attemptTimeoutMs: number;
 }
@@ -52,14 +63,33 @@ export interface ParallelTaskDefinition extends AgentWorkDefinition {
   id: string;
 }
 
-export interface ParallelStateDefinition {
+interface ParallelStateDefinitionBase {
   id: string;
   type: "parallel";
-  tasks: Record<string, ParallelTaskDefinition>;
   outcomes: { succeeded: string; failed: string };
   policies: EffectivePolicies;
   effectiveMaxConcurrency: number;
 }
+
+export interface StaticParallelStateDefinition extends ParallelStateDefinitionBase {
+  mode?: "static";
+  tasks: Record<string, ParallelTaskDefinition>;
+}
+
+export interface DynamicSourceDefinition {
+  stateId: string;
+  outputName: string;
+}
+
+export interface DynamicParallelStateDefinition extends ParallelStateDefinitionBase {
+  mode: "dynamic";
+  tasks: Record<string, never>;
+  forEach: DynamicSourceDefinition;
+  task: AgentWorkDefinition;
+}
+
+export type ParallelStateDefinition =
+  StaticParallelStateDefinition | DynamicParallelStateDefinition;
 
 export type StateDefinition = NormalStateDefinition | ParallelStateDefinition;
 

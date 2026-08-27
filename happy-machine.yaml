@@ -1,0 +1,22 @@
+version: 1
+
+executor:
+  type: orca
+
+workspace:
+  mode: direct
+
+agents:
+  create_skill_implementation:
+    instructions: agents/create-skill-implementation.md
+    runtime: codex
+
+defaults:
+  attempt_timeout: 60m
+  max_attempts: 3
+  retry_delay: 5s
+  workflow_timeout: 24h
+  max_state_visits: 3
+  max_transitions: 54
+  max_concurrency: 1
+  controller_lease: 30s

@@ -73,7 +73,7 @@ function task(
     agent: {
       id: `${id}-agent`,
       instructions: `Instructions for ${id}`,
-      model: `${id}-model`,
+      runtime: "codex",
     },
     prompt: id,
     policies: policies(overrides),
@@ -120,7 +120,7 @@ async function definitions(options: {
       agent: {
         id: "inspector",
         instructions: "Inspect the complete join",
-        model: "inspector-model",
+        runtime: "codex",
       },
       prompt: "inspect",
       policies: policies(),
@@ -269,7 +269,10 @@ async function parsedProject(): Promise<{ root: string; workflow: string }> {
 agents:
   worker:
     instructions: agents/worker.md
-    model: parsed-model
+    runtime: codex
+  opencode_worker:
+    instructions: agents/worker.md
+    runtime: opencode
 defaults:
   attempt_timeout: 5s
   max_attempts: 1
@@ -292,7 +295,7 @@ states:
         agent: worker
         prompt: alpha
       beta:
-        agent: worker
+        agent: opencode_worker
         prompt: beta
     outcomes:
       succeeded: $succeeded
@@ -340,10 +343,11 @@ describe("parallel states", () => {
 
       expect(run.status).toBe(expected);
       expect(executor.launches).toHaveLength(2);
-      expect(executor.launches.map((launch) => launch.model)).toEqual([
-        "parsed-model",
-        "parsed-model",
-      ]);
+      expect(
+        Object.fromEntries(
+          executor.launches.map((launch) => [launch.prompt, launch.runtime]),
+        ),
+      ).toEqual({ alpha: "codex", beta: "opencode" });
       expect(executor.launches.map((launch) => launch.allowedOutcomes)).toEqual(
         [
           ["succeeded", "failed"],

@@ -1,0 +1,116 @@
+<style>
+  .flow-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; margin-top:22px; }
+  .flow-card { border:1px solid var(--border); border-radius:14px; padding:20px; background:var(--surface); }
+  .flow-card h3 { margin:0 0 6px; }
+  .flow-card p { margin:0 0 16px; color:var(--text-secondary); font-size:14px; }
+  .diagram { display:flex; align-items:center; justify-content:center; gap:8px; min-height:76px; padding:12px; border-radius:10px; background:var(--surface-secondary); overflow:auto; }
+  .node { display:inline-flex; align-items:center; justify-content:center; min-width:70px; min-height:38px; padding:4px 10px; border:2px solid #7c6cf2; border-radius:9px; background:#f5f3ff; color:#332b75; font-size:12px; font-weight:700; text-align:center; }
+  .node.event { border-color:#d48612; background:#fff7e8; color:#754700; }
+  .node.choice { border-color:#1c8a68; background:#eafbf4; color:#105943; transform:rotate(45deg); min-width:45px; min-height:45px; }
+  .node.choice span { transform:rotate(-45deg); }
+  .arrow { color:var(--text-secondary); font-weight:800; white-space:nowrap; }
+  .branches { display:flex; flex-direction:column; gap:8px; }
+  .branch { display:flex; align-items:center; gap:7px; }
+  .compiler { margin-top:22px; display:grid; grid-template-columns:1fr auto 1.3fr; align-items:center; gap:16px; }
+  .code-box { border:1px solid var(--border); background:#151722; color:#e8eaf6; border-radius:12px; padding:16px; font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre; overflow:auto; }
+  .runtime-box { border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--surface); }
+  .runtime-box ol { margin:8px 0 0; padding-left:22px; }
+  .runtime-box li { margin:7px 0; }
+  .note { margin-top:18px; padding:14px 16px; border-left:4px solid #7c6cf2; border-radius:6px; background:#f5f3ff; color:#332b75; }
+  @media (max-width:760px) { .flow-grid,.compiler { grid-template-columns:1fr; } .compiler > .arrow { transform:rotate(90deg); text-align:center; } }
+</style>
+
+<h2>¿Qué es un flujo de agentes?</h2>
+<p class="subtitle">Es la receta durable que decide qué trabajo ejecutar, cuándo avanzar y qué hacer con cada resultado.</p>
+
+<div class="flow-grid">
+  <section class="flow-card">
+    <h3>1. Secuencia</h3>
+    <p>El siguiente agente recibe datos del paso anterior.</p>
+    <div class="diagram">
+      <span class="node">Investigar</span><span class="arrow">→</span>
+      <span class="node">Redactar</span><span class="arrow">→</span>
+      <span class="node">Revisar</span>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h3>2. Decisión</h3>
+    <p>El resultado o una regla determina la transición.</p>
+    <div class="diagram">
+      <span class="node">Evaluar</span><span class="arrow">→</span>
+      <span class="node choice"><span>¿OK?</span></span><span class="arrow">→</span>
+      <span class="branches">
+        <span class="branch"><small>Sí</small><span class="node">Publicar</span></span>
+        <span class="branch"><small>No</small><span class="node">Corregir</span></span>
+      </span>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h3>3. Paralelo y unión</h3>
+    <p>Varias llamadas a Orca se lanzan juntas y luego se agregan.</p>
+    <div class="diagram">
+      <span class="node">Dividir</span><span class="arrow">⇉</span>
+      <span class="branches">
+        <span class="node">Agente A</span>
+        <span class="node">Agente B</span>
+        <span class="node">Agente C</span>
+      </span>
+      <span class="arrow">⇒</span><span class="node">Integrar</span>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h3>4. Espera durable</h3>
+    <p>El proceso termina; el estado queda guardado hasta recibir un evento.</p>
+    <div class="diagram">
+      <span class="node">Propuesta</span><span class="arrow">→</span>
+      <span class="node event">Esperar<br>aprobación</span><span class="arrow">→</span>
+      <span class="node">Continuar</span>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h3>5. Bucle controlado</h3>
+    <p>Un trabajo se repite hasta cumplir una condición o agotar intentos.</p>
+    <div class="diagram">
+      <span class="node">Crear</span><span class="arrow">→</span>
+      <span class="node">Validar</span><span class="arrow">↩ corregir<br>máx. 3</span>
+      <span class="node">Aceptar</span>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h3>6. Subflujo reutilizable</h3>
+    <p>Encapsula una receta completa detrás de entradas y salidas estables.</p>
+    <div class="diagram">
+      <span class="node">Entrada</span><span class="arrow">→</span>
+      <span class="node" style="border-style:dashed">Revisión<br>editorial</span><span class="arrow">→</span>
+      <span class="node">Resultado</span>
+    </div>
+  </section>
+</div>
+
+<div class="compiler">
+  <div class="code-box">flow: producir_informe
+steps:
+  - agent: investigar
+  - parallel:
+      - agent: analizar_riesgos
+      - agent: buscar_fuentes
+  - wait: aprobacion
+  - agent: redactar</div>
+  <div class="arrow">COMPILA A →</div>
+  <div class="runtime-box">
+    <strong>Máquina de estados interna</strong>
+    <ol>
+      <li>Cada paso tiene estado e intentos persistidos.</li>
+      <li>El motor agenda las llamadas a Orca que estén listas.</li>
+      <li>Solo avanza cuando sus condiciones quedan confirmadas.</li>
+      <li>Tras un reinicio, reconstruye el trabajo pendiente.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="note"><strong>Modelo híbrido:</strong> el autor escribe conceptos de workflow fáciles de entender; el compilador los transforma en estados y transiciones precisas para asegurar durabilidad.</div>

@@ -5,6 +5,7 @@ import type {
   ExternalEventRecord,
   NormalVisitRecord,
   ParallelVisitRecord,
+  JsonValue,
   RunRecord,
   TaskRecord,
   VisitRecord,
@@ -21,6 +22,7 @@ import type {
   EffectiveExecutionDefinition,
   NormalStateDefinition,
   ParallelStateDefinition,
+  StructuredOutputDefinition,
 } from "../../ports/project-definitions.js";
 import { ProjectWorkspaceError } from "../../ports/project-workspaces.js";
 import type {
@@ -68,6 +70,15 @@ interface ControlledRun {
   controllerId: string;
   fencingToken: number;
   signal?: AbortSignal;
+}
+
+class DynamicSourceError extends Error {
+  constructor(
+    readonly code: "dynamic_source_unavailable" | "dynamic_source_corrupt",
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 type RecoveredTaskResult =
@@ -140,6 +151,11 @@ export class RecoverWorkflow {
         controlled.run = error.run;
       else if (error instanceof ProjectWorkspaceError)
         await this.failRun(controlled, workspaceFailure(error));
+      else if (error instanceof DynamicSourceError)
+        await this.failRun(controlled, {
+          code: error.code,
+          message: error.message,
+        });
       else throw error;
     }
     if (this.runs.releaseControl && controlled.run.controllerLease)
@@ -240,27 +256,38 @@ export class RecoverWorkflow {
             contextPath: "",
             task: { id: `${stateId}-task`, attempts: [] },
           }
-        : {
-            type: "parallel",
-            stateId,
-            number,
-            contextPath: "",
-            tasks: Object.values(state.tasks).map((task) => ({
-              id: task.id,
-              status: "queued",
-              attempts: [],
-              documents: [],
-              workspace:
-                workspaceMode(controlled.run) === "worktree"
-                  ? { mode: "worktree", path: "" }
-                  : { mode: "direct", path: controlled.run.projectRoot },
-            })),
-          };
+        : state.mode === "dynamic"
+          ? await this.materializeDynamicVisit(controlled, state, number)
+          : {
+              type: "parallel",
+              stateId,
+              number,
+              contextPath: "",
+              tasks: Object.values(state.tasks).map((task) => ({
+                id: task.id,
+                status: "queued",
+                attempts: [],
+                documents: [],
+                workspace:
+                  workspaceMode(controlled.run) === "worktree"
+                    ? { mode: "worktree", path: "" }
+                    : { mode: "direct", path: controlled.run.projectRoot },
+              })),
+            };
     controlled.run.visits.push(visit);
     this.event(controlled.run, "state_entered", {
       stateId,
       visitNumber: number,
     });
+    if (visit.type === "parallel" && visit.dynamicSource)
+      this.event(controlled.run, "dynamic_tasks_materialized", {
+        stateId,
+        visitNumber: number,
+        source: visit.dynamicSource,
+        itemIds: visit.tasks.map((task) => task.id),
+        count: visit.tasks.length,
+        recovered: true,
+      });
     const queuedTasks = visit.type === "agent" ? [visit.task] : visit.tasks;
     for (const task of queuedTasks)
       this.event(controlled.run, "task_queued", {
@@ -300,6 +327,7 @@ export class RecoverWorkflow {
       visit.task,
       state,
       Object.keys(state.outcomes),
+      state.produces,
     );
     if (recovered.status !== "succeeded") {
       await this.failRun(controlled, recovered.failure);
@@ -318,6 +346,29 @@ export class RecoverWorkflow {
     recovered.attempt.status = "succeeded";
     recovered.attempt.outcome = recovered.result.outcome;
     recovered.attempt.documents = documents;
+    if (recovered.result.outputs) {
+      if (!this.runs.stageStructuredOutputs)
+        throw new Error("Run repository does not support structured outputs");
+      const outputs = await this.runs.stageStructuredOutputs(
+        controlled.run,
+        visit,
+        recovered.result.outputs,
+      );
+      visit.outputs = outputs;
+      controlled.run.structuredOutputs ??= [];
+      controlled.run.structuredOutputs.push(...outputs);
+      for (const output of outputs)
+        this.event(controlled.run, "structured_output_committed", {
+          stateId: output.stateId,
+          visitNumber: output.visitNumber,
+          outputName: output.name,
+          type: output.type,
+          itemCount: output.itemCount,
+          durablePath: output.durablePath,
+          sha256: output.sha256,
+          recovered: true,
+        });
+    }
     if (recovered.result.error !== undefined)
       recovered.attempt.error = recovered.result.error;
     if (workspaceMode(controlled.run) === "worktree")
@@ -346,6 +397,80 @@ export class RecoverWorkflow {
     await this.persist(controlled);
   }
 
+  private async materializeDynamicVisit(
+    controlled: ControlledRun,
+    state: Extract<ParallelStateDefinition, { mode: "dynamic" }>,
+    number: number,
+  ): Promise<ParallelVisitRecord> {
+    const source = [...(controlled.run.structuredOutputs ?? [])]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.stateId === state.forEach.stateId &&
+          candidate.name === state.forEach.outputName,
+      );
+    if (!source)
+      throw new DynamicSourceError(
+        "dynamic_source_unavailable",
+        `No committed output ${state.forEach.stateId}.outputs.${state.forEach.outputName} is available`,
+      );
+    if (!this.runs.readStructuredOutput)
+      throw new DynamicSourceError(
+        "dynamic_source_corrupt",
+        "Run repository does not support structured outputs",
+      );
+    let value: JsonValue;
+    try {
+      value = await this.runs.readStructuredOutput(source);
+    } catch (error) {
+      throw new DynamicSourceError(
+        "dynamic_source_corrupt",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (!Array.isArray(value))
+      throw new DynamicSourceError(
+        "dynamic_source_corrupt",
+        "Committed work_items output is not an array",
+      );
+    const dynamicSource = {
+      stateId: source.stateId,
+      visitNumber: source.visitNumber,
+      outputName: source.name,
+    };
+    const visit: ParallelVisitRecord = {
+      type: "parallel",
+      stateId: state.id,
+      number,
+      contextPath: "",
+      dynamicSource,
+      tasks: value.map((item) => {
+        if (
+          !item ||
+          typeof item !== "object" ||
+          Array.isArray(item) ||
+          typeof item.id !== "string"
+        )
+          throw new DynamicSourceError(
+            "dynamic_source_corrupt",
+            "Committed work_items output contains an invalid item",
+          );
+        return {
+          id: item.id,
+          status: "queued",
+          attempts: [],
+          documents: [],
+          dynamic: { workItem: item, source: dynamicSource },
+          workspace:
+            workspaceMode(controlled.run) === "worktree"
+              ? { mode: "worktree", path: "" }
+              : { mode: "direct", path: controlled.run.projectRoot },
+        };
+      }),
+    };
+    return visit;
+  }
+
   private async recoverParallel(
     controlled: ControlledRun,
     visit: ParallelVisitRecord,
@@ -359,7 +484,7 @@ export class RecoverWorkflow {
         controlled,
         visit,
         task,
-        state.tasks[task.id],
+        state.mode === "dynamic" ? state.task : state.tasks[task.id],
         ["succeeded", "failed"],
       );
       if (result.status === "unsafe") {
@@ -452,6 +577,7 @@ export class RecoverWorkflow {
     task: TaskRecord,
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): Promise<RecoveredTaskResult> {
     throwIfDetached(controlled.signal);
     const projectWorkspace = projectWorkspaceForTask(
@@ -478,6 +604,7 @@ export class RecoverWorkflow {
         attempt.resultPath,
         attempt.outputDirectory,
         allowedOutcomes,
+        outputDefinitions,
       );
       return { status: "succeeded", result, attempt };
     }
@@ -542,6 +669,7 @@ export class RecoverWorkflow {
         work,
         allowedOutcomes,
         projectWorkspace,
+        outputDefinitions,
       );
     if (
       observation.status === "start_unknown" ||
@@ -584,6 +712,7 @@ export class RecoverWorkflow {
       attempt.resultPath,
       attempt.outputDirectory,
       allowedOutcomes,
+      outputDefinitions,
     );
     return { status: "succeeded", result, attempt };
   }
@@ -596,6 +725,7 @@ export class RecoverWorkflow {
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
     projectWorkspace: string,
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): Promise<RecoveredTaskResult> {
     const launch = this.launch(
       controlled,
@@ -603,6 +733,7 @@ export class RecoverWorkflow {
       work,
       allowedOutcomes,
       projectWorkspace,
+      outputDefinitions,
     );
     let execution: TaskExecution;
     try {
@@ -632,6 +763,7 @@ export class RecoverWorkflow {
       attempt.resultPath,
       attempt.outputDirectory,
       allowedOutcomes,
+      outputDefinitions,
     );
     return { status: "succeeded", result, attempt };
   }
@@ -995,6 +1127,7 @@ export class RecoverWorkflow {
     work: AgentWorkDefinition,
     allowedOutcomes: readonly string[],
     projectWorkspace: string,
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): TaskLaunch {
     return {
       identity: attempt.id,
@@ -1005,7 +1138,9 @@ export class RecoverWorkflow {
       instructions: work.agent.instructions,
       prompt: work.prompt,
       allowedOutcomes,
-      model: work.agent.model,
+      structuredOutputs: outputDefinitions,
+      runtime: work.agent.runtime,
+      reasoning: work.agent.reasoning,
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,
       signal: controlled.signal,

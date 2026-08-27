@@ -39,6 +39,10 @@ export type OrcaStartupDelay = (
 ) => Promise<void>;
 
 const STARTUP_DELAY_MS = 8_000;
+const runtimeCommands = {
+  codex: "codex",
+  opencode: "opencode",
+} as const satisfies Record<TaskLaunch["runtime"], string>;
 const RESULT_POLL_MS = 250;
 
 const abortError = (signal?: AbortSignal): Error =>
@@ -179,7 +183,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--worktree",
       "current",
       "--command",
-      "codex",
+      this.runtimeCommand(launch.runtime, launch.reasoning),
       "--focus",
       "--json",
     ]);
@@ -550,7 +554,45 @@ export class OrcaTaskExecutor implements TaskExecutor {
     const outcomes = launch.allowedOutcomes
       .map((outcome) => `- ${JSON.stringify(outcome)}`)
       .join("\n");
-    return `${launch.prompt}\n\n---\nHappy Machine agent instructions (required)\n\n${launch.instructions}\n\nHappy Machine execution context (required)\n\nAttempt identity: ${JSON.stringify(launch.identity)}\nProject workspace: ${JSON.stringify(launch.projectWorkspace)}\nContext file: ${JSON.stringify(launch.contextPath)}\nAttempt number: ${launch.attemptNumber}\nTimeout milliseconds: ${launch.timeoutMs}\n\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
+    const outputs = launch.structuredOutputs
+      ? `\n  "outputs": {\n${Object.keys(launch.structuredOutputs)
+          .map(
+            (name) =>
+              `    ${JSON.stringify(name)}: [{ "id": "<unique stable id>", "<opaque field>": "<JSON value>" }]`,
+          )
+          .join(",\n")}\n  },`
+      : "";
+    const outputLimits = launch.structuredOutputs
+      ? `\n\nDeclared structured outputs:\n${Object.entries(
+          launch.structuredOutputs,
+        )
+          .map(
+            ([name, definition]) =>
+              `- ${JSON.stringify(name)}: work_items, maximum ${definition.maxItems}`,
+          )
+          .join("\n")}`
+      : "";
+    return `${launch.prompt}\n\n---\nHappy Machine agent instructions (required)\n\n${launch.instructions}\n\nHappy Machine execution context (required)\n\nAttempt identity: ${JSON.stringify(launch.identity)}\nProject workspace: ${JSON.stringify(launch.projectWorkspace)}\nContext file: ${JSON.stringify(launch.contextPath)}\nAttempt number: ${launch.attemptNumber}\nTimeout milliseconds: ${launch.timeoutMs}\n\nHappy Machine result contract (required)\n\nWrite the task result to exactly: ${JSON.stringify(launch.resultPath)}\nThe assigned output directory is: ${JSON.stringify(launch.outputDirectory)}\n\nAllowed outcomes:\n${outcomes}${outputLimits}\n\nThe result file must be valid JSON with this structure:\n{\n  "outcome": "<one allowed outcome>",${outputs}\n  "documents": ["relative/path/to/document.md"],\n  "error": <optional serializable diagnostic data>\n}\n\nEvery declared structured output is required, including empty collections. Every declared document must be a Markdown file, and each document path must be relative to the assigned output directory. Only result.json controls the workflow transition; stdout and stderr do not.`;
+  }
+
+  private runtimeCommand(
+    runtime: TaskLaunch["runtime"],
+    reasoning?: string,
+  ): string {
+    if (!Object.hasOwn(runtimeCommands, runtime))
+      throw new TaskExecutorError(
+        `Unsupported agent runtime: ${String(runtime)}`,
+      );
+    if (reasoning === undefined) return runtimeCommands[runtime];
+    if (runtime === "codex")
+      return `codex -c ${this.posixArgument(
+        `model_reasoning_effort=${JSON.stringify(reasoning)}`,
+      )}`;
+    return `opencode run --interactive --variant ${this.posixArgument(reasoning)}`;
+  }
+
+  private posixArgument(value: string): string {
+    return `'${value.replaceAll("'", `'"'"'`)}'`;
   }
 
   private references(

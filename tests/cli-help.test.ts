@@ -17,6 +17,11 @@ const commands = [
     argument: "WORKFLOW_PATH",
   },
   {
+    command: "create-skill",
+    usage: "happy-machine create-skill --agent=codex",
+    argument: "--agent=codex",
+  },
+  {
     command: "resume",
     usage: "happy-machine resume RUN_ID [--debug]",
     argument: "RUN_ID",
@@ -132,6 +137,9 @@ describe("happy-machine help", () => {
           expect(output).toContain("--input DOCUMENT.md");
           expect(output).toContain("May be repeated.");
         }
+        if (command === "create-skill") {
+          expect(output).toContain("no other form or value is accepted");
+        }
         expectNoCalls(setup.calls);
       }
 
@@ -160,6 +168,25 @@ describe("happy-machine help", () => {
     expectNoCalls(setup.calls);
     await expect(readdir(root)).resolves.toEqual([]);
   });
+
+  it.each([
+    { argv: [] },
+    { argv: ["help"] },
+    { argv: ["--help"] },
+    { argv: ["-h"] },
+  ])(
+    "documents the exact create-skill contract in global help for %j",
+    async ({ argv }) => {
+      const setup = harness();
+
+      expect(await setup.app.run(argv, "/project")).toBe(0);
+
+      expect(setup.stdout[0]).toContain(
+        "happy-machine create-skill --agent=codex",
+      );
+      expectNoCalls(setup.calls);
+    },
+  );
 
   it("reports an unknown command on stderr", async () => {
     const setup = harness();

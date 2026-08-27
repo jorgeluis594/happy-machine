@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { parse } from "yaml";
 import type {
   AgentDefinition,
+  AgentRuntime,
   DefinitionArtifactSource,
   EffectivePolicies,
   EffectiveExecutionDefinition,
@@ -210,7 +211,11 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     for (const [id, value] of Object.entries(rawAgents)) {
       this.id(id, `agent ID ${id}`);
       const raw = this.map(value, `project.agents.${id}`);
-      this.keys(raw, ["instructions", "model"], `project.agents.${id}`);
+      this.keys(
+        raw,
+        ["instructions", "runtime", "reasoning"],
+        `project.agents.${id}`,
+      );
       const instructions = await this.markdown(
         root,
         raw.instructions,
@@ -224,7 +229,15 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       result[id] = {
         id,
         instructions,
-        model: this.string(raw.model, `project.agents.${id}.model`),
+        runtime: this.runtime(raw.runtime, `project.agents.${id}.runtime`),
+        ...(raw.reasoning === undefined
+          ? {}
+          : {
+              reasoning: this.string(
+                raw.reasoning,
+                `project.agents.${id}.reasoning`,
+              ),
+            }),
       };
     }
     return result;
@@ -249,10 +262,10 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
           "prompt",
           "prompt_file",
           "outcomes",
-          "model",
           "attempt_timeout",
           "max_attempts",
           "retry_delay",
+          "produces",
         ],
         `workflow.states.${id}`,
       );
@@ -283,6 +296,14 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         type,
         ...work,
         outcomes,
+        ...(raw.produces === undefined
+          ? {}
+          : {
+              produces: this.produces(
+                raw.produces,
+                `workflow.states.${id}.produces`,
+              ),
+            }),
         policies,
         attemptTimeoutMs: policies.attemptTimeoutMs,
       };
@@ -293,6 +314,8 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         [
           "type",
           "tasks",
+          "for_each",
+          "task",
           "outcomes",
           "attempt_timeout",
           "max_attempts",
@@ -307,8 +330,16 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         "state",
         `workflow.states.${id}`,
       );
-      const rawTasks = this.map(raw.tasks, `workflow.states.${id}.tasks`);
-      if (Object.keys(rawTasks).length === 0)
+      const hasStatic = raw.tasks !== undefined;
+      const hasDynamic = raw.for_each !== undefined || raw.task !== undefined;
+      if (hasStatic === hasDynamic)
+        throw new DefinitionError(
+          `workflow.states.${id} must declare exactly one of tasks or for_each plus task`,
+        );
+      const rawTasks = hasStatic
+        ? this.map(raw.tasks, `workflow.states.${id}.tasks`)
+        : {};
+      if (hasStatic && Object.keys(rawTasks).length === 0)
         throw new DefinitionError(
           `workflow.states.${id}.tasks must contain at least one task`,
         );
@@ -325,7 +356,6 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
             "agent",
             "prompt",
             "prompt_file",
-            "model",
             "attempt_timeout",
             "max_attempts",
             "retry_delay",
@@ -360,9 +390,61 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         throw new DefinitionError(
           `workflow.states.${id}.outcomes must contain exactly succeeded and failed`,
         );
+      if (hasDynamic) {
+        const forEach = this.map(
+          raw.for_each,
+          `workflow.states.${id}.for_each`,
+        );
+        this.keys(forEach, ["from"], `workflow.states.${id}.for_each`);
+        const source = this.source(
+          this.string(forEach.from, `workflow.states.${id}.for_each.from`),
+          `workflow.states.${id}.for_each.from`,
+        );
+        const task = this.map(raw.task, `workflow.states.${id}.task`);
+        this.keys(
+          task,
+          [
+            "agent",
+            "prompt",
+            "prompt_file",
+            "attempt_timeout",
+            "max_attempts",
+            "retry_delay",
+          ],
+          `workflow.states.${id}.task`,
+        );
+        const taskPolicies = this.inlinePolicies(
+          policies,
+          task,
+          "task",
+          `workflow.states.${id}.task`,
+        );
+        return {
+          id,
+          type,
+          mode: "dynamic",
+          tasks: {},
+          forEach: source,
+          task: {
+            ...(await this.work(
+              root,
+              task,
+              agents,
+              taskPolicies,
+              `workflow.states.${id}.task`,
+              artifacts,
+            )),
+            policies: taskPolicies,
+          },
+          outcomes: { succeeded: outcomes.succeeded, failed: outcomes.failed },
+          policies,
+          effectiveMaxConcurrency: policies.maxConcurrency,
+        } satisfies ParallelStateDefinition;
+      }
       return {
         id,
         type,
+        mode: "static",
         tasks,
         outcomes: { succeeded: outcomes.succeeded, failed: outcomes.failed },
         policies,
@@ -375,6 +457,40 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     throw new DefinitionError(
       `workflow.states.${id}.type must be agent or parallel`,
     );
+  }
+
+  private produces(value: unknown, label: string) {
+    const raw = this.map(value, label);
+    if (Object.keys(raw).length === 0)
+      throw new DefinitionError(`${label} must not be empty`);
+    const result: Record<string, { type: "work_items"; maxItems: number }> = {};
+    for (const [name, definition] of Object.entries(raw)) {
+      this.id(name, `output name ${name} at ${label}`);
+      const item = this.map(definition, `${label}.${name}`);
+      this.keys(item, ["type", "max_items"], `${label}.${name}`);
+      if (item.type !== "work_items")
+        throw new DefinitionError(`${label}.${name}.type must be work_items`);
+      result[name] = {
+        type: "work_items",
+        maxItems:
+          item.max_items === undefined
+            ? 100
+            : this.positiveInteger(
+                item.max_items,
+                `${label}.${name}.max_items`,
+              ),
+      };
+    }
+    return result;
+  }
+
+  private source(value: string, label: string) {
+    const match = /^([^.$]+)\.outputs\.([^.$]+)$/.exec(value);
+    if (!match)
+      throw new DefinitionError(
+        `${label} must match <state-id>.outputs.<output-name>`,
+      );
+    return { stateId: match[1], outputName: match[2] };
   }
 
   private async work(
@@ -391,10 +507,6 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       throw new DefinitionError(
         `${label}.agent references unknown agent: ${agentId}`,
       );
-    const agent =
-      raw.model === undefined
-        ? registered
-        : { ...registered, model: this.string(raw.model, `${label}.model`) };
     const hasPrompt = Object.hasOwn(raw, "prompt");
     const hasPromptFile = Object.hasOwn(raw, "prompt_file");
     if (hasPrompt === hasPromptFile)
@@ -409,7 +521,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       logicalId: label,
       content: prompt,
     });
-    return { agent, prompt, policies };
+    return { agent: registered, prompt, policies };
   }
 
   private outcomes(value: unknown, label: string): Record<string, string> {
@@ -426,6 +538,18 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     initial: string,
     states: Record<string, StateDefinition>,
   ): void {
+    for (const state of Object.values(states)) {
+      if (state.type !== "parallel" || state.mode !== "dynamic") continue;
+      const producer = states[state.forEach.stateId];
+      if (!producer || producer.type !== "agent")
+        throw new DefinitionError(
+          `workflow.states.${state.id}.for_each references unknown producer: ${state.forEach.stateId}`,
+        );
+      if (!producer.produces?.[state.forEach.outputName])
+        throw new DefinitionError(
+          `workflow.states.${state.id}.for_each references unknown work_items output: ${state.forEach.outputName}`,
+        );
+    }
     for (const state of Object.values(states)) {
       for (const [outcome, target] of Object.entries(state.outcomes)) {
         if (!terminals.has(target) && !(target in states))
@@ -660,6 +784,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
   private string(value: unknown, label: string): string {
     if (typeof value !== "string" || value.trim() === "")
       throw new DefinitionError(`${label} must be a non-empty string`);
+    return value;
+  }
+
+  private runtime(value: unknown, label: string): AgentRuntime {
+    if (value === undefined) return "codex";
+    if (value !== "codex" && value !== "opencode")
+      throw new DefinitionError(`${label} must be codex or opencode`);
     return value;
   }
   private id(value: string, label: string): void {

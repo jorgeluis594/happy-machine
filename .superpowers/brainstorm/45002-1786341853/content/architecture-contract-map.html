@@ -1,0 +1,68 @@
+<style>
+  .stack { display:grid; grid-template-columns:1fr 44px 1.15fr 44px 1fr; align-items:stretch; gap:10px; margin:24px 0; }
+  .layer { border:2px solid #7c6cf2; border-radius:14px; padding:18px; background:#f5f3ff; color:#332b75; }
+  .layer.runtime { border-color:#1c8a68; background:#eafbf4; color:#105943; }
+  .layer.external { border-color:#d48612; background:#fff7e8; color:#754700; }
+  .layer h3 { margin:0 0 10px; }
+  .layer ul { margin:0; padding-left:19px; }
+  .layer li { margin:7px 0; font-size:13px; }
+  .arrow { display:flex; align-items:center; justify-content:center; color:var(--text-secondary); font-size:24px; font-weight:800; }
+  .contracts { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:24px; }
+  .contract { border:1px solid var(--border); border-radius:12px; padding:15px; background:var(--surface); position:relative; }
+  .contract .number { position:absolute; top:12px; right:12px; width:24px; height:24px; border-radius:50%; background:#ece9ff; color:#5146b8; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px; }
+  .contract h3 { margin:0 30px 6px 0; font-size:15px; }
+  .contract p { margin:0; color:var(--text-secondary); font-size:13px; }
+  .done { border:2px solid #1c8a68; }
+  .done .number { background:#d8f5ea; color:#105943; }
+  .priority { margin-top:20px; padding:14px 17px; border-left:4px solid #7c6cf2; background:#f5f3ff; border-radius:7px; color:#332b75; }
+  @media(max-width:820px){.stack,.contracts{grid-template-columns:1fr}.stack>.arrow{transform:rotate(90deg)}}
+</style>
+
+<h2>Mapa de contratos de la máquina</h2>
+<p class="subtitle">Los outcomes son una pieza; el sistema completo tiene tres fronteras arquitectónicas.</p>
+
+<div class="stack">
+  <section class="layer">
+    <h3>Definición</h3>
+    <ul>
+      <li>Estado y operación</li>
+      <li>Outcomes permitidos</li>
+      <li>Transiciones y ciclos</li>
+      <li>Políticas configurables</li>
+    </ul>
+  </section>
+  <div class="arrow">→</div>
+  <section class="layer runtime">
+    <h3>Motor durable</h3>
+    <ul>
+      <li>Compila y valida el grafo</li>
+      <li>Persiste invocaciones e intentos</li>
+      <li>Resuelve transiciones</li>
+      <li>Recupera después de reinicios</li>
+    </ul>
+  </section>
+  <div class="arrow">→</div>
+  <section class="layer external">
+    <h3>Adaptador Orca</h3>
+    <ul>
+      <li>Materializa el input</li>
+      <li>Ejecuta el CLI</li>
+      <li>Captura output y artefactos</li>
+      <li>Traduce fallos técnicos</li>
+    </ul>
+  </section>
+</div>
+
+<div class="contracts">
+  <section class="contract done"><span class="number">✓</span><h3>Outcomes</h3><p>Conjunto cerrado por estado y transición explícita por outcome.</p></section>
+  <section class="contract"><span class="number">1</span><h3>Entrada y datos</h3><p>Qué recibe un estado, cómo se construye y qué parte del historial puede ver.</p></section>
+  <section class="contract"><span class="number">2</span><h3>Semántica de ejecución</h3><p>Secuencial, ciclos, estados terminales, paralelismo y uniones.</p></section>
+  <section class="contract"><span class="number">3</span><h3>Persistencia</h3><p>Qué se confirma atómicamente y cómo se recupera una llamada interrumpida.</p></section>
+  <section class="contract"><span class="number">4</span><h3>Fallos y límites</h3><p>Timeouts, reintentos, backoff, cancelación, maxVisits y deadline global.</p></section>
+  <section class="contract"><span class="number">5</span><h3>Versionado</h3><p>Qué ocurre con ejecuciones activas cuando cambia el archivo de configuración.</p></section>
+  <section class="contract"><span class="number">6</span><h3>Concurrencia</h3><p>Cuándo se pueden activar varios estados y cómo se hace fan-in de resultados.</p></section>
+  <section class="contract"><span class="number">7</span><h3>Observabilidad</h3><p>Historial, logs, artefactos, causalidad y explicación de cada transición.</p></section>
+  <section class="contract"><span class="number">8</span><h3>Contrato Orca</h3><p>Comando, workspace, formato de respuesta, exit codes y cancelación.</p></section>
+</div>
+
+<div class="priority"><strong>Próximo contrato recomendado:</strong> entrada y datos. Antes de ejecutar ciclos, debemos saber exactamente qué información recibe una nueva invocación de un estado.</div>

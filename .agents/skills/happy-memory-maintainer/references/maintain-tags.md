@@ -17,12 +17,17 @@ Never run `happy-memory tags list`. Do not replace the native limit with client-
 
 - Select stable subjects, domains, components, technologies, or cross-cutting concerns central to the memory.
 - Include a keyword only when it will improve future grouping or filtering.
-- Use the smallest sufficient set without enforcing a fixed count.
-- Avoid redundant synonyms, overly general words, sentence fragments, and transient details.
+- Use the smallest sufficient mix of broad grouping tags and discriminative
+  specific tags.
+- Allow a specific tag to begin on one memory when it names a stable durable
+  category; frequency is not a prerequisite.
+- Avoid near-duplicate synonyms, overly general words, incidental details, and
+  tags that compensate for unclear text.
 - Keep tags aligned with the current atomic content.
 - Recompute tags independently for each memory produced by a split.
 
-Ensure essential retrieval terms also occur naturally in the title or content because textual search does not match tags.
+Ensure essential retrieval terms also occur naturally in the title or content
+because tag filters cannot satisfy the required textual query.
 
 ## Maintain Associations
 

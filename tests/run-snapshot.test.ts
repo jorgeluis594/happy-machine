@@ -31,7 +31,8 @@ async function fixture() {
 agents:
   worker:
     instructions: agents/worker.md
-    model: default-model
+    runtime: opencode
+    reasoning: max
 defaults:
   max_attempts: 4
 `,
@@ -47,7 +48,6 @@ states:
   start:
     type: agent
     agent: worker
-    model: override-model
     prompt: Original prompt
     outcomes:
       done: $succeeded
@@ -142,10 +142,11 @@ describe("filesystem run snapshots", () => {
     expect(manifest.effectiveDefinition).toMatchObject({
       executorType: "orca",
       workspaceMode: "direct",
+      agents: { worker: { runtime: "opencode", reasoning: "max" } },
       policies: { maxAttempts: 4 },
       states: {
         start: {
-          agent: { model: "override-model" },
+          agent: { runtime: "opencode", reasoning: "max" },
           prompt: "Original prompt",
         },
       },
@@ -168,6 +169,133 @@ describe("filesystem run snapshots", () => {
       source: definition.snapshotSource,
     });
     expect(repeated.record.identity).toBe(created.record.identity);
+  });
+
+  it("includes reasoning in snapshot content and identity", async () => {
+    const setup = await fixture();
+    const definitions = new FilesystemProjectDefinitions();
+    const repository = new FilesystemRunRepository();
+    const firstDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const first = await repository.createSnapshot({
+      runId: "run-reasoning-max",
+      projectRoot: setup.root,
+      workflowId: firstDefinition.workflowId,
+      source: firstDefinition.snapshotSource,
+    });
+
+    const projectPath = path.join(setup.root, "happy-machine.yaml");
+    await writeFile(
+      projectPath,
+      (await readFile(projectPath, "utf8")).replace(
+        "reasoning: max",
+        "reasoning: high",
+      ),
+    );
+    const secondDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const second = await repository.createSnapshot({
+      runId: "run-reasoning-high",
+      projectRoot: setup.root,
+      workflowId: secondDefinition.workflowId,
+      source: secondDefinition.snapshotSource,
+    });
+
+    expect(first.definition.agents.worker.reasoning).toBe("max");
+    expect(second.definition.agents.worker.reasoning).toBe("high");
+    expect(second.record.identity).not.toBe(first.record.identity);
+  });
+
+  it("loads legacy snapshots without runtime as Codex and ignores model", async () => {
+    const setup = await fixture();
+    const definition = await new FilesystemProjectDefinitions().load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const repository = new FilesystemRunRepository();
+    const created = await repository.createSnapshot({
+      runId: "run-legacy",
+      projectRoot: setup.root,
+      workflowId: definition.workflowId,
+      source: definition.snapshotSource,
+    });
+    const run: RunRecord = {
+      id: "run-legacy",
+      workflowId: definition.workflowId,
+      workflowPath: definition.workflowPath,
+      projectRoot: setup.root,
+      definitionSnapshot: created.record,
+      status: "running",
+      createdAt: "2026-08-11T12:00:00.000Z",
+      deadlineAt: "2026-08-12T12:00:00.000Z",
+      transitionCount: 0,
+      visits: [],
+      documents: [],
+      events: [],
+    };
+    await writeFile(
+      path.join(setup.root, ".happy-machine", "runs", run.id, "run.json"),
+      `${JSON.stringify(run, null, 2)}\n`,
+    );
+
+    const manifest = JSON.parse(
+      await readFile(created.record.manifestPath, "utf8"),
+    ) as SnapshotManifest;
+    const effective = manifest.effectiveDefinition as {
+      agents: Record<string, Record<string, unknown>>;
+      states: Record<
+        string,
+        | { type: "agent"; agent: Record<string, unknown> }
+        | {
+            type: "parallel";
+            tasks: Record<string, { agent: Record<string, unknown> }>;
+          }
+      >;
+    };
+    delete effective.agents.worker.runtime;
+    delete effective.agents.worker.reasoning;
+    effective.agents.worker.model = "legacy-default-model";
+    const normal = effective.states.start;
+    if (normal.type !== "agent") throw new Error("expected legacy agent state");
+    delete normal.agent.runtime;
+    delete normal.agent.reasoning;
+    normal.agent.model = "legacy-override-model";
+    effective.states.legacy_parallel = {
+      type: "parallel",
+      tasks: {
+        check: {
+          agent: {
+            id: "worker",
+            instructions: "# Original agent\n",
+            model: "legacy-task-model",
+          },
+        },
+      },
+    };
+    await writeFile(
+      created.record.manifestPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+    );
+
+    const recovered = await repository.load(setup.root, run.id);
+    expect(recovered.definition.agents.worker.runtime).toBe("codex");
+    expect(recovered.definition.agents.worker.reasoning).toBeUndefined();
+    expect(recovered.definition.agents.worker).not.toHaveProperty("model");
+    const state = recovered.definition.states.start;
+    expect(state.type).toBe("agent");
+    if (state.type !== "agent") throw new Error("expected agent state");
+    expect(state.agent.runtime).toBe("codex");
+    expect(state.agent).not.toHaveProperty("model");
+    const parallel = recovered.definition.states.legacy_parallel;
+    expect(parallel.type).toBe("parallel");
+    if (parallel.type !== "parallel")
+      throw new Error("expected legacy parallel state");
+    expect(parallel.tasks.check.agent.runtime).toBe("codex");
+    expect(parallel.tasks.check.agent).not.toHaveProperty("model");
   });
 
   it("keeps committed source and context immutable while a new run captures edits", async () => {
