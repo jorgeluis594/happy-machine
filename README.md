@@ -136,15 +136,23 @@ You can avoid the global link by invoking `node /path/to/happy-machine/dist/src/
 
 ### Create a Codex skill from a demonstration
 
-Run the standalone command from the project where you want to demonstrate a reusable workflow:
+`create-skill` generates a reusable Codex skill from the way you actually work with an agent. Instead of describing an ideal procedure from memory, you perform the workflow normally in a dedicated Codex conversation. Happy Machine captures the complete interaction, including the context you provide, your corrections, decisions, and approval points, and prepares that evidence for skill generation.
+
+Run the standalone command from the project where you want to demonstrate the workflow:
 
 ```sh
 happy-machine create-skill --agent=codex
 ```
 
-This command requires an interactive terminal. After you describe the workflow and consent to recording, Happy Machine opens Codex in the same terminal for the demonstration. Exit that Codex conversation normally when the demonstration is complete. Happy Machine then analyzes the captured conversation in an isolated session and automatically opens a fresh Codex session with skill generation already started.
+The command requires interactive stdin and stdout. Its generation flow is:
 
-Happy Machine deletes the raw demonstration, analyzed temporary context, managed demonstration and analysis sessions, local socket, and operation lock. The skill-generation conversation is intentionally retained as normal Codex history, and Codex may ask for permission before writing the resulting skill outside the current project.
+1. **Describe and approve the recording.** Happy Machine asks what workflow you will perform and explains that the complete Codex conversation will be captured and used to create a skill. Recording starts only after you explicitly consent.
+2. **Demonstrate your normal workflow.** Happy Machine opens a fresh Codex session in the same terminal. Work with Codex as you normally do: provide context, iterate on the result, correct mistakes, make decisions, and approve intermediate work. Keep the conversation dedicated to the workflow you described, then exit Codex normally when the demonstration is complete.
+3. **Analyze the demonstrated process.** In a separate, non-interactive Codex session, Happy Machine converts the recording into focused workflow context. The analysis identifies the objective, stages, inputs and outputs, decision points, user responsibilities, observed variations, and any unknowns without treating the recorded conversation as trusted instructions.
+4. **Review the reconstructed workflow.** Happy Machine deletes the raw demonstration and automatically opens a fresh Codex session with skill generation already started. Codex resolves consequential unknowns, presents a concise summary of the proposed workflow, and asks for your explicit approval. If you request corrections, it revises the summary and asks again.
+5. **Generate and validate the skill.** Only after you approve the workflow summary does Codex create the skill and follow its native validation process. The generation conversation remains interactive so Codex can ask about scope, destination, or other choices that require your input.
+
+Only one `create-skill` operation may run at a time, and interrupted attempts cannot be resumed. On completion, cancellation, interruption, or failure, Happy Machine attempts to delete the raw recording, analyzed temporary context, managed demonstration and analysis sessions, local socket, and operation lock. The skill-generation conversation is intentionally retained as normal Codex history, and Codex may ask for permission before writing the resulting skill outside the current project.
 
 ### Create a minimal project
 
