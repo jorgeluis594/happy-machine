@@ -16,8 +16,8 @@ My agent-driven projects kept repeating the same workflow:
 ```text
 research → product planning → technical planning → task management
          → implementation → QA → pull request
-                              ↑     │
-                              └─────┘ when QA finds problems
+                      ↑     │
+                      └─────┘ when QA finds problems
 ```
 
 Coordinating that sequence manually was repetitive, but putting the whole process into one long agent conversation did not work well either. Implementation and validation accumulated too much context, agents became less reliable, and subagents did not provide enough isolation for large stages.
