@@ -85,6 +85,8 @@ export function buildGenerationPrompt(
     "Preserve the context's Observed, Inferred, and Unknown classifications. Do not present an Inferred claim as an observed or confirmed requirement, and do not silently resolve an Unknown.",
     "Do not turn an inference, incidental implementation detail, or single demonstrated example into a universal requirement.",
     "Resolve consequential Unknowns with the user before encoding them in the skill. If the appropriate repository-level or user-level destination cannot be inferred safely, ask the user.",
+    "Before creating or modifying any skill files, present the user with a concise summary of the proposed workflow design: its objective, main stages, the user's role, and expected result.",
+    "Ask the user for explicit approval of that workflow summary. Do not begin authoring the skill until the user approves it. If the user requests corrections or does not approve it, revise the summary, present it again, and ask for approval again.",
     "Then follow $skill-creator's native creation and validation workflow to completion. Leave all other implementation, scope, structure, resource, and validation choices to the native creator unless user input is required.",
   ].join("\n");
 }
