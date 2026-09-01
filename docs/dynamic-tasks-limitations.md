@@ -44,6 +44,8 @@ invocado como submáquina.
   estático `tasks`.
 - Cada tarea basada en workflow crea exactamente un run hijo. El padre nunca
   repite la submáquina completa.
+- La identidad del run hijo es estable por coordenada del wrapper y su creación
+  es idempotente incluso si el padre se recupera después de un crash.
 - El workflow hijo administra sus fallos con la lógica normal de Happy Machine:
   reintentos de estados, timeouts, ciclos, límites, cancelación y recuperación.
 - Al terminar el hijo, un estado envolvente del padre ejecuta una evaluación
@@ -54,6 +56,9 @@ invocado como submáquina.
 - Para el POC, el evaluador se lanza igual que una tarea actual: Happy Machine
   no agrega flags de sandbox, permisos, red, tools ni aprobaciones. El runtime
   hereda su configuración local y su entorno.
+- Los fallos técnicos del evaluador usan una política interna fija de Happy
+  Machine: timeout de 30 minutos, tres intentos como máximo y cinco segundos
+  entre intentos. Esta política no forma parte del YAML autoral.
 - El join paralelo sigue siendo all-settled y calculado por el motor.
 
 ## Registro de workflows reutilizables
@@ -141,9 +146,8 @@ Una tarea de workflow:
 - requiere exactamente `type: workflow`, `workflow` y `with`;
 - no acepta `agent`, `prompt` ni `prompt_file`;
 - no acepta `attempt_timeout`, `max_attempts` ni `retry_delay`; y
-- deja que el workflow hijo resuelva sus propias políticas y que la evaluación
-  integrada herede las políticas de intento efectivas del estado paralelo
-  padre.
+- deja que el workflow hijo resuelva sus propias políticas mientras la
+  evaluación integrada usa la política interna fija de Happy Machine.
 
 `with` es un mapa no vacío de valores JSON nombrados. En un template dinámico,
 `$item` representa exclusivamente el work item materializado para esa tarea.
@@ -195,9 +199,10 @@ Antes de cualquier lanzamiento externo, Happy Machine persiste:
 - el ID de la tarea o del work item;
 - el mapa `with` ya resuelto;
 - la referencia al workflow hijo snapshotteado;
-- el workspace asignado;
+- la configuración efectiva de workspace que resolverá el run hijo;
 - el estado inicial `queued`; y
-- una identidad reservada para el run hijo.
+- una identidad reservada para el run hijo, determinada por la coordenada
+  `(parent_run_id, parallel_state_id, visit, task_id)`.
 
 La cola materializada es autoritativa. Recuperación nunca vuelve a resolver
 `$item`, releer el output productor ni expandir la colección.
@@ -209,6 +214,13 @@ Al reclamar la tarea, el padre crea y persiste la relación:
 ```text
 parent run + parallel state + visit + task <-> child run
 ```
+
+Esta operación tiene semántica equivalente a `getOrCreateChildRun`: la
+coordenada del wrapper admite un único hijo y una repetición devuelve el mismo
+registro. La reserva y la relación se comprometen antes de lanzar al
+controlador externo. Recuperación distingue una reserva aún no creada, un run
+creado pero no iniciado, un run activo y uno terminal, y en todos los casos
+continúa con el mismo `child_run_id`.
 
 El proceso hijo ejecuta el workflow con la semántica normal de Happy Machine.
 Sus estados conservan sus propias visitas, intentos, documentos, structured
@@ -242,6 +254,13 @@ El resultado usa el contrato actual de una tarea paralela: exactamente
 resultado y los documentos con las mismas reglas actuales antes de asentarlos.
 El snapshot registra la identidad y versión efectiva del evaluador y de su
 prompt inicial para que recuperación no cambie esas instrucciones.
+
+Cada ejecución técnica del evaluador usa el `AttemptRecord` normal, con una
+identidad estable persistida en `launching` antes de iniciar el runtime. La
+referencia al ejecutor se adjunta después del lanzamiento y permite recuperar
+o reconciliar una ejecución incierta sin crear otro intento prematuramente.
+Cada intento escribe en un directorio de salida limpio y recibe el mismo
+snapshot inmutable del hijo.
 
 Para este POC, Happy Machine lanza el runtime con el mismo mapeo que usa para
 las tareas normales y no impone configuración adicional de sandbox, permisos,
@@ -292,10 +311,17 @@ El workflow hijo maneja sus fallos con sus políticas normales. Agotar los
 intentos de uno de sus estados, alcanzar un terminal negativo o completar una
 ruta alternativa forma parte del resultado durable que recibe el evaluador.
 
-Un fallo técnico confirmado del evaluador aplica `attempt_timeout`,
-`max_attempts` y `retry_delay` efectivos del estado paralelo padre, pero
-reintenta solo la evaluación contra el mismo snapshot del hijo. Nunca crea un
-nuevo `child_run_id`. Una decisión semántica `failed` no se reintenta.
+Un fallo técnico confirmado del evaluador aplica una política interna fija:
+`attempt_timeout: 30m`, `max_attempts: 3` y `retry_delay: 5s`. La política no es
+configurable en YAML y reintenta solo la evaluación contra el mismo snapshot
+del hijo, usando un directorio de salida limpio por intento. Nunca crea un
+nuevo `child_run_id`.
+
+Errores del runtime, timeout, un resultado inválido o documentos inválidos
+consumen un intento. Una decisión semántica válida `failed` es final y no se
+reintenta. Una decisión válida `succeeded` compromete el outcome y los
+documentos corregidos. El asentamiento válido persiste atómicamente el
+resultado, los documentos, el estado del wrapper y los eventos correspondientes.
 
 Si una ejecución externa queda irreconciliablemente incierta, el snapshot del
 hijo está corrupto o el motor no puede persistir la relación padre-hijo, el run
@@ -312,20 +338,25 @@ La concurrencia interna de cada hijo se rige por la definición de ese workflow.
 El límite del padre controla cuántas submáquinas completas están activas, no el
 número total de agentes internos que pueden ejecutar.
 
-En modo `direct`, el hijo usa el workspace asignado actualmente a la tarea. En
-modo `worktree`, el wrapper recibe un worktree de tarea y ese directorio actúa
-como workspace principal del run hijo. Sus estados secuenciales lo comparten y
-sus paralelos internos aplican el aislamiento normal desde ese punto. No se
-introduce merge automático.
+El run hijo resuelve y administra el `workspace.mode` efectivo del proyecto
+igual que cualquier workflow ejecutado directamente. En modo `direct` usa la
+raíz del proyecto; en modo `worktree`, su coordinador normal crea y administra
+su workspace principal. El wrapper no introduce worktrees prestados o
+anidados, propiedad especial ni reglas adicionales de cleanup o merge.
 
 ## Recuperación y cancelación
 
 Recuperación trata la relación durable padre-hijo como autoritativa:
 
-- tarea materializada sin hijo iniciado: inicia el hijo reservado;
+- identidad reservada sin run creado: crea el hijo reservado de forma
+  idempotente;
+- hijo creado sin iniciar: inicia ese mismo run;
 - hijo activo: se reconecta al mismo `child_run_id`;
 - hijo terminado sin evaluación: evalúa el resultado persistido;
-- evaluación activa: reconcilia esa ejecución sin repetir el hijo;
+- evaluación activa: recupera o reconcilia el intento por su identidad estable
+  sin repetir el hijo;
+- evaluación técnicamente fallida: inicia el siguiente intento permitido con
+  el mismo snapshot y un directorio de salida limpio;
 - evaluación asentada sin join: reconstruye el join desde los wrappers; y
 - join comprometido: nunca vuelve a evaluar ni transicionar.
 
@@ -394,6 +425,8 @@ El cambio es aditivo para `version: 1`:
 - Respetar `max_concurrency` durante ejecución y evaluación.
 - Ejecutar ciclos, reintentos y paralelos internos del hijo.
 - Verificar que cada hijo recibe solo su `with` inmutable.
+- Confirmar que el hijo aplica el `workspace.mode` normal del proyecto sin
+  propiedad o cleanup especial introducido por el wrapper.
 - Producir evaluaciones `succeeded` y `failed` sin modificar al hijo.
 - Confirmar que el evaluador usa el comando normal del runtime sin flags nuevos
   de sandbox, permisos, red, tools o aprobaciones.
@@ -404,8 +437,13 @@ El cambio es aditivo para `version: 1`:
 
 ### Recuperación y cancelación
 
-- Recuperar en cada frontera durable sin duplicar runs ni evaluaciones.
-- Reintentar solo una evaluación técnicamente fallida.
+- Interrumpir entre reserva, creación, enlace e inicio del hijo y recuperar sin
+  duplicar el run.
+- Recuperar en cada frontera durable sin duplicar runs ni intentos activos.
+- Aplicar al evaluador los defaults internos `30m / 3 / 5s`.
+- Reintentar solo una evaluación técnicamente fallida, con el mismo snapshot y
+  un directorio de salida limpio.
+- Confirmar que un `failed` semántico válido no se reintenta.
 - Cancelar tareas en cola, hijos activos y evaluaciones activas.
 - Fallar de forma segura ante ejecución incierta o artefactos corruptos.
 
