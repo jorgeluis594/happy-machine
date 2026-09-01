@@ -32,6 +32,7 @@ import { GitProjectWorkspaces } from "./infrastructure/outbound/project-workspac
 import { FilesystemRunRepository } from "./infrastructure/outbound/run-repository/filesystem/filesystem-run-repository.js";
 import { FilesystemSkillCaptureStore } from "./infrastructure/outbound/skill-capture-store/filesystem/filesystem-skill-capture-store.js";
 import { OrcaTaskExecutor } from "./infrastructure/outbound/task-executor/orca/orca-task-executor.js";
+import { ProcessWorkflowController } from "./infrastructure/outbound/workflow-controller/process/process-workflow-controller.js";
 
 type HandledSignal = "SIGINT" | "SIGHUP";
 
@@ -109,6 +110,10 @@ function createCli(
   const workspaceCoordinator = new ProjectWorkspaceCoordinator(workspaces);
   const diagnostics = new CliDiagnostics((message) => streams.stderr(message));
   const executor = new OrcaTaskExecutor(undefined, diagnostics);
+  // Construct the child-run controller at the composition boundary. Later
+  // workflow coordinators receive this port; current execution is unchanged.
+  const workflowController = new ProcessWorkflowController(runs);
+  void workflowController;
   const sleeper = (milliseconds: number, signal?: AbortSignal) =>
     wait(milliseconds, undefined, { signal });
   const executeWorkflow = new ExecuteWorkflow(
