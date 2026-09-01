@@ -56,12 +56,18 @@ export interface WorkflowWorkDefinition {
   type: "workflow";
   workflowId: string;
   with: Record<string, JsonBindingDefinition>;
-  workflow?: EffectiveExecutionDefinition;
-  evaluator?: {
+  workflow: EffectiveExecutionDefinition;
+  evaluator: {
+    id: string;
     runtime: AgentRuntime;
     model?: string;
     reasoning?: string;
     prompt: string;
+    policy: {
+      attemptTimeoutMs: number;
+      maxAttempts: number;
+      retryDelayMs: number;
+    };
   };
 }
 
@@ -91,10 +97,14 @@ export interface AgentParallelTaskDefinition extends AgentWorkDefinition {
 
 export interface WorkflowParallelTaskDefinition extends WorkflowWorkDefinition {
   id: string;
+  /** Compatibility-shaped optional fields keep legacy consumers type-safe. */
+  agent: AgentDefinition;
+  prompt?: string;
+  policies: EffectivePolicies;
 }
 
-/** Static agent tasks remain source-compatible until workflow parsing is added. */
-export type ParallelTaskDefinition = AgentParallelTaskDefinition;
+export type ParallelTaskDefinition =
+  AgentParallelTaskDefinition | WorkflowParallelTaskDefinition;
 
 interface ParallelStateDefinitionBase {
   id: string;

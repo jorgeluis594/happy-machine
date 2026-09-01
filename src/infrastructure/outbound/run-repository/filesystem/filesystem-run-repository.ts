@@ -1070,13 +1070,19 @@ export class FilesystemRunRepository implements RunRepository {
     );
     let agentNumber = 0;
     let promptNumber = 0;
+    let childWorkflowNumber = 0;
     const artifacts: StoredArtifact[] = sourceArtifacts.map((source) => {
       let internalPath: string;
       if (source.kind === "project_configuration")
         internalPath = "definition/happy-machine.yaml";
-      else if (source.kind === "workflow")
-        internalPath = "definition/workflow.yaml";
-      else if (source.kind === "agent_instructions") {
+      else if (source.kind === "workflow") {
+        if (source.logicalId === "workflow")
+          internalPath = "definition/workflow.yaml";
+        else {
+          childWorkflowNumber += 1;
+          internalPath = `definition/workflows/workflow-${this.number(childWorkflowNumber)}.yaml`;
+        }
+      } else if (source.kind === "agent_instructions") {
         agentNumber += 1;
         internalPath = `definition/agents/agent-${this.number(agentNumber)}/instructions.md`;
       } else {

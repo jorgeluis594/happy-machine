@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { parse } from "yaml";
 import type {
   AgentDefinition,
+  AgentWorkDefinition,
   AgentRuntime,
   DefinitionArtifactSource,
   EffectivePolicies,
@@ -13,6 +14,8 @@ import type {
   InputDocumentSource,
   ParallelStateDefinition,
   ParallelTaskDefinition,
+  JsonBindingDefinition,
+  WorkflowWorkDefinition,
   ProjectDefinitions,
   StateDefinition,
 } from "../../../../ports/project-definitions.js";
@@ -44,6 +47,8 @@ const defaults: EffectivePolicies = {
   maxConcurrency: 4,
   controllerLeaseMs: 30_000,
 };
+const workflowEvaluatorPrompt =
+  "Evalúa el resultado completo del workflow hijo usando únicamente el contexto suministrado y devuelve succeeded o failed.";
 
 const scopes: Record<"project" | "workflow" | "state" | "task", PolicyField[]> =
   {
@@ -103,25 +108,14 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         logicalId: "project",
         content: configContent,
       },
-      {
-        kind: "workflow",
-        logicalId: "workflow",
-        content: workflowContent,
-      },
     ];
 
     this.keys(
       config,
-      ["version", "executor", "workspace", "agents", "defaults"],
+      ["version", "executor", "workspace", "agents", "workflows", "defaults"],
       "project",
     );
-    this.keys(
-      workflow,
-      ["version", "id", "initial_state", "states", "policies"],
-      "workflow",
-    );
     this.version(config.version, "project.version");
-    this.version(workflow.version, "workflow.version");
 
     const executor = this.optionalMap(config.executor, "project.executor");
     this.keys(executor, ["type"], "project.executor");
@@ -146,25 +140,120 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       "project",
       "project.defaults",
     );
-    const workflowPolicies = this.policies(
+    const registry = await this.workflowRegistry(root, config.workflows);
+    const cache = new Map<string, EffectiveExecutionDefinition>();
+    const resolving: string[] = [];
+    const resolveWorkflow = async (
+      id: string,
+      label: string,
+    ): Promise<EffectiveExecutionDefinition> => {
+      const cached = cache.get(id);
+      if (cached) return cached;
+      const cycleAt = resolving.indexOf(id);
+      if (cycleAt >= 0)
+        throw new DefinitionError(
+          `${label} dependency cycle: ${[...resolving.slice(cycleAt), id].join(" -> ")}`,
+        );
+      const entry = registry.get(id);
+      if (!entry)
+        throw new DefinitionError(
+          `${label} references unknown workflow: ${id}`,
+        );
+      resolving.push(id);
+      try {
+        const content = await this.text(entry.path, `workflow ${id}`);
+        const parsed = this.yaml(entry.path, content);
+        const declaredId = this.string(parsed.id, `workflow ${id}.id`);
+        if (declaredId !== id)
+          throw new DefinitionError(
+            `workflow ${id}.id must match registered ID ${id}`,
+          );
+        const result = await this.buildWorkflow(
+          root,
+          parsed,
+          content,
+          `workflow ${id}`,
+          `workflow:${id}`,
+          agents,
+          projectPolicies,
+          artifacts,
+          resolveWorkflow,
+          workspaceMode,
+        );
+        cache.set(id, result);
+        return result;
+      } finally {
+        resolving.pop();
+      }
+    };
+    const effectiveDefinition = await this.buildWorkflow(
+      root,
+      workflow,
+      workflowContent,
+      "workflow",
+      "workflow",
+      agents,
+      projectPolicies,
+      artifacts,
+      resolveWorkflow,
+      workspaceMode,
+    );
+    const initial =
+      effectiveDefinition.states[effectiveDefinition.initialState];
+    const inputs = await this.inputs(inputPaths, currentDirectory);
+    return {
+      projectRoot: root,
+      workflowPath,
+      ...effectiveDefinition,
+      snapshotSource: { effectiveDefinition, artifacts, inputs },
+      state: initial,
+    };
+  }
+
+  private async buildWorkflow(
+    root: string,
+    workflow: Mapping,
+    workflowContent: string,
+    label: string,
+    artifactId: string,
+    agents: Record<string, AgentDefinition>,
+    projectPolicies: EffectivePolicies,
+    artifacts: DefinitionArtifactSource[],
+    resolveWorkflow: (
+      id: string,
+      label: string,
+    ) => Promise<EffectiveExecutionDefinition>,
+    workspaceMode: "direct" | "worktree",
+  ): Promise<EffectiveExecutionDefinition> {
+    this.keys(
+      workflow,
+      ["version", "id", "initial_state", "states", "policies"],
+      label,
+    );
+    this.version(workflow.version, `${label}.version`);
+    artifacts.push({
+      kind: "workflow",
+      logicalId: artifactId,
+      content: workflowContent,
+    });
+    const workflowId = this.string(workflow.id, `${label}.id`);
+    const initialState = this.string(
+      workflow.initial_state,
+      `${label}.initial_state`,
+    );
+    const rawStates = this.map(workflow.states, `${label}.states`);
+    if (Object.keys(rawStates).length === 0)
+      throw new DefinitionError(`${label}.states must not be empty`);
+    if (!(initialState in rawStates))
+      throw new DefinitionError(
+        `${label}.initial_state references unknown state: ${initialState}`,
+      );
+    const policies = this.policies(
       projectPolicies,
       workflow.policies,
       "workflow",
-      "workflow.policies",
+      `${label}.policies`,
     );
-    const workflowId = this.string(workflow.id, "workflow.id");
-    const initialState = this.string(
-      workflow.initial_state,
-      "workflow.initial_state",
-    );
-    const rawStates = this.map(workflow.states, "workflow.states");
-    if (Object.keys(rawStates).length === 0)
-      throw new DefinitionError("workflow.states must not be empty");
-    if (!(initialState in rawStates))
-      throw new DefinitionError(
-        `workflow.initial_state references unknown state: ${initialState}`,
-      );
-
     const states: Record<string, StateDefinition> = {};
     for (const [id, value] of Object.entries(rawStates)) {
       this.id(id, `state ID ${id}`);
@@ -173,29 +262,20 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         id,
         value,
         agents,
-        workflowPolicies,
+        policies,
         artifacts,
+        resolveWorkflow,
       );
     }
-    this.graph(initialState, states);
-
-    const initial = states[initialState];
-    const effectiveDefinition: EffectiveExecutionDefinition = {
+    this.graph(initialState, states, label);
+    return {
       workflowId,
       executorType: "orca",
       workspaceMode,
       agents,
-      policies: workflowPolicies,
+      policies,
       states,
       initialState,
-    };
-    const inputs = await this.inputs(inputPaths, currentDirectory);
-    return {
-      projectRoot: root,
-      workflowPath,
-      ...effectiveDefinition,
-      snapshotSource: { effectiveDefinition, artifacts, inputs },
-      state: initial,
     };
   }
 
@@ -251,6 +331,35 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     return result;
   }
 
+  private async workflowRegistry(
+    root: string,
+    value: unknown,
+  ): Promise<Map<string, { path: string }>> {
+    const raw = this.optionalMap(value, "project.workflows");
+    const result = new Map<string, { path: string }>();
+    const paths = new Set<string>();
+    for (const [id, value] of Object.entries(raw)) {
+      this.id(id, `workflow registry ID ${id}`);
+      const entry = this.map(value, `project.workflows.${id}`);
+      this.keys(entry, ["file"], `project.workflows.${id}`);
+      const file = this.string(entry.file, `project.workflows.${id}.file`);
+      const resolved = await this.safeExistingFile(
+        root,
+        path.resolve(root, file),
+        `project.workflows.${id}`,
+        ".yaml",
+      );
+      const canonical = await realpath(resolved);
+      if (paths.has(canonical))
+        throw new DefinitionError(
+          `project.workflows.${id} duplicates a registered workflow path`,
+        );
+      paths.add(canonical);
+      result.set(id, { path: resolved });
+    }
+    return result;
+  }
+
   private async state(
     root: string,
     id: string,
@@ -258,6 +367,10 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     agents: Record<string, AgentDefinition>,
     inherited: EffectivePolicies,
     artifacts: DefinitionArtifactSource[],
+    resolveWorkflow: (
+      id: string,
+      label: string,
+    ) => Promise<EffectiveExecutionDefinition>,
   ): Promise<StateDefinition> {
     const raw = this.map(value, `workflow.states.${id}`);
     const type = this.string(raw.type, `workflow.states.${id}.type`);
@@ -358,9 +471,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
           taskValue,
           `workflow.states.${id}.tasks.${taskId}`,
         );
+        const taskLabel = `workflow.states.${id}.tasks.${taskId}`;
         this.keys(
           task,
           [
+            "type",
+            "workflow",
+            "with",
             "agent",
             "prompt",
             "prompt_file",
@@ -368,26 +485,41 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
             "max_attempts",
             "retry_delay",
           ],
-          `workflow.states.${id}.tasks.${taskId}`,
+          taskLabel,
         );
-        const taskPolicies = this.inlinePolicies(
-          policies,
-          task,
-          "task",
-          `workflow.states.${id}.tasks.${taskId}`,
-        );
-        tasks[taskId] = {
-          id: taskId,
-          ...(await this.work(
-            root,
+        if (
+          task.type !== undefined &&
+          task.type !== "workflow" &&
+          task.type !== "agent"
+        )
+          throw new DefinitionError(
+            `${taskLabel}.type must be agent or workflow`,
+          );
+        if (task.type === "workflow") {
+          tasks[taskId] = {
+            id: taskId,
+            ...(await this.workflowWork(task, taskLabel, resolveWorkflow)),
+          } as ParallelTaskDefinition;
+        } else {
+          const taskPolicies = this.inlinePolicies(
+            policies,
             task,
-            agents,
-            taskPolicies,
-            `workflow.states.${id}.tasks.${taskId}`,
-            artifacts,
-          )),
-          policies: taskPolicies,
-        };
+            "task",
+            taskLabel,
+          );
+          tasks[taskId] = {
+            id: taskId,
+            ...(await this.work(
+              root,
+              task,
+              agents,
+              taskPolicies,
+              taskLabel,
+              artifacts,
+            )),
+            policies: taskPolicies,
+          };
+        }
       }
       const outcomes = this.outcomes(
         raw.outcomes,
@@ -409,9 +541,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
           `workflow.states.${id}.for_each.from`,
         );
         const task = this.map(raw.task, `workflow.states.${id}.task`);
+        const taskLabel = `workflow.states.${id}.task`;
         this.keys(
           task,
           [
+            "type",
+            "workflow",
+            "with",
             "agent",
             "prompt",
             "prompt_file",
@@ -419,31 +555,50 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
             "max_attempts",
             "retry_delay",
           ],
-          `workflow.states.${id}.task`,
+          taskLabel,
         );
-        const taskPolicies = this.inlinePolicies(
-          policies,
-          task,
-          "task",
-          `workflow.states.${id}.task`,
-        );
+        if (
+          task.type !== undefined &&
+          task.type !== "workflow" &&
+          task.type !== "agent"
+        )
+          throw new DefinitionError(
+            `${taskLabel}.type must be agent or workflow`,
+          );
+        let dynamicWork: AgentWorkDefinition | WorkflowWorkDefinition;
+        if (task.type === "workflow")
+          dynamicWork = await this.workflowWork(
+            task,
+            taskLabel,
+            resolveWorkflow,
+            true,
+          );
+        else {
+          const taskPolicies = this.inlinePolicies(
+            policies,
+            task,
+            "task",
+            taskLabel,
+          );
+          dynamicWork = {
+            ...(await this.work(
+              root,
+              task,
+              agents,
+              taskPolicies,
+              taskLabel,
+              artifacts,
+            )),
+            policies: taskPolicies,
+          };
+        }
         return {
           id,
           type: "parallel",
           mode: "dynamic",
           tasks: {},
           forEach: source,
-          task: {
-            ...(await this.work(
-              root,
-              task,
-              agents,
-              taskPolicies,
-              `workflow.states.${id}.task`,
-              artifacts,
-            )),
-            policies: taskPolicies,
-          },
+          task: dynamicWork,
           outcomes: { succeeded: outcomes.succeeded, failed: outcomes.failed },
           policies,
           effectiveMaxConcurrency: policies.maxConcurrency,
@@ -465,6 +620,53 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     throw new DefinitionError(
       `workflow.states.${id}.type must be agent or parallel`,
     );
+  }
+
+  private async workflowWork(
+    raw: Mapping,
+    label: string,
+    resolveWorkflow: (
+      id: string,
+      label: string,
+    ) => Promise<EffectiveExecutionDefinition>,
+    dynamic = false,
+  ): Promise<WorkflowWorkDefinition> {
+    this.keys(raw, ["type", "workflow", "with"], label);
+    const workflowId = this.string(raw.workflow, `${label}.workflow`);
+    const withValue = this.map(raw.with, `${label}.with`);
+    if (Object.keys(withValue).length === 0)
+      throw new DefinitionError(`${label}.with must not be empty`);
+    const bindings: Record<string, JsonBindingDefinition> = {};
+    for (const [name, value] of Object.entries(withValue)) {
+      this.id(name, `${label}.with key ${name}`);
+      if (value === "$item") {
+        if (!dynamic)
+          throw new DefinitionError(
+            `${label}.with.${name} may use $item only inside for_each`,
+          );
+        bindings[name] = value;
+      } else if (this.isJsonValue(value)) bindings[name] = value;
+      else
+        throw new DefinitionError(
+          `${label}.with.${name} must be a JSON value or $item`,
+        );
+    }
+    return {
+      type: "workflow",
+      workflowId,
+      with: bindings,
+      workflow: await resolveWorkflow(workflowId, `${label}.workflow`),
+      evaluator: {
+        id: "happy-machine-workflow-evaluator",
+        runtime: "codex",
+        prompt: workflowEvaluatorPrompt,
+        policy: {
+          attemptTimeoutMs: 30 * 60_000,
+          maxAttempts: 3,
+          retryDelayMs: 5_000,
+        },
+      },
+    };
   }
 
   private produces(value: unknown, label: string) {
@@ -545,24 +747,25 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
   private graph(
     initial: string,
     states: Record<string, StateDefinition>,
+    workflowLabel = "workflow",
   ): void {
     for (const state of Object.values(states)) {
       if (state.type !== "parallel" || state.mode !== "dynamic") continue;
       const producer = states[state.forEach.stateId];
       if (!producer || producer.type !== "agent")
         throw new DefinitionError(
-          `workflow.states.${state.id}.for_each references unknown producer: ${state.forEach.stateId}`,
+          `${workflowLabel}.states.${state.id}.for_each references unknown producer: ${state.forEach.stateId}`,
         );
       if (!producer.produces?.[state.forEach.outputName])
         throw new DefinitionError(
-          `workflow.states.${state.id}.for_each references unknown work_items output: ${state.forEach.outputName}`,
+          `${workflowLabel}.states.${state.id}.for_each references unknown work_items output: ${state.forEach.outputName}`,
         );
     }
     for (const state of Object.values(states)) {
       for (const [outcome, target] of Object.entries(state.outcomes)) {
         if (!terminals.has(target) && !(target in states))
           throw new DefinitionError(
-            `workflow.states.${state.id}.outcomes.${outcome} references unknown target: ${target}`,
+            `${workflowLabel}.states.${state.id}.outcomes.${outcome} references unknown target: ${target}`,
           );
       }
     }
@@ -570,13 +773,13 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     const unreachable = Object.keys(states).filter((id) => !reachable.has(id));
     if (unreachable.length)
       throw new DefinitionError(
-        `workflow state is unreachable from initial_state: ${unreachable[0]}`,
+        `${workflowLabel} state is unreachable from initial_state: ${unreachable[0]}`,
       );
     const canTerminate = this.walk(["$succeeded", "$failed"], states, true);
     const trapped = [...reachable].find((id) => !canTerminate.has(id));
     if (trapped)
       throw new DefinitionError(
-        `reachable workflow state cannot reach a terminal target: ${trapped}`,
+        `reachable ${workflowLabel} state cannot reach a terminal target: ${trapped}`,
       );
   }
 
@@ -785,6 +988,22 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new DefinitionError(`${label} must be a mapping`);
     return value as Mapping;
+  }
+
+  private isJsonValue(
+    value: unknown,
+  ): value is import("../../../../domain/execution/run.js").JsonValue {
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "boolean"
+    )
+      return true;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (Array.isArray(value))
+      return value.every((item) => this.isJsonValue(item));
+    if (!value || typeof value !== "object") return false;
+    return Object.values(value).every((item) => this.isJsonValue(item));
   }
   private optionalMap(value: unknown, label: string): Mapping {
     return value === undefined ? {} : this.map(value, label);
