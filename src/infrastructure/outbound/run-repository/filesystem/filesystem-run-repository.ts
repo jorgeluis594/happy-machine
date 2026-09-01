@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import {
   access,
   copyFile,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -17,6 +18,7 @@ import {
 import path from "node:path";
 import type {
   ControllerLease,
+  DefinitionSnapshotRecord,
   DocumentRecord,
   RunRecord,
   JsonValue,
@@ -46,6 +48,11 @@ import type {
   SnapshotCreationRequest,
   SnapshotCreationResult,
   ValidatedNormalResult,
+  ChildRunCreationRequest,
+  ChildRunReservationRequest,
+  EvaluationContextRecord,
+  ReservedChildRun,
+  WorkflowTaskResultCommitRequest,
 } from "../../../../ports/run-repository.js";
 import type { StructuredOutputDefinition } from "../../../../ports/project-definitions.js";
 
@@ -467,6 +474,260 @@ export class FilesystemRunRepository implements RunRepository {
     return save;
   }
 
+  async reserveChildRun(
+    request: ChildRunReservationRequest,
+  ): Promise<ReservedChildRun> {
+    return this.withRunLock(
+      request.projectRoot,
+      request.parentRunId,
+      async () => {
+        const parent = (
+          await this.load(request.projectRoot, request.parentRunId)
+        ).run;
+        this.requireParentCoordinate(parent, request.coordinate);
+        const existing = parent.childRunReservations?.find((reservation) =>
+          this.sameCoordinate(reservation.coordinate, request.coordinate),
+        );
+        const childRunId =
+          existing?.childRunId ?? this.childRunId(request.coordinate);
+        const candidate: ReservedChildRun = {
+          childRunId,
+          coordinate: structuredClone(request.coordinate),
+          workflowId: request.workflowId,
+          workflowSnapshotIdentity: request.workflowSnapshotIdentity,
+          resolvedWith: structuredClone(request.resolvedWith),
+        };
+        if (existing) {
+          if (!this.sameReservation(existing, candidate))
+            throw new Error(
+              "Child run reservation conflicts with durable intent",
+            );
+          return existing;
+        }
+        parent.childRunReservations ??= [];
+        parent.childRunReservations.push(candidate);
+        await this.writeRun(parent);
+        return candidate;
+      },
+    );
+  }
+
+  async getOrCreateChildRun(
+    request: ChildRunCreationRequest,
+  ): Promise<RunRecord> {
+    const reservation = await this.reserveChildRun(request);
+    const childDirectory = this.runDirectoryFor(
+      request.projectRoot,
+      reservation.childRunId,
+    );
+    return this.withRunLock(
+      request.projectRoot,
+      reservation.childRunId,
+      async () => {
+        const childPath = path.join(childDirectory, "run.json");
+        if (await this.exists(childPath)) {
+          const child = (
+            await this.loadChildRun(request.projectRoot, reservation.childRunId)
+          ).run;
+          this.validateChildRequest(child, request, reservation);
+          return child;
+        }
+        await mkdir(childDirectory, { recursive: true });
+        const snapshotDirectory = path.join(childDirectory, "snapshot");
+        const stagingSnapshot = await mkdtemp(
+          path.join(childDirectory, ".snapshot-"),
+        );
+        let childSnapshotIdentity: string;
+        try {
+          await cp(request.parentSnapshot.directory, stagingSnapshot, {
+            recursive: true,
+          });
+          const manifestPath = path.join(stagingSnapshot, "manifest.json");
+          const manifest = JSON.parse(
+            await readFile(manifestPath, "utf8"),
+          ) as Record<string, unknown>;
+          const effectiveContent = `${JSON.stringify(this.canonical(request.workflowDefinition), null, 2)}\n`;
+          await writeFile(
+            path.join(stagingSnapshot, "definition", "effective.json"),
+            effectiveContent,
+            "utf8",
+          );
+          const payload = this.canonical({
+            ...manifest,
+            identity: undefined,
+            workflowId: request.workflowId,
+            effectiveDefinition: request.workflowDefinition,
+            artifacts: (manifest.artifacts as unknown[]).map((artifact) =>
+              artifact &&
+              typeof artifact === "object" &&
+              "internalPath" in artifact &&
+              (artifact as { internalPath: string }).internalPath ===
+                "definition/effective.json"
+                ? {
+                    ...(artifact as Record<string, unknown>),
+                    sha256: this.sha256(effectiveContent),
+                  }
+                : artifact,
+            ),
+          }) as Record<string, unknown>;
+          delete payload.identity;
+          const identity = `sha256:${this.sha256(JSON.stringify(payload))}`;
+          childSnapshotIdentity = identity;
+          await writeFile(
+            manifestPath,
+            `${JSON.stringify({ ...payload, identity }, null, 2)}\n`,
+            "utf8",
+          );
+          await rename(stagingSnapshot, snapshotDirectory);
+        } catch (error) {
+          await rm(stagingSnapshot, { recursive: true, force: true });
+          throw error;
+        }
+        const snapshot: DefinitionSnapshotRecord = {
+          identity: childSnapshotIdentity,
+          directory: snapshotDirectory,
+          manifestPath: path.join(snapshotDirectory, "manifest.json"),
+          inputs: request.parentSnapshot.inputs.map((input) => ({
+            ...input,
+            durablePath: this.durablePath(
+              snapshotDirectory,
+              input.internalPath,
+            ),
+          })),
+        };
+        const child: RunRecord = {
+          id: reservation.childRunId,
+          workflowId: request.workflowId,
+          workflowPath: request.workflowId,
+          projectRoot: request.projectRoot,
+          definitionSnapshot: snapshot,
+          parent: {
+            runId: request.parentRunId,
+            stateId: request.coordinate.stateId,
+            visitNumber: request.coordinate.visitNumber,
+            taskId: request.coordinate.taskId,
+          },
+          status: "running",
+          controllerStatus: "detached",
+          createdAt: request.createdAt,
+          deadlineAt: request.deadlineAt,
+          transitionCount: 0,
+          visits: [],
+          documents: [],
+          events: [],
+        };
+        child.childBindings = structuredClone(reservation.resolvedWith);
+        child.workflowSnapshotIdentity = request.workflowSnapshotIdentity;
+        const bindingContext = path.join(childDirectory, "context.md");
+        const bindingContent = `# Workflow Context\n\n## Immutable workflow bindings\n\nThese values were resolved before the child run was created.\n\n\`\`\`json\n${JSON.stringify(this.canonical(child.childBindings), null, 2)}\n\`\`\`\n`;
+        const bindingTemporary = `${bindingContext}.${process.pid}.${Date.now()}.tmp`;
+        await writeFile(bindingTemporary, bindingContent, "utf8");
+        await rename(bindingTemporary, bindingContext);
+        await this.writeRun(child);
+        return child;
+      },
+    );
+  }
+
+  async loadChildRun(
+    projectRoot: string,
+    childRunId: string,
+  ): Promise<RecoveredRun> {
+    const recovered = await this.load(projectRoot, childRunId);
+    if (!recovered.run.parent) throw new Error("Run is not a workflow child");
+    const parent = (await this.load(projectRoot, recovered.run.parent.runId))
+      .run;
+    const reservation = parent.childRunReservations?.find(
+      (candidate) => candidate.childRunId === childRunId,
+    );
+    if (
+      !reservation ||
+      !this.sameCoordinate(reservation.coordinate, {
+        parentRunId: recovered.run.parent.runId,
+        stateId: recovered.run.parent.stateId,
+        visitNumber: recovered.run.parent.visitNumber,
+        taskId: recovered.run.parent.taskId,
+      })
+    )
+      throw new Error("Child run provenance is inconsistent");
+    return recovered;
+  }
+
+  async stageWorkflowTaskEvaluationContext(request: {
+    parent: RunRecord;
+    coordinate: import("../../../../domain/execution/workflow-task.js").WorkflowTaskCoordinate;
+    resolvedWith: Record<string, JsonValue>;
+    childRunId: string;
+  }): Promise<EvaluationContextRecord> {
+    this.requireParentCoordinate(request.parent, request.coordinate);
+    const directory = path.join(
+      this.runDirectory(request.parent),
+      "workflow-evaluations",
+      this.segment(request.childRunId),
+    );
+    const target = path.join(directory, "context.md");
+    const content = `# Workflow task evaluation context\n\n## Resolved bindings\n\n\`\`\`json\n${JSON.stringify(this.canonical(request.resolvedWith), null, 2)}\n\`\`\`\n`;
+    await mkdir(directory, { recursive: true });
+    await writeFile(target, content, { encoding: "utf8", flag: "wx" }).catch(
+      async (error: NodeJS.ErrnoException) => {
+        if (
+          error.code !== "EEXIST" ||
+          (await readFile(target, "utf8")) !== content
+        )
+          throw error;
+      },
+    );
+    return { path: target, sha256: this.sha256(content) };
+  }
+
+  async commitWorkflowTaskResult(
+    request: WorkflowTaskResultCommitRequest,
+  ): Promise<RunRecord> {
+    return this.withRunLock(
+      request.parent.projectRoot,
+      request.parent.id,
+      async () => {
+        const current = (
+          await this.load(request.parent.projectRoot, request.parent.id)
+        ).run;
+        this.requireParentCoordinate(current, request.coordinate);
+        if (request.envelope.childRunId !== this.childRunId(request.coordinate))
+          throw new Error(
+            "Workflow result provenance does not match its coordinate",
+          );
+        const visit = current.visits.find(
+          (candidate) =>
+            candidate.type === "parallel" &&
+            candidate.stateId === request.coordinate.stateId &&
+            candidate.number === request.coordinate.visitNumber,
+        );
+        const task =
+          visit && visit.type === "parallel"
+            ? visit.tasks.find(
+                (candidate) => candidate.id === request.coordinate.taskId,
+              )
+            : undefined;
+        if (!task || task.execution?.type !== "workflow")
+          throw new Error("Workflow wrapper is missing");
+        task.execution.evaluationAttempts = [structuredClone(request.attempt)];
+        task.execution.result = structuredClone(request.envelope);
+        task.execution.phase = request.envelope.status;
+        task.documents = structuredClone(request.documents);
+        task.status = request.envelope.status;
+        task.outcome =
+          request.envelope.status === "succeeded" ? "succeeded" : undefined;
+        current.events.push(
+          ...structuredClone(request.events).map((event, index) => ({
+            ...event,
+            sequence: current.events.length + index + 1,
+          })),
+        );
+        await this.writeRun(current);
+        return current;
+      },
+    );
+  }
+
   private async writeRun(run: RunRecord): Promise<void> {
     const directory = this.runDirectory(run);
     await mkdir(directory, { recursive: true });
@@ -474,6 +735,108 @@ export class FilesystemRunRepository implements RunRepository {
     const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, "utf8");
     await rename(temporary, target);
+  }
+
+  private childRunId(coordinate: {
+    parentRunId: string;
+    stateId: string;
+    visitNumber: number;
+    taskId: string;
+  }): string {
+    return `child_${this.sha256(JSON.stringify(this.canonical(coordinate))).slice(0, 32)}`;
+  }
+
+  private sameCoordinate(
+    left: {
+      parentRunId: string;
+      stateId: string;
+      visitNumber: number;
+      taskId: string;
+    },
+    right: {
+      parentRunId: string;
+      stateId: string;
+      visitNumber: number;
+      taskId: string;
+    },
+  ): boolean {
+    return (
+      left.parentRunId === right.parentRunId &&
+      left.stateId === right.stateId &&
+      left.visitNumber === right.visitNumber &&
+      left.taskId === right.taskId
+    );
+  }
+
+  private sameReservation(
+    left: {
+      coordinate: {
+        parentRunId: string;
+        stateId: string;
+        visitNumber: number;
+        taskId: string;
+      };
+      workflowId: string;
+      workflowSnapshotIdentity: string;
+      resolvedWith: Record<string, JsonValue>;
+    },
+    right: ReservedChildRun,
+  ): boolean {
+    return (
+      this.sameCoordinate(left.coordinate, right.coordinate) &&
+      left.workflowId === right.workflowId &&
+      left.workflowSnapshotIdentity === right.workflowSnapshotIdentity &&
+      JSON.stringify(this.canonical(left.resolvedWith)) ===
+        JSON.stringify(this.canonical(right.resolvedWith))
+    );
+  }
+
+  private requireParentCoordinate(
+    parent: RunRecord,
+    coordinate: {
+      parentRunId: string;
+      stateId: string;
+      visitNumber: number;
+      taskId: string;
+    },
+  ): void {
+    if (parent.id !== coordinate.parentRunId)
+      throw new Error("Child run coordinate does not belong to parent");
+    const visit = parent.visits.find(
+      (candidate) =>
+        candidate.stateId === coordinate.stateId &&
+        candidate.number === coordinate.visitNumber,
+    );
+    if (
+      visit?.type === "parallel" &&
+      !visit.tasks.some((task) => task.id === coordinate.taskId)
+    )
+      throw new Error("Child run coordinate does not identify a parent task");
+  }
+
+  private validateChildRequest(
+    child: RunRecord,
+    request: ChildRunCreationRequest,
+    reservation: ReservedChildRun,
+  ): void {
+    if (
+      child.id !== reservation.childRunId ||
+      child.workflowId !== request.workflowId ||
+      !child.parent ||
+      child.parent.runId !== request.parentRunId ||
+      !this.sameCoordinate(
+        { ...child.parent, parentRunId: child.parent.runId },
+        request.coordinate,
+      )
+    )
+      throw new Error("Existing child run conflicts with durable provenance");
+    if (child.workflowSnapshotIdentity !== request.workflowSnapshotIdentity)
+      throw new Error("Existing child run conflicts with workflow snapshot");
+    if (
+      JSON.stringify(this.canonical(child.childBindings ?? {})) !==
+      JSON.stringify(this.canonical(reservation.resolvedWith))
+    )
+      throw new Error("Existing child run conflicts with immutable bindings");
   }
 
   private async exists(candidate: string): Promise<boolean> {
@@ -494,6 +857,7 @@ export class FilesystemRunRepository implements RunRepository {
       this.runDirectoryFor(projectRoot, runId),
       ".control-lock",
     );
+    await mkdir(path.dirname(lock), { recursive: true });
     for (let attempt = 0; ; attempt += 1) {
       try {
         await mkdir(lock);
@@ -581,6 +945,18 @@ export class FilesystemRunRepository implements RunRepository {
       `- SHA-256: \`${document.sha256}\``,
       "",
     ]);
+    const bindingIndex = run.childBindings
+      ? [
+          "## Immutable workflow bindings",
+          "",
+          "These values were resolved before the child run was created.",
+          "",
+          "```json",
+          JSON.stringify(this.canonical(run.childBindings), null, 2),
+          "```",
+          "",
+        ]
+      : [];
     const worktreeIndex = run.workspace?.worktrees.flatMap((worktree) => [
       `### ${worktree.id}`,
       "",
@@ -635,6 +1011,7 @@ export class FilesystemRunRepository implements RunRepository {
       "",
       "## Input documents",
       "",
+      ...(bindingIndex.length ? bindingIndex : []),
       ...(inputIndex.length
         ? inputIndex
         : ["No input documents were supplied for this run.", ""]),

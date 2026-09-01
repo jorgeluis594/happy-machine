@@ -1,4 +1,5 @@
 import type {
+  JsonBindingDefinition,
   ParallelTaskDefinition,
   ParallelTaskWorkDefinition,
 } from "../../ports/project-definitions.js";
@@ -15,6 +16,30 @@ export interface ParallelTaskMaterializationInput {
   workspaceMode: RunWorkspaceRecord["mode"];
   dynamicSource?: DynamicTaskBinding["source"];
   workItems?: readonly JsonValue[];
+}
+
+/** Resolve the closed binding language once, producing a detached JSON value. */
+export function resolveWorkflowBindings(
+  bindings: Readonly<Record<string, JsonBindingDefinition>>,
+  item?: JsonValue,
+): Record<string, JsonValue> {
+  const resolve = (value: JsonBindingDefinition): JsonValue => {
+    if (value === "$item") {
+      if (item === undefined)
+        throw new Error("$item requires a dynamic work item");
+      return structuredClone(item);
+    }
+    if (Array.isArray(value)) return value.map((entry) => resolve(entry));
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, resolve(entry)]),
+      );
+    }
+    return value;
+  };
+  return Object.fromEntries(
+    Object.entries(bindings).map(([key, value]) => [key, resolve(value)]),
+  );
 }
 
 /**

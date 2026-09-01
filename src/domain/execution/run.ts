@@ -1,4 +1,7 @@
-import type { WorkflowTaskExecutionRecord } from "./workflow-task.js";
+import type {
+  ParentRunReference,
+  WorkflowTaskExecutionRecord,
+} from "./workflow-task.js";
 
 export type RunStatus =
   "running" | "canceling" | "succeeded" | "failed" | "canceled";
@@ -234,6 +237,23 @@ export interface RunRecord {
   projectRoot: string;
   workspace?: RunWorkspaceRecord;
   definitionSnapshot: DefinitionSnapshotRecord;
+  childBindings?: Record<string, JsonValue>;
+  workflowSnapshotIdentity?: string;
+  /** Present only for a run created as a workflow submachine. */
+  parent?: ParentRunReference;
+  /** Durable intent records used while a workflow wrapper is being materialized. */
+  childRunReservations?: Array<{
+    childRunId: string;
+    coordinate: {
+      parentRunId: string;
+      stateId: string;
+      visitNumber: number;
+      taskId: string;
+    };
+    workflowId: string;
+    workflowSnapshotIdentity: string;
+    resolvedWith: Record<string, JsonValue>;
+  }>;
   status: RunStatus;
   controllerStatus?: ControllerStatus;
   createdAt: string;

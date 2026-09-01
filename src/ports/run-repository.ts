@@ -8,6 +8,11 @@ import type {
   RunRecord,
 } from "../domain/execution/run.js";
 import type {
+  ParentRunReference,
+  WorkflowTaskCoordinate,
+  WorkflowTaskEnvelope,
+} from "../domain/execution/workflow-task.js";
+import type {
   DefinitionSnapshotSource,
   EffectiveExecutionDefinition,
 } from "./project-definitions.js";
@@ -63,6 +68,45 @@ export interface SnapshotCreationRequest {
 export interface SnapshotCreationResult {
   record: DefinitionSnapshotRecord;
   definition: EffectiveExecutionDefinition;
+}
+
+export interface ChildRunReservationRequest {
+  projectRoot: string;
+  parentRunId: string;
+  coordinate: WorkflowTaskCoordinate;
+  workflowId: string;
+  workflowSnapshotIdentity: string;
+  resolvedWith: Record<string, JsonValue>;
+  provenance?: ParentRunReference;
+}
+
+export interface ReservedChildRun {
+  childRunId: string;
+  coordinate: WorkflowTaskCoordinate;
+  workflowId: string;
+  workflowSnapshotIdentity: string;
+  resolvedWith: Record<string, JsonValue>;
+}
+
+export interface ChildRunCreationRequest extends ChildRunReservationRequest {
+  workflowDefinition: EffectiveExecutionDefinition;
+  parentSnapshot: DefinitionSnapshotRecord;
+  createdAt: string;
+  deadlineAt: string;
+}
+
+export interface EvaluationContextRecord {
+  path: string;
+  sha256: string;
+}
+
+export interface WorkflowTaskResultCommitRequest {
+  parent: RunRecord;
+  coordinate: WorkflowTaskCoordinate;
+  attempt: import("../domain/execution/run.js").AttemptRecord;
+  envelope: WorkflowTaskEnvelope;
+  documents: DocumentRecord[];
+  events: RunRecord["events"];
 }
 
 export interface ValidatedNormalResult {
@@ -129,6 +173,20 @@ export interface RunRepository {
     observedAt: string,
   ): Promise<RunRecord>;
   save(run: RunRecord): Promise<void>;
+  reserveChildRun?(
+    request: ChildRunReservationRequest,
+  ): Promise<ReservedChildRun>;
+  getOrCreateChildRun?(request: ChildRunCreationRequest): Promise<RunRecord>;
+  loadChildRun?(projectRoot: string, childRunId: string): Promise<RecoveredRun>;
+  stageWorkflowTaskEvaluationContext?(request: {
+    parent: RunRecord;
+    coordinate: WorkflowTaskCoordinate;
+    resolvedWith: Record<string, JsonValue>;
+    childRunId: string;
+  }): Promise<EvaluationContextRecord>;
+  commitWorkflowTaskResult?(
+    request: WorkflowTaskResultCommitRequest,
+  ): Promise<RunRecord>;
   prepareVisitContext(run: RunRecord): Promise<string>;
   prepareAttempt(
     run: RunRecord,
