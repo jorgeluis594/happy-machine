@@ -28,6 +28,11 @@ export class RunPresenter {
       `Run: ${run.id}`,
       `Workflow: ${run.workflowId}`,
       `Snapshot: ${run.definitionSnapshot.identity}`,
+      ...(run.parent
+        ? [
+            `Parent: run=${run.parent.runId} state=${run.parent.stateId} visit=${run.parent.visitNumber} task=${run.parent.taskId}`,
+          ]
+        : []),
       `Status: ${this.visibleStatus(result)}`,
       `Terminal reason: ${this.terminalReason(run)}`,
       `Cancellation: ${this.cancellation(run)}`,
@@ -73,6 +78,11 @@ export class RunPresenter {
     return [
       `Run: ${result.run.id}`,
       `Snapshot: ${result.run.definitionSnapshot.identity}`,
+      ...(result.run.parent
+        ? [
+            `Parent: run=${result.run.parent.runId} state=${result.run.parent.stateId} visit=${result.run.parent.visitNumber} task=${result.run.parent.taskId}`,
+          ]
+        : []),
       "Events:",
       ...result.run.events
         .slice()
@@ -81,6 +91,8 @@ export class RunPresenter {
           (event) =>
             `${event.sequence} ${event.at} ${event.type} ${JSON.stringify(event.data)}`,
         ),
+      "Child runs:",
+      ...this.childLinks(result.run),
       "Log references:",
       ...this.logs(result.run),
     ].join("\n");
@@ -96,11 +108,42 @@ export class RunPresenter {
             status: task.status === "running" ? "active" : task.status,
           }));
     return tasks.flatMap(({ task, status }) => [
-      `  ${status}: ${task.id}${"workspace" in task ? ` workspace=${task.workspace.path} mode=${task.workspace.mode}${task.workspace.branch ? ` branch=${task.workspace.branch}` : ""}${task.workspace.startingHead ? ` starting_head=${task.workspace.startingHead}` : ""}${task.workspace.endingHead ? ` ending_head=${task.workspace.endingHead}` : ""}${task.workspace.dirty === undefined ? "" : ` dirty=${String(task.workspace.dirty)}`}` : ""}`,
+      this.taskLine(task, status),
       ...(task.attempts.length
         ? task.attempts.map((attempt) => this.attempt(run, task, attempt))
         : ["    attempts: none"]),
     ]);
+  }
+
+  private taskLine(task: TaskRecord, status: string): string {
+    if ("execution" in task && task.execution?.type === "workflow") {
+      const execution = task.execution;
+      const outcome = execution.result?.status ?? "none";
+      const error =
+        execution.result?.error ?? execution.evaluationAttempts.at(-1)?.error;
+      return `  ${status}: ${task.id} type=workflow phase=${execution.phase} child_run=${execution.childRunId} attempts=${execution.evaluationAttempts.length} outcome=${outcome} error=${error === undefined ? "none" : this.concise(error)}`;
+    }
+    return `  ${status}: ${task.id}${"workspace" in task ? ` workspace=${task.workspace.path} mode=${task.workspace.mode}${task.workspace.branch ? ` branch=${task.workspace.branch}` : ""}${task.workspace.startingHead ? ` starting_head=${task.workspace.startingHead}` : ""}${task.workspace.endingHead ? ` ending_head=${task.workspace.endingHead}` : ""}${task.workspace.dirty === undefined ? "" : ` dirty=${String(task.workspace.dirty)}`}` : ""}`;
+  }
+
+  private childLinks(run: RunRecord): string[] {
+    const links = run.visits.flatMap((visit) => {
+      if (visit.type !== "parallel") return [];
+      return visit.tasks.flatMap((task) =>
+        task.execution?.type === "workflow"
+          ? [
+              `  task=${task.id} child_run=${task.execution.childRunId} phase=${task.execution.phase}`,
+            ]
+          : [],
+      );
+    });
+    return links.length ? links : ["  none"];
+  }
+
+  private concise(value: unknown): string {
+    const rendered = typeof value === "string" ? value : JSON.stringify(value);
+    if (!rendered) return "unknown";
+    return rendered.length <= 160 ? rendered : `${rendered.slice(0, 157)}...`;
   }
 
   private pendingEvents(run: RunRecord): string[] {

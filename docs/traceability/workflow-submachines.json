@@ -1,0 +1,26 @@
+{
+  "feature": "workflow-submachines",
+  "scope": "task-08",
+  "entries": [
+    {"id":"AC-01","requirement":"bounded parent status for every wrapper phase","tests":["tests/status-history-observability.test.ts"],"evidence":"RunPresenter status task line"},
+    {"id":"AC-02","requirement":"causal parent history","tests":["tests/status-history-observability.test.ts"],"evidence":"ordered run events"},
+    {"id":"AC-03","requirement":"inverse child parent reference","tests":["tests/status-history-observability.test.ts"],"evidence":"Parent status line"},
+    {"id":"AC-04","requirement":"no recursive child history duplication","tests":["tests/status-history-observability.test.ts"],"evidence":"bounded Child runs links"},
+    {"id":"AC-05","requirement":"static submachine conformance","tests":["tests/workflow-registry.test.ts"],"evidence":"registered workflow snapshot"},
+    {"id":"AC-06","requirement":"dynamic ordered bindings and bounded execution","tests":["tests/dynamic-parallel-fan-out.test.ts"],"evidence":"dynamic fan-out suite"},
+    {"id":"AC-07","requirement":"recovery without duplicate controllers or evaluator attempts","tests":["tests/durable-recovery.test.ts"],"evidence":"recovery suite"},
+    {"id":"AC-08","requirement":"durable cancellation evidence","tests":["tests/durable-cancellation.test.ts"],"evidence":"cancellation suite"},
+    {"id":"AC-09","requirement":"direct and worktree workspace behavior","tests":["tests/git-worktree-isolation.test.ts"],"evidence":"worktree isolation suite"},
+    {"id":"AC-10","requirement":"historical snapshot compatibility","tests":["tests/run-snapshot.test.ts"],"evidence":"snapshot suite"},
+    {"id":"AC-11","requirement":"regression suite","tests":["tests/status-history-observability.test.ts"],"evidence":"npm test and npm run typecheck"},
+    {"id":"AC-12","requirement":"traceability manifest","tests":["tests/workflow-submachines-certification.test.ts"],"evidence":"machine-readable manifest"},
+    {"id":"CU-01","requirement":"validate and snapshot registered workflows","tests":["tests/workflow-registry.test.ts"],"evidence":"registry and recursive snapshot"},
+    {"id":"CU-02","requirement":"execute static workflow task","tests":["tests/execute-workflow.test.ts"],"evidence":"child run lifecycle"},
+    {"id":"CU-03","requirement":"materialize dynamic workflow tasks","tests":["tests/dynamic-parallel-fan-out.test.ts"],"evidence":"fan-out bindings"},
+    {"id":"CU-04","requirement":"evaluate completed child run","tests":["tests/execute-workflow.test.ts"],"evidence":"evaluator envelope"},
+    {"id":"CU-05","requirement":"complete all-settled parallel join","tests":["tests/parallel-states.test.ts"],"evidence":"parallel join"},
+    {"id":"CU-06","requirement":"recover parent after crash","tests":["tests/durable-recovery.test.ts"],"evidence":"durable recovery"},
+    {"id":"CU-07","requirement":"cancel parent with active submachines","tests":["tests/durable-cancellation.test.ts"],"evidence":"durable cancellation"},
+    {"id":"CU-08","requirement":"inspect status and history","tests":["tests/status-history-observability.test.ts"],"evidence":"bounded status/history presenter"}
+  ]
+}

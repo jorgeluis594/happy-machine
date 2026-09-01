@@ -71,6 +71,9 @@ export class WorkflowTaskCoordinator {
         taskId: wrapper.coordinate.taskId,
       },
     });
+    this.event(parent, "child_run_reserved", wrapper, {
+      workflowId: work.workflowId,
+    });
     const provenance = {
       projectRoot: child.projectRoot,
       childRunId: child.id,
@@ -98,6 +101,9 @@ export class WorkflowTaskCoordinator {
             stderr: started.diagnostics.stderrPath,
           },
         };
+        this.event(parent, "child_run_started", wrapper, {
+          executionId: started.identity.executionId,
+        });
         await this.runs.save(parent);
         observation = await this.controller.recover({
           projectRoot: child.projectRoot,
@@ -146,6 +152,10 @@ export class WorkflowTaskCoordinator {
           stderr: observation.diagnostics.stderrPath,
         },
       };
+      this.event(parent, "child_run_settled", wrapper, {
+        status: observation.terminalStatus,
+        executionId: observation.identity.executionId,
+      });
       await this.runs.save(parent);
     }
     const terminal = (await this.runs.loadChildRun(child.projectRoot, child.id))
@@ -158,6 +168,11 @@ export class WorkflowTaskCoordinator {
       throw new Error(
         "Controller reported terminal without terminal child state",
       );
+    this.event(parent, "child_run_settled", wrapper, {
+      status: terminal.status,
+      executionId: wrapper.childController?.executionId,
+    });
+    await this.runs.save(parent);
     if (wrapper.result) {
       task.status = wrapper.result.status;
       task.outcome =
@@ -372,6 +387,9 @@ export class WorkflowTaskCoordinator {
         taskId: coordinate.taskId,
       },
     });
+    this.event(parent, "child_run_reserved", wrapper, {
+      workflowId: work.workflowId,
+    });
     if (wrapper.phase === "queued") {
       wrapper.phase = transitionWorkflowTask(wrapper.phase, "child_running");
       await this.runs.save(parent);
@@ -396,6 +414,9 @@ export class WorkflowTaskCoordinator {
           stderr: execution.diagnostics.stderrPath,
         },
       };
+      this.event(parent, "child_run_started", wrapper, {
+        executionId: execution.identity.executionId,
+      });
       await this.runs.save(parent);
     }
     let terminal = (await this.runs.loadChildRun(child.projectRoot, child.id))
@@ -409,6 +430,10 @@ export class WorkflowTaskCoordinator {
       throw new Error(
         `Child workflow ended in unsupported state: ${terminal.status}`,
       );
+    this.event(parent, "child_run_settled", wrapper, {
+      status: terminal.status,
+      executionId: wrapper.childController?.executionId,
+    });
     const result = await this.evaluator.evaluate({
       parent,
       coordinate,
@@ -433,6 +458,42 @@ export class WorkflowTaskCoordinator {
     taskId: string,
   ): WorkflowTaskCoordinate {
     return { parentRunId: parent.id, stateId, visitNumber, taskId };
+  }
+
+  private event(
+    parent: RunRecord,
+    type: string,
+    wrapper: Extract<ParallelTaskRecord["execution"], { type: "workflow" }>,
+    extra: Record<string, unknown> = {},
+  ): void {
+    const data = {
+      parentRunId: parent.id,
+      stateId: wrapper.coordinate.stateId,
+      visitNumber: wrapper.coordinate.visitNumber,
+      taskId: wrapper.coordinate.taskId,
+      childRunId: wrapper.childRunId,
+      ...extra,
+    };
+    const duplicate = parent.events.some(
+      (event) =>
+        event.type === type &&
+        event.data.parentRunId === data.parentRunId &&
+        event.data.stateId === data.stateId &&
+        event.data.visitNumber === data.visitNumber &&
+        event.data.taskId === data.taskId &&
+        event.data.childRunId === data.childRunId &&
+        (type.includes("evaluation")
+          ? event.data.attemptNumber ===
+            (data as Record<string, unknown>).attemptNumber
+          : true),
+    );
+    if (duplicate) return;
+    parent.events.push({
+      sequence: parent.events.length + 1,
+      type,
+      at: this.now().toISOString(),
+      data,
+    });
   }
 
   private childId(

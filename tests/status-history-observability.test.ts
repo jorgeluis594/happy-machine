@@ -463,4 +463,118 @@ describe("status and history observability", () => {
     expect(output).toContain('"outcome":"failed"');
     expect(output).toContain('"id":"failed-task"');
   });
+
+  it("renders bounded workflow wrapper links and the inverse parent reference", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "happy-submachine-observe-"),
+    );
+    const { repository, run } = await createRun(
+      root,
+      "parent-run",
+      "2026-08-11T10:00:00.000Z",
+    );
+    const childId = "child_1234567890abcdef";
+    run.visits.push({
+      type: "parallel",
+      stateId: "fan_out",
+      number: 1,
+      contextPath: "/context.md",
+      tasks: [
+        {
+          id: "inspect-child",
+          status: "failed",
+          attempts: [],
+          documents: [],
+          workspace: { mode: "direct", path: root },
+          execution: {
+            type: "workflow",
+            phase: "failed",
+            coordinate: {
+              parentRunId: run.id,
+              stateId: "fan_out",
+              visitNumber: 1,
+              taskId: "inspect-child",
+            },
+            childRunId: childId,
+            resolvedWith: { item: "one" },
+            evaluationAttempts: [
+              {
+                id: "evaluation-1",
+                number: 1,
+                status: "succeeded",
+                controlWorkspace: root,
+                contextPath: "/evaluation.md",
+                outputDirectory: "/output",
+                resultPath: "/output/result.json",
+                logs: { stdout: "", stderr: "" },
+                error: { code: "semantic_failure", message: "review required" },
+                documents: [],
+              },
+            ],
+            result: {
+              id: "inspect-child",
+              childRunId: childId,
+              status: "failed",
+              outputs: {},
+              documents: [],
+              error: { code: "semantic_failure", message: "review required" },
+            },
+          },
+        },
+      ],
+    });
+    run.events.push({
+      sequence: 1,
+      type: "child_run_settled",
+      at: "2026-08-11T10:01:00.000Z",
+      data: {
+        parentRunId: run.id,
+        stateId: "fan_out",
+        visitNumber: 1,
+        taskId: "inspect-child",
+        childRunId: childId,
+        status: "failed",
+      },
+    });
+    await repository.save(run);
+
+    const status = new RunPresenter().status(
+      await new InspectRuns(repository, now).status(root, run.id),
+    );
+    expect(status).toContain(
+      `inspect-child type=workflow phase=failed child_run=${childId} attempts=1 outcome=failed`,
+    );
+    expect(status).toContain(
+      'error={"code":"semantic_failure","message":"review required"}',
+    );
+    const history = new RunPresenter().history(
+      await new InspectRuns(repository, now).history(root, run.id),
+    );
+    expect(history).toContain(
+      `task=inspect-child child_run=${childId} phase=failed`,
+    );
+    expect(history).not.toContain("evaluation-1");
+
+    const child = {
+      ...run,
+      id: childId,
+      parent: {
+        runId: run.id,
+        stateId: "fan_out",
+        visitNumber: 1,
+        taskId: "inspect-child",
+      },
+      visits: [],
+      events: [],
+    };
+    expect(
+      new RunPresenter().status({
+        run: child,
+        observedAt: now().toISOString(),
+        leaseValid: false,
+      }),
+    ).toContain(
+      `Parent: run=${run.id} state=fan_out visit=1 task=inspect-child`,
+    );
+  });
 });

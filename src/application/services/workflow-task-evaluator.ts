@@ -156,6 +156,9 @@ export class WorkflowTaskEvaluator {
     const wrapper = this.wrapper(request.parent, request.coordinate);
     if (wrapper.phase === "child_running") {
       wrapper.phase = transitionWorkflowTask(wrapper.phase, "evaluating");
+      this.event(request.parent, "workflow_task_evaluation_started", wrapper, {
+        attemptNumber: wrapper.evaluationAttempts.length + 1,
+      });
       await this.runs.save(request.parent);
     } else if (wrapper.phase !== "evaluating")
       throw new Error(`Workflow wrapper is not evaluable: ${wrapper.phase}`);
@@ -252,6 +255,15 @@ export class WorkflowTaskEvaluator {
           documents: [...context.child.documents, ...documents],
           ...(result.error === undefined ? {} : { error: result.error }),
         };
+        this.event(
+          request.parent,
+          "workflow_task_evaluation_settled",
+          wrapper,
+          {
+            attemptNumber: attempt.number,
+            status: envelope.status,
+          },
+        );
         if (this.runs.commitWorkflowTaskResult)
           await this.runs.commitWorkflowTaskResult({
             parent: request.parent,
@@ -260,6 +272,20 @@ export class WorkflowTaskEvaluator {
             envelope,
             documents,
             events: [
+              {
+                sequence: 0,
+                type: "workflow_task_evaluation_settled",
+                at: this.now().toISOString(),
+                data: {
+                  parentRunId: request.parent.id,
+                  stateId: request.coordinate.stateId,
+                  visitNumber: request.coordinate.visitNumber,
+                  taskId: request.coordinate.taskId,
+                  childRunId: request.child.id,
+                  status: envelope.status,
+                  attemptNumber: attempt.number,
+                },
+              },
               {
                 sequence: 0,
                 type: "workflow_task_evaluated",
@@ -318,6 +344,42 @@ export class WorkflowTaskEvaluator {
     throw new TaskExecutorError(
       `Evaluator attempt ${attempt.id} could not be recovered (${observation.status})`,
     );
+  }
+
+  private event(
+    parent: RunRecord,
+    type: string,
+    wrapper: WorkflowTaskExecutionRecord,
+    extra: Record<string, unknown> = {},
+  ): void {
+    const data = {
+      parentRunId: parent.id,
+      stateId: wrapper.coordinate.stateId,
+      visitNumber: wrapper.coordinate.visitNumber,
+      taskId: wrapper.coordinate.taskId,
+      childRunId: wrapper.childRunId,
+      ...extra,
+    };
+    if (
+      parent.events.some(
+        (event) =>
+          event.type === type &&
+          event.data.parentRunId === data.parentRunId &&
+          event.data.stateId === data.stateId &&
+          event.data.visitNumber === data.visitNumber &&
+          event.data.taskId === data.taskId &&
+          event.data.childRunId === data.childRunId &&
+          event.data.attemptNumber ===
+            (data as Record<string, unknown>).attemptNumber,
+      )
+    )
+      return;
+    parent.events.push({
+      sequence: parent.events.length + 1,
+      type,
+      at: this.now().toISOString(),
+      data,
+    });
   }
 
   private async executeAttempt(
