@@ -51,6 +51,7 @@ import {
   requireWorkspaceCoordinator,
   workspaceFailure,
 } from "../services/project-workspace-coordinator.js";
+import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
 import {
   disabledDiagnostics,
   type DiagnosticSink,
@@ -99,6 +100,7 @@ export class RecoverWorkflow {
     private readonly wait: RecoveryWait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
+    private readonly workflowTasks?: WorkflowTaskCoordinator,
   ) {}
 
   async recover(request: RecoverWorkflowRequest): Promise<RunRecord> {
@@ -471,8 +473,27 @@ export class RecoverWorkflow {
       await this.persist(controlled);
       const taskDefinition =
         state.mode === "dynamic" ? state.task : state.tasks[task.id];
-      if ("type" in taskDefinition && taskDefinition.type === "workflow")
-        throw new Error("Workflow parallel tasks are not executable yet");
+      if ("type" in taskDefinition && taskDefinition.type === "workflow") {
+        if (!this.workflowTasks)
+          throw new Error("Workflow task coordinator is unavailable");
+        try {
+          await this.workflowTasks.recover(
+            controlled.run,
+            visit,
+            task,
+            taskDefinition,
+            controlled.signal,
+          );
+        } catch (error) {
+          await this.failRun(controlled, {
+            code: "workflow_submachine_recovery_failed",
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+        await this.persist(controlled);
+        continue;
+      }
       const result = await this.recoverTask(
         controlled,
         visit,

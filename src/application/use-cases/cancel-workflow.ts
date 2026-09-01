@@ -26,6 +26,7 @@ import {
   requireWorkspaceCoordinator,
   workspaceFailure,
 } from "../services/project-workspace-coordinator.js";
+import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
 
 export interface CancelWorkflowRequest {
   currentDirectory: string;
@@ -62,6 +63,7 @@ export class CancelWorkflow {
     private readonly wait: CancellationWait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
+    private readonly workflowTasks?: WorkflowTaskCoordinator,
   ) {}
 
   async cancel(request: CancelWorkflowRequest): Promise<RunRecord> {
@@ -139,6 +141,32 @@ export class CancelWorkflow {
   private async reconcileActiveAttempts(
     controlled: ControlledCancellation,
   ): Promise<void> {
+    for (const visit of controlled.run.visits) {
+      if (visit.type !== "parallel") continue;
+      for (const task of visit.tasks) {
+        if (task.execution?.type !== "workflow") continue;
+        if (!this.workflowTasks)
+          throw new Error("Workflow task coordinator is unavailable");
+        const status = await this.workflowTasks.cancel(
+          controlled.run,
+          task,
+          controlled.signal,
+        );
+        if (status === "unknown")
+          this.event(
+            controlled.run,
+            "workflow_submachine_cancellation_uncertain",
+            this.timestamp(),
+            {
+              stateId: visit.stateId,
+              visitNumber: visit.number,
+              taskId: task.id,
+              childRunId: task.execution.childRunId,
+            },
+          );
+        await this.persist(controlled);
+      }
+    }
     for (const item of this.activeAttempts(controlled.run)) {
       throwIfDetached(controlled.signal);
       await this.reconcileAttempt(controlled, item);

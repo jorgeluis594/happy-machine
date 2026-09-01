@@ -1,7 +1,12 @@
 import type { AttemptRecord, DocumentRecord, JsonValue } from "./run.js";
 
 export type WorkflowTaskPhase =
-  "queued" | "child_running" | "evaluating" | "succeeded" | "failed";
+  | "queued"
+  | "child_running"
+  | "evaluating"
+  | "succeeded"
+  | "failed"
+  | "canceled";
 
 export interface WorkflowTaskCoordinate {
   parentRunId: string;
@@ -60,12 +65,22 @@ export const workflowTaskEvaluatorPolicy: EvaluatorPolicy = {
 };
 
 const transitions: Record<WorkflowTaskPhase, readonly WorkflowTaskPhase[]> = {
-  queued: ["child_running"],
-  child_running: ["evaluating"],
-  evaluating: ["succeeded", "failed"],
+  queued: ["child_running", "canceled"],
+  child_running: ["evaluating", "canceled"],
+  evaluating: ["succeeded", "failed", "canceled"],
   succeeded: [],
   failed: [],
+  canceled: [],
 };
+
+export function cancelWorkflowTask(
+  task: WorkflowTaskExecutionRecord,
+): WorkflowTaskExecutionRecord {
+  if (task.phase === "succeeded" || task.phase === "failed") return task;
+  if (task.phase !== "canceled")
+    task.phase = transitionWorkflowTask(task.phase, "canceled");
+  return task;
+}
 
 export function sameWorkflowTaskCoordinate(
   left: WorkflowTaskCoordinate,

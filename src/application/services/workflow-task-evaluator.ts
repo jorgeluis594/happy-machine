@@ -85,6 +85,71 @@ export class WorkflowTaskEvaluator {
     private readonly makeId: () => string = () => cryptoRandomId(),
   ) {}
 
+  async cancelAttempt(
+    parent: RunRecord,
+    coordinate: WorkflowTaskCoordinate,
+    attempt: AttemptRecord,
+    signal?: AbortSignal,
+  ): Promise<"stopped" | "unknown"> {
+    const recover = this.executor.recover?.bind(this.executor);
+    if (!attempt.executor && !recover) return "unknown";
+    if (!recover) return "unknown";
+    const observation = await recover(
+      attempt.id,
+      attempt.executor,
+      parent.projectRoot,
+      attempt.resultPath,
+      {
+        runId: parent.id,
+        stateId: coordinate.stateId,
+        visitNumber: coordinate.visitNumber,
+        taskId: coordinate.taskId,
+        attemptNumber: attempt.number,
+      },
+    );
+    if (observation.status === "completed" || observation.status === "failed") {
+      attempt.executor = observation.references;
+      attempt.logs = observation.logs;
+      attempt.externalStatus = "stopped";
+      attempt.status = "canceled";
+      return "stopped";
+    }
+    if (observation.status !== "active") return "unknown";
+    attempt.executor = observation.references;
+    attempt.logs = observation.logs;
+    try {
+      await this.executor.cancel(observation.references, parent.projectRoot, {
+        runId: parent.id,
+        stateId: coordinate.stateId,
+        visitNumber: coordinate.visitNumber,
+        taskId: coordinate.taskId,
+        attemptNumber: attempt.number,
+      });
+    } catch {
+      return "unknown";
+    }
+    for (;;) {
+      if (signal?.aborted) throw signal.reason;
+      const status = await this.executor.reconcile(
+        observation.references,
+        parent.projectRoot,
+        {
+          runId: parent.id,
+          stateId: coordinate.stateId,
+          visitNumber: coordinate.visitNumber,
+          taskId: coordinate.taskId,
+          attemptNumber: attempt.number,
+        },
+      );
+      if (status !== "active") {
+        attempt.externalStatus = status;
+        attempt.status = "canceled";
+        return status === "stopped" ? "stopped" : "unknown";
+      }
+      await this.wait(100, signal);
+    }
+  }
+
   async evaluate(
     request: EvaluateWorkflowTaskRequest,
   ): Promise<WorkflowTaskEvaluationResult> {
@@ -224,7 +289,7 @@ export class WorkflowTaskEvaluator {
     request: EvaluateWorkflowTaskRequest,
     attempt: AttemptRecord,
   ): Promise<TaskExecution | undefined> {
-    if (!attempt.executor || !this.executor.recover) return undefined;
+    if (!this.executor.recover) return undefined;
     const observation = await this.executor.recover(
       attempt.id,
       attempt.executor,

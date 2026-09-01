@@ -129,6 +129,7 @@ function createCli(
     workflowEvaluator,
     now,
     sleeper,
+    executor,
   );
   const executeWorkflow = new ExecuteWorkflow(
     definitions,
@@ -148,6 +149,7 @@ function createCli(
     (milliseconds) => sleeper(milliseconds),
     workspaceCoordinator,
     diagnostics,
+    workflowTasks,
   );
   const cancelWorkflow = new CancelWorkflow(
     runs,
@@ -156,6 +158,7 @@ function createCli(
     sleeper,
     workspaceCoordinator,
     diagnostics,
+    workflowTasks,
   );
   const cleanupWorktrees = new CleanupWorktrees(runs, workspaces, now);
 
