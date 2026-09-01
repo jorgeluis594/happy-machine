@@ -37,12 +37,13 @@ but its implementation plan is intentionally sequential.
 Each state uses the user-requested prompt shape:
 
 ```text
-/goal implementa la siguiente tarea <task path>
+/goal implementa la siguiente tarea <task path>. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
 ```
 
 `<task path>` is replaced by the exact repository-relative path for that
-state. The agent instruction file supplies the shared constraints instead of
-duplicating them in all eight prompts.
+state. The non-interruption and autonomous-decision rule appears in every state
+prompt and is also retained in the shared agent instructions so neither source
+of execution context can omit it.
 
 ## Failure and recovery behavior
 
@@ -64,4 +65,7 @@ repository's existing CLI or focused definition tests. Confirm that:
 3. every `failed` edge returns to the same task;
 4. only `task_08.completed` reaches `$succeeded`;
 5. the existing workflow remains loadable; and
-6. workspace mode remains `direct`.
+6. workspace mode remains `direct`; and
+7. every state prompt and the shared instructions require uninterrupted
+   execution and autonomous selection of the recommended option when details
+   are ambiguous, uncertain, incomplete, or underspecified.
