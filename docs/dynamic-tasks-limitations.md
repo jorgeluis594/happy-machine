@@ -49,8 +49,11 @@ invocado como submáquina.
 - Al terminar el hijo, un estado envolvente del padre ejecuta una evaluación
   integrada y traduce el resultado completo a `succeeded | failed`.
 - La evaluación no acepta configuración de `agent`, `prompt` o `prompt_file`.
-  Happy Machine controla el agente interno, el system prompt y el contrato de
+  Happy Machine controla el runtime interno, el prompt inicial y el contrato de
   resultado.
+- Para el POC, el evaluador se lanza igual que una tarea actual: Happy Machine
+  no agrega flags de sandbox, permisos, red, tools ni aprobaciones. El runtime
+  hereda su configuración local y su entorno.
 - El join paralelo sigue siendo all-settled y calculado por el motor.
 
 ## Registro de workflows reutilizables
@@ -227,11 +230,24 @@ El evaluador recibe un contexto inmutable con:
 - un resumen de estados, visitas, intentos y errores; y
 - el `child_run_id` y la procedencia durable de cada artefacto.
 
-Happy Machine genera el system prompt, selecciona su agente interno y exige el
-contrato actual de resultado de una tarea paralela: exactamente `succeeded` o
-`failed`, documentos y un error opcional. El snapshot registra la identidad y
-versión efectiva del evaluador y del system prompt para que recuperación no
-cambie la evaluación.
+Happy Machine selecciona el runtime interno y genera un prompt inicial que le
+ordena trabajar solo con el contexto suministrado, revisar los documentos del
+hijo, corregirlos cuando sea necesario, ejecutar las validaciones pertinentes
+y devolver el outcome correcto. El evaluador puede publicar versiones
+corregidas como nuevos documentos del wrapper; los artefactos comprometidos por
+el hijo permanecen inmutables.
+
+El resultado usa el contrato actual de una tarea paralela: exactamente
+`succeeded` o `failed`, documentos y un error opcional. Happy Machine valida el
+resultado y los documentos con las mismas reglas actuales antes de asentarlos.
+El snapshot registra la identidad y versión efectiva del evaluador y de su
+prompt inicial para que recuperación no cambie esas instrucciones.
+
+Para este POC, Happy Machine lanza el runtime con el mismo mapeo que usa para
+las tareas normales y no impone configuración adicional de sandbox, permisos,
+red, tools, hooks o aprobaciones. Esas capacidades provienen de la configuración
+local y del entorno del runtime. El POC acepta esta dependencia externa y no
+intenta garantizar aislamiento uniforme entre instalaciones.
 
 El evaluador no presupone que la terminación técnica del hijo ya representa el
 resultado funcional requerido por la tarea paralela. Su función es adaptar el
@@ -379,6 +395,10 @@ El cambio es aditivo para `version: 1`:
 - Ejecutar ciclos, reintentos y paralelos internos del hijo.
 - Verificar que cada hijo recibe solo su `with` inmutable.
 - Producir evaluaciones `succeeded` y `failed` sin modificar al hijo.
+- Confirmar que el evaluador usa el comando normal del runtime sin flags nuevos
+  de sandbox, permisos, red, tools o aprobaciones.
+- Permitir que el evaluador publique documentos corregidos sin mutar los
+  artefactos comprometidos por el hijo.
 - Preservar `child_run_id`, outputs, documentos, errores y procedencia.
 - Confirmar que ningún fallo semántico vuelve a ejecutar el workflow hijo.
 
@@ -397,9 +417,9 @@ El cambio es aditivo para `version: 1`:
 
 ## Criterios de aceptación
 
-La capacidad está completa cuando un estado paralelo puede materializar una o
-más tareas basadas en workflows registrados, ejecutar cada workflow como un
-run hijo independiente con input y recuperación propios, evaluarlo mediante un
+La capacidad está completa cuando un estado paralelo puede materializar cero o
+más tareas basadas en workflows registrados, ejecutar cada workflow como un run
+hijo independiente con input y recuperación propios, evaluarlo mediante un
 estado envolvente del padre controlado por Happy Machine, producir exactamente
 `succeeded | failed` por tarea y realizar el join existente sin duplicar hijos,
 perder procedencia ni cambiar el comportamiento de definiciones previas.
