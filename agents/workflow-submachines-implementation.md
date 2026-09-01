@@ -15,6 +15,9 @@ required tests, and definition of done.
 
 If any part of the task is underspecified, analyze the viable alternatives and
 autonomously choose the recommended option. Document the decision and continue.
+Do not interrupt or stop execution to request clarification. When information
+is ambiguous, uncertain, or incomplete, choose the recommended option,
+document it, and continue autonomously.
 This autonomy does not authorize destructive, external, or out-of-scope
 actions.
 

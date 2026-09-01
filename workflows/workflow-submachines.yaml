@@ -6,7 +6,8 @@ states:
   task_01:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/01-prepare-parallel-work-for-submachines.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/01-prepare-parallel-work-for-submachines.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_02
       failed: task_01
@@ -14,7 +15,8 @@ states:
   task_02:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/02-register-and-snapshot-reusable-workflows.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/02-register-and-snapshot-reusable-workflows.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_03
       failed: task_02
@@ -22,7 +24,8 @@ states:
   task_03:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/03-persist-parent-child-runs-idempotently.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/03-persist-parent-child-runs-idempotently.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_04
       failed: task_03
@@ -30,7 +33,8 @@ states:
   task_04:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/04-control-child-workflow-processes.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/04-control-child-workflow-processes.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_05
       failed: task_04
@@ -38,7 +42,8 @@ states:
   task_05:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/05-evaluate-child-workflow-results.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/05-evaluate-child-workflow-results.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_06
       failed: task_05
@@ -46,7 +51,8 @@ states:
   task_06:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/06-execute-workflow-submachines-in-parallel.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/06-execute-workflow-submachines-in-parallel.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_07
       failed: task_06
@@ -54,7 +60,8 @@ states:
   task_07:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/07-recover-and-cancel-workflow-submachines.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/07-recover-and-cancel-workflow-submachines.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: task_08
       failed: task_07
@@ -62,7 +69,8 @@ states:
   task_08:
     type: agent
     agent: workflow_submachines_implementation
-    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/08-observe-and-certify-workflow-submachines.md
+    prompt: >-
+      /goal implementa la siguiente tarea docs/tasks/workflow-submachines/08-observe-and-certify-workflow-submachines.md. No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.
     outcomes:
       completed: $succeeded
       failed: task_08

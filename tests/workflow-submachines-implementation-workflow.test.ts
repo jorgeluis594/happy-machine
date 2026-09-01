@@ -14,6 +14,9 @@ const taskPaths = [
   "docs/tasks/workflow-submachines/08-observe-and-certify-workflow-submachines.md",
 ] as const;
 
+const uninterruptedExecution =
+  "No interrumpas ni detengas la ejecución. Si encuentras ambigüedad, incertidumbre o información incompleta, elige autónomamente la opción recomendada, documenta la decisión y continúa sin solicitar aclaraciones.";
+
 describe("workflow submachines implementation workflow", () => {
   it("loads the sequential direct-workspace definition with Luna medium", async () => {
     const root = path.resolve(".");
@@ -61,7 +64,7 @@ describe("workflow submachines implementation workflow", () => {
         reasoning: "medium",
       });
       expect(state.prompt).toBe(
-        `/goal implementa la siguiente tarea ${taskPath}`,
+        `/goal implementa la siguiente tarea ${taskPath}. ${uninterruptedExecution}`,
       );
       expect(state.outcomes).toEqual({
         completed:
@@ -83,6 +86,9 @@ describe("workflow submachines implementation workflow", () => {
     expect(instructions).toContain("Treat earlier numbered tasks");
     expect(instructions).toContain("preserve unrelated user changes");
     expect(instructions).toContain("acceptance criteria");
+    expect(instructions).toContain("Do not interrupt or stop execution");
+    expect(instructions).toContain("ambiguous, uncertain, or incomplete");
+    expect(instructions).toContain("continue autonomously");
     expect(instructions).toContain("commit only after");
     expect(instructions).toContain("Return `completed` only after");
   });
