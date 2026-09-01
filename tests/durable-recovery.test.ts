@@ -238,6 +238,7 @@ class RecoveryExecutor implements TaskExecutor {
       identity: string,
       known: ExecutorReferences | undefined,
     ) => Promise<RecoveryObservation>,
+    private readonly launchResult?: (launch: TaskLaunch) => Promise<void>,
   ) {}
 
   recover(
@@ -255,13 +256,15 @@ class RecoveryExecutor implements TaskExecutor {
     this.launches.push(structuredClone(launch));
     const external = references(launch.identity);
     await onStarted(external);
-    await writeResult(
-      {
-        resultPath: launch.resultPath,
-        outputDirectory: launch.outputDirectory,
-      },
-      launch.prompt === "work" ? "done" : "succeeded",
-    );
+    if (this.launchResult) await this.launchResult(launch);
+    else
+      await writeResult(
+        {
+          resultPath: launch.resultPath,
+          outputDirectory: launch.outputDirectory,
+        },
+        launch.prompt === "work" ? "done" : "succeeded",
+      );
     return { references: external, logs: { stdout: "launched", stderr: "" } };
   }
 
@@ -280,10 +283,9 @@ function recoverer(
   repository: RunRepository,
   executor: TaskExecutor,
   now = () => new Date("2026-08-11T00:00:00.000Z"),
+  wait: (milliseconds: number) => Promise<void> = () => Promise.resolve(),
 ) {
-  return new RecoverWorkflow(repository, executor, now, () =>
-    Promise.resolve(),
-  );
+  return new RecoverWorkflow(repository, executor, now, wait);
 }
 
 describe("durable controller leases", () => {
@@ -389,7 +391,7 @@ describe("durable recovery", () => {
     expect(executor.launches).toHaveLength(0);
   });
 
-  it("cancels and confirms an attempt whose absolute deadline expired while detached before retrying", async () => {
+  it("cancels and confirms an expired attempt, then succeeds on its retry", async () => {
     const setup = await durableSetup(normalState());
     const visit = await addVisit(setup);
     if (visit.type !== "agent") throw new Error("expected agent visit");
@@ -413,13 +415,13 @@ describe("durable recovery", () => {
       controllerId: "expired-attempt-controller",
     });
 
-    expect(run).toMatchObject({
-      status: "failed",
-      failure: { code: "attempt_timeout" },
-    });
+    expect(run.status).toBe("succeeded");
     expect(executor.cancellations).toEqual([references(attempt.id)]);
     expect(executor.reconciliations).toEqual([references(attempt.id)]);
-    expect(executor.launches).toHaveLength(0);
+    expect(executor.launches).toHaveLength(1);
+    expect(run.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["attempt_failed", "retry_scheduled"]),
+    );
   });
 
   it("launches exactly once after a crash before external launch", async () => {
@@ -513,7 +515,7 @@ describe("durable recovery", () => {
     );
   });
 
-  it("records a failed recovered external execution without relaunching it", async () => {
+  it("retries a failed recovered external execution without relaunching its identity", async () => {
     const setup = await durableSetup(normalState());
     const visit = await addVisit(setup);
     if (visit.type !== "agent") throw new Error("expected agent visit");
@@ -522,11 +524,15 @@ describe("durable recovery", () => {
     attempt.executor = references(attempt.id);
     await setup.repository.save(setup.run);
     const executor = new RecoveryExecutor((identity) =>
-      Promise.resolve({
-        status: "failed",
-        references: references(identity),
-        logs: { stdout: "failed externally", stderr: "" },
-      }),
+      Promise.resolve(
+        identity === attempt.id
+          ? {
+              status: "failed",
+              references: references(identity),
+              logs: { stdout: "failed externally", stderr: "" },
+            }
+          : { status: "not_found" },
+      ),
     );
 
     const run = await recoverer(setup.repository, executor).recover({
@@ -535,11 +541,166 @@ describe("durable recovery", () => {
       controllerId: "failed-external-controller",
     });
 
+    expect(run.status).toBe("succeeded");
+    expect(executor.launches).toHaveLength(1);
+    expect(executor.launches[0].identity).not.toBe(attempt.id);
+    expect(executor.launches[0].attemptNumber).toBe(2);
+  });
+
+  it("exhausts exactly maxAttempts recovered technical failures", async () => {
+    const state = normalState();
+    state.policies.maxAttempts = 3;
+    const setup = await durableSetup(state);
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const first = await addAttempt(setup, visit, visit.task);
+    first.status = "running";
+    first.executor = references(first.id);
+    await setup.repository.save(setup.run);
+    const delays: number[] = [];
+    const executor = new RecoveryExecutor(
+      (identity) =>
+        Promise.resolve({
+          status: "failed",
+          references: references(identity),
+          logs: { stdout: "", stderr: "failed" },
+        }),
+      () => Promise.reject(new Error("launch failed")),
+    );
+
+    const run = await recoverer(
+      setup.repository,
+      executor,
+      undefined,
+      (milliseconds) => {
+        delays.push(milliseconds);
+        return Promise.resolve();
+      },
+    ).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "retry-exhaustion-controller",
+    });
+
+    const recoveredVisit = run.visits[0];
+    if (recoveredVisit.type !== "agent") throw new Error("expected agent");
     expect(run).toMatchObject({
       status: "failed",
       failure: { code: "executor_failed" },
     });
-    expect(executor.launches).toHaveLength(0);
+    expect(recoveredVisit.task.attempts).toHaveLength(3);
+    expect(
+      new Set(recoveredVisit.task.attempts.map((item) => item.id)).size,
+    ).toBe(3);
+    expect(
+      new Set(recoveredVisit.task.attempts.map((item) => item.resultPath)).size,
+    ).toBe(3);
+    expect(
+      new Set(recoveredVisit.task.attempts.map((item) => item.outputDirectory))
+        .size,
+    ).toBe(3);
+    expect(delays).toEqual([0, 0]);
+    expect(
+      run.events.filter((event) => event.type === "retry_exhausted"),
+    ).toHaveLength(1);
+  });
+
+  it("waits for retryDelayMs and retries an invalid recovered result", async () => {
+    const state = normalState();
+    state.policies.retryDelayMs = 37;
+    const setup = await durableSetup(state);
+    const visit = await addVisit(setup);
+    if (visit.type !== "agent") throw new Error("expected agent visit");
+    const first = await addAttempt(setup, visit, visit.task);
+    await mkdir(first.outputDirectory, { recursive: true });
+    await writeFile(first.resultPath, "not json\n");
+    const delays: number[] = [];
+    const executor = new RecoveryExecutor((identity) =>
+      Promise.resolve(
+        identity === first.id
+          ? {
+              status: "completed",
+              references: references(identity),
+              logs: { stdout: "recovered", stderr: "" },
+            }
+          : { status: "not_found" },
+      ),
+    );
+
+    const run = await recoverer(
+      setup.repository,
+      executor,
+      undefined,
+      (milliseconds) => {
+        delays.push(milliseconds);
+        return Promise.resolve();
+      },
+    ).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "invalid-result-controller",
+    });
+
+    expect(run.status).toBe("succeeded");
+    expect(delays).toEqual([37]);
+    expect(executor.launches).toHaveLength(1);
+    expect(
+      run.events.some(
+        (event) =>
+          event.type === "attempt_failed" &&
+          typeof event.data.failure === "object" &&
+          event.data.failure !== null &&
+          "code" in event.data.failure &&
+          event.data.failure.code === "result_missing_or_invalid",
+      ),
+    ).toBe(true);
+  });
+
+  it("applies recovered retries to agent tasks inside a parallel state", async () => {
+    const setup = await durableSetup(parallelState());
+    const visit = await addVisit(setup);
+    if (visit.type !== "parallel") throw new Error("expected parallel visit");
+    const task = visit.tasks[0];
+    const first = await addAttempt(setup, visit, task);
+    first.status = "running";
+    first.executor = references(first.id);
+    await setup.repository.save(setup.run);
+    const executor = new RecoveryExecutor((identity) =>
+      Promise.resolve(
+        identity === first.id
+          ? {
+              status: "failed",
+              references: references(identity),
+              logs: { stdout: "", stderr: "failed" },
+            }
+          : { status: "not_found" },
+      ),
+    );
+
+    const run = await recoverer(setup.repository, executor).recover({
+      projectRoot: setup.root,
+      runId: setup.run.id,
+      controllerId: "parallel-retry-controller",
+    });
+
+    const recoveredVisit = run.visits[0];
+    if (recoveredVisit.type !== "parallel")
+      throw new Error("expected parallel visit");
+    expect(run.status).toBe("succeeded");
+    expect(recoveredVisit.tasks[0]).toMatchObject({
+      status: "succeeded",
+      attempts: [
+        { number: 1, status: "failed" },
+        { number: 2, status: "succeeded" },
+      ],
+    });
+    expect(
+      run.events.filter(
+        (event) =>
+          event.type === "retry_scheduled" &&
+          event.data.taskId === recoveredVisit.tasks[0].id,
+      ),
+    ).toHaveLength(1);
   });
 
   it("commits recovered documents and remains idempotent on repeated recovery", async () => {

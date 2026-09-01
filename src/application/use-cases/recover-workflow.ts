@@ -32,6 +32,7 @@ import type {
   ValidatedNormalResult,
 } from "../../ports/run-repository.js";
 import {
+  ResultValidationError,
   RunCancellationRequestedError,
   RunNotResumableError,
 } from "../../ports/run-repository.js";
@@ -540,15 +541,16 @@ export class RecoverWorkflow {
                 code: "declared_failed",
                 message: "Parallel task declared failed",
               };
-        this.event(controlled.run, "attempt_failed", {
-          stateId: visit.stateId,
-          visitNumber: visit.number,
-          taskId: task.id,
-          identity: result.attempt.id,
-          attemptNumber: result.attempt.number,
-          failure: task.failure,
-          recovered: true,
-        });
+        if (result.status === "succeeded")
+          this.event(controlled.run, "attempt_failed", {
+            stateId: visit.stateId,
+            visitNumber: visit.number,
+            taskId: task.id,
+            identity: result.attempt.id,
+            attemptNumber: result.attempt.number,
+            failure: task.failure,
+            recovered: true,
+          });
       } else {
         const documents = await this.runs.stageDocuments(
           controlled.run,
@@ -619,71 +621,132 @@ export class RecoverWorkflow {
     allowedOutcomes: readonly string[],
     outputDefinitions?: Record<string, StructuredOutputDefinition>,
   ): Promise<RecoveredTaskResult> {
-    throwIfDetached(controlled.signal);
     const projectWorkspace = projectWorkspaceForTask(
       controlled.run,
       visit,
       task,
     );
-    let attempt = task.attempts.at(-1);
-    if (attempt && !attempt.deadlineAt) {
-      const startedEvent = controlled.run.events.find(
-        (event) =>
-          (event.type === "attempt_started" ||
-            event.type === "attempt_launching") &&
-          event.data.identity === attempt?.id,
-      );
-      attempt.startedAt ??= startedEvent?.at;
-      if (attempt.startedAt)
-        attempt.deadlineAt = new Date(
-          Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
-        ).toISOString();
-    }
-    if (attempt?.status === "succeeded") {
-      const result = await this.runs.readResult(
-        attempt.resultPath,
-        attempt.outputDirectory,
+    while (true) {
+      throwIfDetached(controlled.signal);
+      const deadlineFailure = await this.recoveryDeadlineFailure(controlled);
+      if (deadlineFailure) {
+        const attempt = task.attempts.at(-1);
+        if (!attempt)
+          throw new Error(
+            "Workflow deadline expired before an attempt existed",
+          );
+        return { status: "unsafe", failure: deadlineFailure, attempt };
+      }
+      let attempt = task.attempts.at(-1);
+      if (attempt && !attempt.deadlineAt) {
+        const startedEvent = controlled.run.events.find(
+          (event) =>
+            (event.type === "attempt_started" ||
+              event.type === "attempt_launching") &&
+            event.data.identity === attempt?.id,
+        );
+        attempt.startedAt ??= startedEvent?.at;
+        if (attempt.startedAt)
+          attempt.deadlineAt = new Date(
+            Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
+          ).toISOString();
+      }
+      if (attempt?.status === "succeeded") {
+        const result = await this.readRecoveredResult(
+          controlled,
+          attempt,
+          allowedOutcomes,
+          outputDefinitions,
+        );
+        if (!(result instanceof ResultValidationError))
+          return { status: "succeeded", result, attempt };
+        await this.recordRecoveredFailure(controlled, visit, task, attempt, {
+          code: result.code,
+          message: result.message,
+        });
+      }
+      if (attempt?.status === "failed") {
+        const failure = attempt.failure ?? {
+          code: "attempts_exhausted",
+          message: "Recovered attempt failed without durable failure details",
+        };
+        if (
+          !(await this.scheduleRecoveredRetry(
+            controlled,
+            visit,
+            task,
+            attempt,
+            work,
+            failure,
+          ))
+        ) {
+          if (controlled.run.status === "failed")
+            return {
+              status: "unsafe",
+              failure: controlled.run.failure ?? failure,
+              attempt,
+            };
+          return { status: "failed", failure, attempt };
+        }
+        await this.createRecoveredAttempt(
+          controlled,
+          visit,
+          task,
+          attempt.number + 1,
+          work,
+        );
+        continue;
+      }
+      if (!attempt) {
+        attempt = await this.createRecoveredAttempt(
+          controlled,
+          visit,
+          task,
+          1,
+          work,
+        );
+      }
+      const recovered = await this.recoverAttempt(
+        controlled,
+        visit,
+        task,
+        attempt,
+        work,
         allowedOutcomes,
+        projectWorkspace,
         outputDefinitions,
       );
-      return { status: "succeeded", result, attempt };
-    }
-    if (!attempt || attempt.status === "failed") {
-      if (attempt && attempt.number >= work.policies.maxAttempts)
-        return {
-          status: "failed",
-          failure: attempt.failure ?? {
-            code: "attempts_exhausted",
-            message: "Recovered attempt budget is exhausted",
-          },
-          attempt,
-        };
-      const number = (attempt?.number ?? 0) + 1;
-      attempt = this.newAttempt(controlled.run, visit, task, number);
-      attempt.startedAt = this.timestamp();
-      attempt.deadlineAt = new Date(
-        Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
-      ).toISOString();
-      task.attempts.push(attempt);
-      Object.assign(
-        attempt,
-        await this.runs.prepareAttempt(controlled.run, visit, task, number),
+      if (recovered.status === "succeeded" || recovered.status === "unsafe")
+        return recovered;
+      await this.recordRecoveredFailure(
+        controlled,
+        visit,
+        task,
+        recovered.attempt,
+        recovered.failure,
       );
-      this.event(controlled.run, "attempt_launching", {
-        identity: attempt.id,
-        attemptNumber: number,
-        recovered: true,
-      });
-      this.event(controlled.run, "task_scheduled", {
-        stateId: visit.stateId,
-        visitNumber: visit.number,
-        taskId: task.id,
-        attemptNumber: number,
-        identity: attempt.id,
-        recovered: true,
-      });
-      await this.persist(controlled);
     }
+  }
+
+  private async recoverAttempt(
+    controlled: ControlledRun,
+    visit: VisitRecord,
+    task: TaskRecord,
+    attempt: AttemptRecord,
+    work: AgentWorkDefinition,
+    allowedOutcomes: readonly string[],
+    projectWorkspace: string,
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
+  ): Promise<RecoveredTaskResult> {
+    if (attempt.number > work.policies.maxAttempts)
+      return {
+        status: "failed",
+        failure: {
+          code: "attempts_exhausted",
+          message: "Recovered attempt budget is exhausted",
+        },
+        attempt,
+      };
     if (
       attempt.deadlineAt &&
       Date.parse(this.timestamp()) >= Date.parse(attempt.deadlineAt)
@@ -748,12 +811,18 @@ export class RecoverWorkflow {
       );
       if (settled.status !== "completed") return settled;
     }
-    const result = await this.runs.readResult(
-      attempt.resultPath,
-      attempt.outputDirectory,
+    const result = await this.readRecoveredResult(
+      controlled,
+      attempt,
       allowedOutcomes,
       outputDefinitions,
     );
+    if (result instanceof ResultValidationError)
+      return {
+        status: "failed",
+        failure: { code: result.code, message: result.message },
+        attempt,
+      };
     return { status: "succeeded", result, attempt };
   }
 
@@ -799,13 +868,154 @@ export class RecoverWorkflow {
     attempt.executor = execution.references;
     attempt.logs = execution.logs;
     await this.persist(controlled);
-    const result = await this.runs.readResult(
-      attempt.resultPath,
-      attempt.outputDirectory,
+    const result = await this.readRecoveredResult(
+      controlled,
+      attempt,
       allowedOutcomes,
       outputDefinitions,
     );
+    if (result instanceof ResultValidationError)
+      return {
+        status: "failed",
+        failure: { code: result.code, message: result.message },
+        attempt,
+      };
     return { status: "succeeded", result, attempt };
+  }
+
+  private async readRecoveredResult(
+    controlled: ControlledRun,
+    attempt: AttemptRecord,
+    allowedOutcomes: readonly string[],
+    outputDefinitions?: Record<string, StructuredOutputDefinition>,
+  ): Promise<ValidatedNormalResult | ResultValidationError> {
+    try {
+      return await this.runs.readResult(
+        attempt.resultPath,
+        attempt.outputDirectory,
+        allowedOutcomes,
+        outputDefinitions,
+      );
+    } catch (error) {
+      if (!(error instanceof ResultValidationError)) throw error;
+      await this.persist(controlled);
+      return error;
+    }
+  }
+
+  private async recordRecoveredFailure(
+    controlled: ControlledRun,
+    visit: VisitRecord,
+    task: TaskRecord,
+    attempt: AttemptRecord,
+    failure: AttemptFailure,
+  ): Promise<void> {
+    attempt.status = "failed";
+    attempt.failure = failure;
+    this.event(controlled.run, "attempt_failed", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: task.id,
+      identity: attempt.id,
+      attemptNumber: attempt.number,
+      failure,
+      recovered: true,
+    });
+    await this.persist(controlled);
+  }
+
+  private async scheduleRecoveredRetry(
+    controlled: ControlledRun,
+    visit: VisitRecord,
+    task: TaskRecord,
+    attempt: AttemptRecord,
+    work: AgentWorkDefinition,
+    failure: AttemptFailure,
+  ): Promise<boolean> {
+    if (attempt.number >= work.policies.maxAttempts) {
+      this.event(controlled.run, "retry_exhausted", {
+        stateId: visit.stateId,
+        visitNumber: visit.number,
+        taskId: task.id,
+        failedAttemptNumber: attempt.number,
+        maxAttempts: work.policies.maxAttempts,
+        failure,
+        recovered: true,
+      });
+      await this.persist(controlled);
+      return false;
+    }
+    this.event(controlled.run, "retry_scheduled", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: task.id,
+      failedAttemptNumber: attempt.number,
+      nextAttemptNumber: attempt.number + 1,
+      delayMs: work.policies.retryDelayMs,
+      failure,
+      recovered: true,
+    });
+    await this.persist(controlled);
+    await this.wait(work.policies.retryDelayMs);
+    throwIfDetached(controlled.signal);
+    if (await this.recoveryDeadlineFailure(controlled)) return false;
+    this.event(controlled.run, "retry_delay_completed", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: task.id,
+      failedAttemptNumber: attempt.number,
+      nextAttemptNumber: attempt.number + 1,
+      delayMs: work.policies.retryDelayMs,
+      recovered: true,
+    });
+    await this.persist(controlled);
+    return true;
+  }
+
+  private async createRecoveredAttempt(
+    controlled: ControlledRun,
+    visit: VisitRecord,
+    task: TaskRecord,
+    number: number,
+    work: AgentWorkDefinition,
+  ): Promise<AttemptRecord> {
+    const attempt = this.newAttempt(controlled.run, visit, task, number);
+    attempt.startedAt = this.timestamp();
+    attempt.deadlineAt = new Date(
+      Date.parse(attempt.startedAt) + work.policies.attemptTimeoutMs,
+    ).toISOString();
+    task.attempts.push(attempt);
+    Object.assign(
+      attempt,
+      await this.runs.prepareAttempt(controlled.run, visit, task, number),
+    );
+    this.event(controlled.run, "attempt_launching", {
+      identity: attempt.id,
+      attemptNumber: number,
+      recovered: true,
+    });
+    this.event(controlled.run, "task_scheduled", {
+      stateId: visit.stateId,
+      visitNumber: visit.number,
+      taskId: task.id,
+      attemptNumber: number,
+      identity: attempt.id,
+      recovered: true,
+    });
+    await this.persist(controlled);
+    return attempt;
+  }
+
+  private async recoveryDeadlineFailure(
+    controlled: ControlledRun,
+  ): Promise<AttemptFailure | undefined> {
+    if (
+      evaluateWorkflowDeadline(controlled.run.deadlineAt, this.timestamp())
+        .allowed
+    )
+      return undefined;
+    await this.expireWorkflow(controlled);
+    return controlled.run.failure;
   }
 
   private async waitForExisting(
