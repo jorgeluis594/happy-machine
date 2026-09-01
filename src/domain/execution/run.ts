@@ -1,3 +1,5 @@
+import type { WorkflowTaskExecutionRecord } from "./workflow-task.js";
+
 export type RunStatus =
   "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type ControllerStatus = "attached" | "detached";
@@ -157,6 +159,8 @@ export interface ParallelTaskRecord extends TaskRecord {
   documents: DocumentRecord[];
   workspace: TaskWorkspaceRecord;
   dynamic?: DynamicTaskBinding;
+  /** Optional on disk for compatibility with v1 snapshots. Missing means agent. */
+  execution?: { type: "agent" } | WorkflowTaskExecutionRecord;
 }
 
 export interface ParallelVisitRecord {
@@ -185,6 +189,12 @@ export function calculateParallelOutcome(
   return tasks.every((task) => task.status === "succeeded")
     ? "succeeded"
     : "failed";
+}
+
+export function parallelTaskWorkType(
+  task: ParallelTaskRecord,
+): "agent" | "workflow" {
+  return task.execution?.type ?? "agent";
 }
 
 export interface DocumentRecord {

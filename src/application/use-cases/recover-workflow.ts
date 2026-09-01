@@ -17,6 +17,7 @@ import {
   terminalStatus,
   workspaceMode,
 } from "../../domain/execution/run.js";
+import { materializeParallelTasks } from "../../domain/execution/parallel-task-materialization.js";
 import type {
   AgentWorkDefinition,
   EffectiveExecutionDefinition,
@@ -263,16 +264,11 @@ export class RecoverWorkflow {
               stateId,
               number,
               contextPath: "",
-              tasks: Object.values(state.tasks).map((task) => ({
-                id: task.id,
-                status: "queued",
-                attempts: [],
-                documents: [],
-                workspace:
-                  workspaceMode(controlled.run) === "worktree"
-                    ? { mode: "worktree", path: "" }
-                    : { mode: "direct", path: controlled.run.projectRoot },
-              })),
+              tasks: materializeParallelTasks({
+                taskDefinitions: state.tasks,
+                projectRoot: controlled.run.projectRoot,
+                workspaceMode: workspaceMode(controlled.run),
+              }),
             };
     controlled.run.visits.push(visit);
     this.event(controlled.run, "state_entered", {
@@ -444,29 +440,22 @@ export class RecoverWorkflow {
       number,
       contextPath: "",
       dynamicSource,
-      tasks: value.map((item) => {
-        if (
-          !item ||
-          typeof item !== "object" ||
-          Array.isArray(item) ||
-          typeof item.id !== "string"
-        )
+      tasks: (() => {
+        try {
+          return materializeParallelTasks({
+            taskDefinitions: {},
+            projectRoot: controlled.run.projectRoot,
+            workspaceMode: workspaceMode(controlled.run),
+            dynamicSource,
+            workItems: value,
+          });
+        } catch (error) {
           throw new DynamicSourceError(
             "dynamic_source_corrupt",
-            "Committed work_items output contains an invalid item",
+            error instanceof Error ? error.message : String(error),
           );
-        return {
-          id: item.id,
-          status: "queued",
-          attempts: [],
-          documents: [],
-          dynamic: { workItem: item, source: dynamicSource },
-          workspace:
-            workspaceMode(controlled.run) === "worktree"
-              ? { mode: "worktree", path: "" }
-              : { mode: "direct", path: controlled.run.projectRoot },
-        };
-      }),
+        }
+      })(),
     };
     return visit;
   }
@@ -480,11 +469,15 @@ export class RecoverWorkflow {
       if (task.status === "succeeded" || task.status === "failed") continue;
       task.status = "running";
       await this.persist(controlled);
+      const taskDefinition =
+        state.mode === "dynamic" ? state.task : state.tasks[task.id];
+      if ("type" in taskDefinition && taskDefinition.type === "workflow")
+        throw new Error("Workflow parallel tasks are not executable yet");
       const result = await this.recoverTask(
         controlled,
         visit,
         task,
-        state.mode === "dynamic" ? state.task : state.tasks[task.id],
+        taskDefinition,
         ["succeeded", "failed"],
       );
       if (result.status === "unsafe") {

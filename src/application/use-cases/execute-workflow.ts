@@ -20,6 +20,7 @@ import {
   terminalStatus,
   workspaceMode,
 } from "../../domain/execution/run.js";
+import { materializeParallelTasks } from "../../domain/execution/parallel-task-materialization.js";
 import type {
   AgentWorkDefinition,
   NormalStateDefinition,
@@ -220,16 +221,11 @@ export class ExecuteWorkflow {
                   stateId: state.id,
                   number: visitNumber,
                   contextPath: "",
-                  tasks: Object.values(state.tasks).map((task) => ({
-                    id: task.id,
-                    status: "queued",
-                    attempts: [],
-                    documents: [],
-                    workspace:
-                      workspaceMode(run) === "worktree"
-                        ? { mode: "worktree", path: "" }
-                        : { mode: "direct", path: definition.projectRoot },
-                  })),
+                  tasks: materializeParallelTasks({
+                    taskDefinitions: state.tasks,
+                    projectRoot: definition.projectRoot,
+                    workspaceMode: workspaceMode(run),
+                  }),
                 };
         run.visits.push(visit);
         this.event(run, "state_entered", timestamp(), {
@@ -525,6 +521,8 @@ export class ExecuteWorkflow {
           const task = visit.tasks[index];
           const definition =
             state.mode === "dynamic" ? state.task : state.tasks[task.id];
+          if ("type" in definition && definition.type === "workflow")
+            throw new Error("Workflow parallel tasks are not executable yet");
           task.status = "running";
           this.event(run, "parallel_task_started", timestamp(), {
             stateId: state.id,
@@ -1331,29 +1329,22 @@ export class ExecuteWorkflow {
       number: visitNumber,
       contextPath: "",
       dynamicSource,
-      tasks: value.map((item) => {
-        if (
-          !item ||
-          typeof item !== "object" ||
-          Array.isArray(item) ||
-          typeof item.id !== "string"
-        )
+      tasks: (() => {
+        try {
+          return materializeParallelTasks({
+            taskDefinitions: {},
+            projectRoot,
+            workspaceMode: workspaceMode(run),
+            dynamicSource,
+            workItems: value,
+          });
+        } catch (error) {
           throw new DynamicSourceError(
             "dynamic_source_corrupt",
-            "Committed work_items output contains an invalid item",
+            error instanceof Error ? error.message : String(error),
           );
-        return {
-          id: item.id,
-          status: "queued",
-          attempts: [],
-          documents: [],
-          dynamic: { workItem: item, source: dynamicSource },
-          workspace:
-            workspaceMode(run) === "worktree"
-              ? { mode: "worktree", path: "" }
-              : { mode: "direct", path: projectRoot },
-        };
-      }),
+        }
+      })(),
     };
     return visit;
   }

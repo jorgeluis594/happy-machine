@@ -1,3 +1,5 @@
+import type { JsonValue } from "../domain/execution/run.js";
+
 export interface EffectivePolicies {
   attemptTimeoutMs: number;
   maxAttempts: number;
@@ -39,10 +41,32 @@ export interface InputDocumentSource {
 }
 
 export interface AgentWorkDefinition {
+  type?: "agent";
   agent: AgentDefinition;
   prompt: string;
   policies: EffectivePolicies;
 }
+
+/** A binding that can be resolved before a parallel task is launched. */
+// `$item` is a reserved binding even though it is also a valid JSON string.
+// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
+export type JsonBindingDefinition = JsonValue | "$item";
+
+export interface WorkflowWorkDefinition {
+  type: "workflow";
+  workflowId: string;
+  with: Record<string, JsonBindingDefinition>;
+  workflow?: EffectiveExecutionDefinition;
+  evaluator?: {
+    runtime: AgentRuntime;
+    model?: string;
+    reasoning?: string;
+    prompt: string;
+  };
+}
+
+export type ParallelTaskWorkDefinition =
+  { type: "agent"; work: AgentWorkDefinition } | WorkflowWorkDefinition;
 
 export interface WorkItemsOutputDefinition {
   type: "work_items";
@@ -60,9 +84,17 @@ export interface NormalStateDefinition extends AgentWorkDefinition {
   attemptTimeoutMs: number;
 }
 
-export interface ParallelTaskDefinition extends AgentWorkDefinition {
+export interface AgentParallelTaskDefinition extends AgentWorkDefinition {
+  id: string;
+  type?: "agent";
+}
+
+export interface WorkflowParallelTaskDefinition extends WorkflowWorkDefinition {
   id: string;
 }
+
+/** Static agent tasks remain source-compatible until workflow parsing is added. */
+export type ParallelTaskDefinition = AgentParallelTaskDefinition;
 
 interface ParallelStateDefinitionBase {
   id: string;
@@ -86,7 +118,7 @@ export interface DynamicParallelStateDefinition extends ParallelStateDefinitionB
   mode: "dynamic";
   tasks: Record<string, never>;
   forEach: DynamicSourceDefinition;
-  task: AgentWorkDefinition;
+  task: AgentWorkDefinition | WorkflowWorkDefinition;
 }
 
 export type ParallelStateDefinition =

@@ -205,7 +205,8 @@ export class FilesystemRunRepository implements RunRepository {
           for (const task of Object.values(state.tasks ?? {}))
             normalizeAgent(task.agent);
         if (state.type === "parallel" && state.mode === "dynamic")
-          normalizeAgent(state.task?.agent);
+          if (state.task && "agent" in state.task)
+            normalizeAgent(state.task.agent);
       }
 
     return definition;

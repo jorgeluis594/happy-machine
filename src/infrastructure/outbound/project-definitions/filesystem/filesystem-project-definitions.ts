@@ -301,7 +301,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         );
       return {
         id,
-        type,
+        type: "agent",
         ...work,
         outcomes,
         ...(raw.produces === undefined
@@ -429,7 +429,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         );
         return {
           id,
-          type,
+          type: "parallel",
           mode: "dynamic",
           tasks: {},
           forEach: source,
