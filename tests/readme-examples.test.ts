@@ -37,6 +37,10 @@ describe("README quick start", () => {
       path.join(root, "workflows", "delivery.yaml"),
       example(readme, "workflow"),
     );
+    await writeFile(
+      path.join(root, "workflows", "review.yaml"),
+      example(readme, "review-workflow"),
+    );
 
     const definition = await new FilesystemProjectDefinitions().load(
       "workflows/delivery.yaml",
@@ -73,5 +77,53 @@ describe("README quick start", () => {
         create_pr: { outcomes: { opened: "$succeeded" } },
       },
     });
+  });
+
+  it("contains valid static and dynamic child-workflow examples", async () => {
+    const readme = await readFile(path.resolve("README.md"), "utf8");
+    const root = await mkdtemp(path.join(os.tmpdir(), "happy-readme-child-"));
+    await mkdir(path.join(root, "agents"));
+    await mkdir(path.join(root, "workflows"));
+    await writeFile(
+      path.join(root, "happy-machine.yaml"),
+      example(readme, "project"),
+    );
+    await writeFile(path.join(root, "agents", "delivery.md"), "delivery\n");
+    await writeFile(path.join(root, "agents", "qa.md"), "qa\n");
+    await writeFile(
+      path.join(root, "workflows", "review.yaml"),
+      example(readme, "review-workflow"),
+    );
+
+    for (const name of ["static-subworkflows", "dynamic-subworkflows"]) {
+      const workflowPath = path.join(root, "workflows", `${name}.yaml`);
+      await writeFile(workflowPath, example(readme, name));
+      const definition = await new FilesystemProjectDefinitions().load(
+        workflowPath,
+        root,
+      );
+      const parallel = Object.values(definition.states).find(
+        (state) => state.type === "parallel",
+      );
+      if (parallel?.type !== "parallel")
+        throw new Error("README child-workflow example needs a parallel state");
+      if (name === "static-subworkflows") {
+        expect(parallel.mode).toBe("static");
+        expect(
+          Object.values(parallel.tasks).every(
+            (task) => task.type === "workflow" && task.workflowId === "review",
+          ),
+        ).toBe(true);
+      } else {
+        expect(parallel.mode).toBe("dynamic");
+        if (parallel.mode !== "dynamic")
+          throw new Error("README dynamic example needs for_each");
+        expect(parallel.task).toMatchObject({
+          type: "workflow",
+          workflowId: "review",
+          with: { item: "$item" },
+        });
+      }
+    }
   });
 });

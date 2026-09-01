@@ -73,7 +73,8 @@ your-project/
 │   ├── delivery.md          # implementation-oriented instructions
 │   └── qa.md                # independent validation instructions
 └── workflows/
-    └── delivery.yaml        # states, outcomes, and transitions
+    ├── delivery.yaml        # states, outcomes, and transitions
+    └── review.yaml          # reusable child workflow
 ```
 
 When you execute a workflow, Happy Machine:
@@ -93,6 +94,7 @@ Runs can branch, cycle, retry failed attempts, execute parallel tasks, detach, r
 - Explicit conditional branches and terminal outcomes.
 - Bounded loops through state-visit, transition, and workflow-time limits.
 - Normal states for one task and parallel states with all-settled joins.
+- Reusable workflows as static or dynamic parallel work.
 - Per-task timeouts, retry budgets, and retry delays.
 - Durable snapshots, results, documents, status, and event history.
 - Safe detachment, recovery, cancellation, and external-execution reconciliation.
@@ -181,6 +183,10 @@ agents:
     instructions: agents/qa.md
     runtime: opencode
     reasoning: max
+
+workflows:
+  review:
+    file: workflows/review.yaml
 
 defaults:
   attempt_timeout: 30m
@@ -282,6 +288,91 @@ states:
 ```
 
 The delivery states run with Codex, while `qa` runs with OpenCode through its separate profile. The `qa.failed → implementation` transition is an ordinary semantic edge, not a technical failure handler. If an attempt crashes, times out, or produces an invalid result, Happy Machine applies its retry policy instead. The global limits bound the QA correction loop.
+
+#### Reuse workflows inside parallel states
+
+A parallel state can run a workflow registered in `happy-machine.yaml`. Each entry supplies a nonempty immutable `with` map and creates one durable child run with the referenced workflow's normal states, retries, limits, and recovery behavior. The parent evaluates the completed child as `succeeded` or `failed` for the existing all-settled join.
+
+For example, the registered `review` workflow can be an ordinary workflow definition:
+
+**`workflows/review.yaml`**
+
+<!-- readme-example:review-workflow -->
+
+```yaml
+version: 1
+id: review
+initial_state: inspect
+
+states:
+  inspect:
+    type: agent
+    agent: qa
+    prompt: Review the bound item and report any issues.
+    outcomes:
+      completed: $succeeded
+```
+
+A static parallel state names each child explicitly. Both entries below execute the `review` workflow, not an agent task:
+
+<!-- readme-example:static-subworkflows -->
+
+```yaml
+version: 1
+id: static-reviews
+initial_state: review_areas
+
+states:
+  review_areas:
+    type: parallel
+    tasks:
+      api:
+        type: workflow
+        workflow: review
+        with: { area: api }
+      interface:
+        type: workflow
+        workflow: review
+        with: { area: interface }
+    outcomes:
+      succeeded: $succeeded
+      failed: $failed
+```
+
+A dynamic parallel state repeats one workflow template for every item produced by an earlier state. Here `task` is the required template key; `type: workflow` still selects a child workflow rather than an agent task:
+
+<!-- readme-example:dynamic-subworkflows -->
+
+```yaml
+version: 1
+id: dynamic-reviews
+initial_state: plan
+
+states:
+  plan:
+    type: agent
+    agent: delivery
+    prompt: Produce the review items.
+    produces:
+      review_items:
+        type: work_items
+    outcomes:
+      completed: review_items
+
+  review_items:
+    type: parallel
+    for_each:
+      from: plan.outputs.review_items
+    task:
+      type: workflow
+      workflow: review
+      with: { item: $item }
+    outcomes:
+      succeeded: $succeeded
+      failed: $failed
+```
+
+The dynamic state creates one child run per item and remains bounded by its effective `max_concurrency`, just like other parallel work.
 
 ### Execute the workflow
 
