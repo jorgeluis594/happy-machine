@@ -11,6 +11,7 @@ import { OrcaTaskExecutor } from "../src/infrastructure/outbound/task-executor/o
 
 const fixture = path.resolve("tests/fixtures/fake-orca.mjs");
 const noDelay = () => Promise.resolve();
+const codexCommand = "codex --dangerously-bypass-approvals-and-sandbox";
 
 beforeAll(async () => chmod(fixture, 0o755));
 
@@ -82,7 +83,7 @@ describe("Orca terminal-only task executor", () => {
       "--worktree",
       "current",
       "--command",
-      "codex",
+      codexCommand,
       "--focus",
       "--json",
     ]);
@@ -139,13 +140,13 @@ describe("Orca terminal-only task executor", () => {
   });
 
   it.each([
-    [undefined, undefined, "codex"],
-    ["gpt-custom", undefined, "codex --model 'gpt-custom'"],
-    [undefined, "high", `codex -c 'model_reasoning_effort="high"'`],
+    [undefined, undefined, codexCommand],
+    ["gpt-custom", undefined, `${codexCommand} --model 'gpt-custom'`],
+    [undefined, "high", `${codexCommand} -c 'model_reasoning_effort="high"'`],
     [
       "gpt-custom",
       "high",
-      `codex --model 'gpt-custom' -c 'model_reasoning_effort="high"'`,
+      `${codexCommand} --model 'gpt-custom' -c 'model_reasoning_effort="high"'`,
     ],
   ])(
     "launches Codex with model %j and reasoning %j",
@@ -186,13 +187,19 @@ describe("Orca terminal-only task executor", () => {
 
       const create = (await calls(root))[0];
       const command = create[create.indexOf("--command") + 1];
-      expect(command).toBe(`codex --model '${model.replaceAll("'", `'"'"'`)}'`);
+      expect(command).toBe(
+        `${codexCommand} --model '${model.replaceAll("'", `'"'"'`)}'`,
+      );
       expect(existsSync(path.join(root, "nope"))).toBe(false);
     },
   );
 
   it.each([
-    ["codex" as const, "high", `codex -c 'model_reasoning_effort="high"'`],
+    [
+      "codex" as const,
+      "high",
+      `${codexCommand} -c 'model_reasoning_effort="high"'`,
+    ],
     ["opencode" as const, "max", "opencode run --interactive --variant 'max'"],
   ])(
     "launches %s with configured reasoning",
@@ -236,7 +243,7 @@ describe("Orca terminal-only task executor", () => {
     const command = create[create.indexOf("--command") + 1];
     const serialized = JSON.stringify(reasoning);
     expect(command).toBe(
-      `codex -c '${`model_reasoning_effort=${serialized}`.replaceAll("'", `'"'"'`)}'`,
+      `${codexCommand} -c '${`model_reasoning_effort=${serialized}`.replaceAll("'", `'"'"'`)}'`,
     );
     expect(existsSync(path.join(root, "nope"))).toBe(false);
   });

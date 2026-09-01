@@ -40,7 +40,7 @@ export type OrcaStartupDelay = (
 
 const STARTUP_DELAY_MS = 8_000;
 const runtimeCommands = {
-  codex: "codex",
+  codex: "codex --dangerously-bypass-approvals-and-sandbox",
   opencode: "opencode",
 } as const satisfies Record<TaskLaunch["runtime"], string>;
 const RESULT_POLL_MS = 250;
@@ -593,7 +593,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
           : ` -c ${this.posixArgument(
               `model_reasoning_effort=${JSON.stringify(reasoning)}`,
             )}`;
-      return `codex${modelOption}${reasoningOption}`;
+      return `${runtimeCommands.codex}${modelOption}${reasoningOption}`;
     }
     if (model !== undefined)
       throw new TaskExecutorError(
