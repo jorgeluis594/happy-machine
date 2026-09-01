@@ -762,6 +762,7 @@ describe("happy-machine execute", () => {
       "limit_evaluated",
       "transition_committed",
       "run_terminal",
+      "controller_lease_released",
     ]);
     expect(run.events[0].data.definitionSnapshotIdentity).toBe(
       run.definitionSnapshot.identity,

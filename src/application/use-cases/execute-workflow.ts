@@ -49,6 +49,7 @@ import {
   throwIfDetached,
 } from "../services/controller-detachment.js";
 import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
+import { ControllerLeaseHeartbeat } from "../services/controller-lease-heartbeat.js";
 import {
   type ProjectWorkspaceCoordinator,
   requireWorkspaceCoordinator,
@@ -101,6 +102,7 @@ export class ExecuteWorkflow {
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
     private readonly workflowTasks?: WorkflowTaskCoordinator,
+    private readonly heartbeatWait?: Wait,
   ) {}
 
   async execute(request: ExecuteWorkflowRequest): Promise<RunRecord> {
@@ -183,271 +185,311 @@ export class ExecuteWorkflow {
       }
     }
 
+    let controllerError: unknown;
     try {
-      let stateId = createdSnapshot.definition.initialState;
-      while (true) {
-        throwIfDetached(request.signal);
-        const state = createdSnapshot.definition.states[stateId];
-        const visitNumber =
-          run.visits.filter((candidate) => candidate.stateId === state.id)
-            .length + 1;
-        const entryFailure = await this.evaluateStateEntryLimits(
-          run,
-          state.id,
-          visitNumber,
-          createdSnapshot.definition.policies.maxStateVisits,
-          timestamp,
-        );
-        if (entryFailure) {
-          await this.terminateRun(run, entryFailure, timestamp);
-          return run;
-        }
-        const visit: VisitRecord =
-          state.type === "agent"
-            ? {
-                type: "agent",
-                stateId: state.id,
-                number: visitNumber,
-                contextPath: "",
-                task: { id: `${state.id}-task`, attempts: [] },
-              }
-            : state.mode === "dynamic"
-              ? await this.materializeDynamicVisit(
-                  run,
-                  state,
-                  visitNumber,
-                  definition.projectRoot,
-                )
-              : {
-                  type: "parallel",
-                  stateId: state.id,
-                  number: visitNumber,
-                  contextPath: "",
-                  tasks: materializeParallelTasks({
-                    taskDefinitions: state.tasks,
-                    projectRoot: definition.projectRoot,
-                    workspaceMode: workspaceMode(run),
-                  }),
-                };
-        run.visits.push(visit);
-        this.event(run, "state_entered", timestamp(), {
-          stateId: state.id,
-          visitNumber,
-        });
-        if (visit.type === "parallel" && visit.dynamicSource)
-          this.event(run, "dynamic_tasks_materialized", timestamp(), {
-            stateId: state.id,
-            visitNumber,
-            source: visit.dynamicSource,
-            itemIds: visit.tasks.map((task) => task.id),
-            count: visit.tasks.length,
-          });
-        const queuedTasks = visit.type === "agent" ? [visit.task] : visit.tasks;
-        for (const task of queuedTasks)
-          this.event(run, "task_queued", timestamp(), {
-            stateId: state.id,
-            visitNumber,
-            taskId: task.id,
-          });
-        // Persist the complete materialized visit before the coordinator reads
-        // the parent to reserve child identities. No controller is launched
-        // until the coordinator has persisted every wrapper and reservation.
-        await this.runs.save(run);
-        if (visit.type === "parallel" && this.workflowTasks) {
-          const parallelState = state as ParallelStateDefinition;
-          await this.workflowTasks.prepareParallel(
-            run,
-            visit,
-            parallelState.mode === "dynamic"
-              ? Object.fromEntries(
-                  visit.tasks.map((task) => [task.id, parallelState.task]),
-                )
-              : parallelState.tasks,
-          );
-        }
-        if (visit.type === "parallel" && workspaceMode(run) === "worktree")
+      await new ControllerLeaseHeartbeat(
+        this.runs,
+        this.now,
+        this.heartbeatWait,
+      ).run(
+        {
+          getRun: () => run,
+          controllerId: controllerId ?? "",
+          fencingToken: fencingToken ?? 0,
+          signal: request.signal,
+        },
+        async () => {
           try {
-            await this.coordinator().prepareParallel(
-              run,
-              visit,
-              timestamp,
-              () => this.runs.save(run),
-            );
-          } catch (error) {
-            await this.terminateRun(run, workspaceFailure(error), timestamp);
-            return run;
-          }
-        visit.contextPath = await this.runs.prepareVisitContext(run);
-        await this.runs.save(run);
-
-        const result =
-          state.type === "agent"
-            ? await this.executeNormalVisit(
+            let stateId = createdSnapshot.definition.initialState;
+            while (true) {
+              throwIfDetached(request.signal);
+              const state = createdSnapshot.definition.states[stateId];
+              const visitNumber =
+                run.visits.filter((candidate) => candidate.stateId === state.id)
+                  .length + 1;
+              const entryFailure = await this.evaluateStateEntryLimits(
                 run,
-                visit as NormalVisitRecord,
-                state,
+                state.id,
+                visitNumber,
+                createdSnapshot.definition.policies.maxStateVisits,
                 timestamp,
-                request.signal,
-              )
-            : await this.executeParallelVisit(
-                run,
-                visit as ParallelVisitRecord,
-                state,
-                timestamp,
-                request.signal,
               );
-        if (result.kind !== "completed") {
-          await this.terminateRun(run, result.failure, timestamp);
-          return run;
-        }
+              if (entryFailure) {
+                await this.terminateRun(run, entryFailure, timestamp);
+                return run;
+              }
+              const visit: VisitRecord =
+                state.type === "agent"
+                  ? {
+                      type: "agent",
+                      stateId: state.id,
+                      number: visitNumber,
+                      contextPath: "",
+                      task: { id: `${state.id}-task`, attempts: [] },
+                    }
+                  : state.mode === "dynamic"
+                    ? await this.materializeDynamicVisit(
+                        run,
+                        state,
+                        visitNumber,
+                        definition.projectRoot,
+                      )
+                    : {
+                        type: "parallel",
+                        stateId: state.id,
+                        number: visitNumber,
+                        contextPath: "",
+                        tasks: materializeParallelTasks({
+                          taskDefinitions: state.tasks,
+                          projectRoot: definition.projectRoot,
+                          workspaceMode: workspaceMode(run),
+                        }),
+                      };
+              run.visits.push(visit);
+              this.event(run, "state_entered", timestamp(), {
+                stateId: state.id,
+                visitNumber,
+              });
+              if (visit.type === "parallel" && visit.dynamicSource)
+                this.event(run, "dynamic_tasks_materialized", timestamp(), {
+                  stateId: state.id,
+                  visitNumber,
+                  source: visit.dynamicSource,
+                  itemIds: visit.tasks.map((task) => task.id),
+                  count: visit.tasks.length,
+                });
+              const queuedTasks =
+                visit.type === "agent" ? [visit.task] : visit.tasks;
+              for (const task of queuedTasks)
+                this.event(run, "task_queued", timestamp(), {
+                  stateId: state.id,
+                  visitNumber,
+                  taskId: task.id,
+                });
+              // Persist the complete materialized visit before the coordinator reads
+              // the parent to reserve child identities. No controller is launched
+              // until the coordinator has persisted every wrapper and reservation.
+              await this.runs.save(run);
+              if (visit.type === "parallel" && this.workflowTasks) {
+                const parallelState = state as ParallelStateDefinition;
+                await this.workflowTasks.prepareParallel(
+                  run,
+                  visit,
+                  parallelState.mode === "dynamic"
+                    ? Object.fromEntries(
+                        visit.tasks.map((task) => [
+                          task.id,
+                          parallelState.task,
+                        ]),
+                      )
+                    : parallelState.tasks,
+                );
+              }
+              if (
+                visit.type === "parallel" &&
+                workspaceMode(run) === "worktree"
+              )
+                try {
+                  await this.coordinator().prepareParallel(
+                    run,
+                    visit,
+                    timestamp,
+                    () => this.runs.save(run),
+                  );
+                } catch (error) {
+                  await this.terminateRun(
+                    run,
+                    workspaceFailure(error),
+                    timestamp,
+                  );
+                  return run;
+                }
+              visit.contextPath = await this.runs.prepareVisitContext(run);
+              await this.runs.save(run);
 
-        const { outcome, target, documents } = result;
-        const structuredOutputs =
-          visit.type === "agent" && result.outputs
-            ? await this.requireStructuredOutputRepository()
-                .stageStructuredOutputs!(run, visit, result.outputs)
-            : [];
-        if (visit.type === "agent") {
-          const attempt = visit.task.attempts.at(-1)!;
-          attempt.outcome = outcome;
-          attempt.status = "succeeded";
-          if (result.diagnostic !== undefined)
-            attempt.error = result.diagnostic;
-          this.event(run, "attempt_succeeded", timestamp(), {
-            identity: result.attempt!.id,
-            outcome,
-            documents: documents.map((document) => document.internalPath),
-          });
-          await this.runs.save(run);
-        }
-        const transitionFailure = await this.evaluateTransitionLimits(
-          run,
-          createdSnapshot.definition.policies.maxTransitions,
-          state.id,
-          visitNumber,
-          target,
-          timestamp,
-        );
-        if (transitionFailure) {
-          await this.terminateRun(run, transitionFailure, timestamp);
-          return run;
-        }
-        const committed = structuredClone(run);
-        const committedVisit = committed.visits.at(-1)!;
-        committedVisit.outcome = outcome;
-        committedVisit.target = target;
-        committed.documents.push(...documents);
-        committed.structuredOutputs ??= [];
-        committed.structuredOutputs.push(...structuredOutputs);
-        if (committedVisit.type === "agent")
-          committedVisit.outputs = structuredOutputs;
-        for (const output of structuredOutputs)
-          this.event(committed, "structured_output_committed", timestamp(), {
-            stateId: output.stateId,
-            visitNumber: output.visitNumber,
-            outputName: output.name,
-            type: output.type,
-            itemCount: output.itemCount,
-            durablePath: output.durablePath,
-            sha256: output.sha256,
-          });
-        for (const document of documents)
-          this.event(committed, "document_committed", timestamp(), {
-            stateId: document.stateId,
-            visitNumber: document.visitNumber,
-            taskId: document.taskId,
-            name: document.name,
-            internalPath: document.internalPath,
-            sha256: document.sha256,
-          });
-        if (committedVisit.type === "agent") {
-          const committedAttempt = committedVisit.task.attempts.at(-1)!;
-          committedAttempt.outcome = outcome;
-          committedAttempt.documents = documents;
-        } else {
-          this.event(committed, "parallel_join_committed", timestamp(), {
-            stateId: state.id,
-            visitNumber,
-            outcome,
-            tasks: committedVisit.tasks.map((task) => ({
-              id: task.id,
-              status: task.status,
-              attempts: task.attempts.length,
-              ...(task.failure === undefined
-                ? {}
-                : { finalError: task.failure }),
-            })),
-          });
-        }
-        this.event(committed, "transition_committed", timestamp(), {
-          stateId: state.id,
-          visitNumber,
-          outcome,
-          target,
-          transitionNumber: committed.transitionCount + 1,
-        });
-        committed.transitionCount += 1;
-        if (target === "$succeeded" || target === "$failed") {
-          if (workspaceMode(committed) === "worktree")
-            await this.coordinator().observeAll(committed, timestamp);
-          committed.terminalTarget = target;
-          committed.status = terminalStatus(target);
-          this.event(committed, "run_terminal", timestamp(), {
-            status: committed.status,
-            target,
-          });
-        }
-        await this.runs.save(committed);
-        run = committed;
-        if (target === "$succeeded" || target === "$failed") return run;
-        stateId = target;
-      }
-    } catch (error) {
-      if (error instanceof RunCancellationRequestedError) return error.run;
-      if (error instanceof ControllerDetachedError) {
-        if (
-          controllerId &&
-          fencingToken !== undefined &&
-          this.runs.releaseControl
-        )
-          try {
-            await this.runs.releaseControl(
-              run,
-              controllerId,
-              fencingToken,
-              timestamp(),
-            );
-          } catch (releaseError) {
-            if (releaseError instanceof RunCancellationRequestedError)
-              return releaseError.run;
-            throw releaseError;
+              const result =
+                state.type === "agent"
+                  ? await this.executeNormalVisit(
+                      run,
+                      visit as NormalVisitRecord,
+                      state,
+                      timestamp,
+                      request.signal,
+                    )
+                  : await this.executeParallelVisit(
+                      run,
+                      visit as ParallelVisitRecord,
+                      state,
+                      timestamp,
+                      request.signal,
+                    );
+              if (result.kind !== "completed") {
+                await this.terminateRun(run, result.failure, timestamp);
+                return run;
+              }
+
+              const { outcome, target, documents } = result;
+              const structuredOutputs =
+                visit.type === "agent" && result.outputs
+                  ? await this.requireStructuredOutputRepository()
+                      .stageStructuredOutputs!(run, visit, result.outputs)
+                  : [];
+              if (visit.type === "agent") {
+                const attempt = visit.task.attempts.at(-1)!;
+                attempt.outcome = outcome;
+                attempt.status = "succeeded";
+                if (result.diagnostic !== undefined)
+                  attempt.error = result.diagnostic;
+                this.event(run, "attempt_succeeded", timestamp(), {
+                  identity: result.attempt!.id,
+                  outcome,
+                  documents: documents.map((document) => document.internalPath),
+                });
+                await this.runs.save(run);
+              }
+              const transitionFailure = await this.evaluateTransitionLimits(
+                run,
+                createdSnapshot.definition.policies.maxTransitions,
+                state.id,
+                visitNumber,
+                target,
+                timestamp,
+              );
+              if (transitionFailure) {
+                await this.terminateRun(run, transitionFailure, timestamp);
+                return run;
+              }
+              const committed = structuredClone(run);
+              const committedVisit = committed.visits.at(-1)!;
+              committedVisit.outcome = outcome;
+              committedVisit.target = target;
+              committed.documents.push(...documents);
+              committed.structuredOutputs ??= [];
+              committed.structuredOutputs.push(...structuredOutputs);
+              if (committedVisit.type === "agent")
+                committedVisit.outputs = structuredOutputs;
+              for (const output of structuredOutputs)
+                this.event(
+                  committed,
+                  "structured_output_committed",
+                  timestamp(),
+                  {
+                    stateId: output.stateId,
+                    visitNumber: output.visitNumber,
+                    outputName: output.name,
+                    type: output.type,
+                    itemCount: output.itemCount,
+                    durablePath: output.durablePath,
+                    sha256: output.sha256,
+                  },
+                );
+              for (const document of documents)
+                this.event(committed, "document_committed", timestamp(), {
+                  stateId: document.stateId,
+                  visitNumber: document.visitNumber,
+                  taskId: document.taskId,
+                  name: document.name,
+                  internalPath: document.internalPath,
+                  sha256: document.sha256,
+                });
+              if (committedVisit.type === "agent") {
+                const committedAttempt = committedVisit.task.attempts.at(-1)!;
+                committedAttempt.outcome = outcome;
+                committedAttempt.documents = documents;
+              } else {
+                this.event(committed, "parallel_join_committed", timestamp(), {
+                  stateId: state.id,
+                  visitNumber,
+                  outcome,
+                  tasks: committedVisit.tasks.map((task) => ({
+                    id: task.id,
+                    status: task.status,
+                    attempts: task.attempts.length,
+                    ...(task.failure === undefined
+                      ? {}
+                      : { finalError: task.failure }),
+                  })),
+                });
+              }
+              this.event(committed, "transition_committed", timestamp(), {
+                stateId: state.id,
+                visitNumber,
+                outcome,
+                target,
+                transitionNumber: committed.transitionCount + 1,
+              });
+              committed.transitionCount += 1;
+              if (target === "$succeeded" || target === "$failed") {
+                if (workspaceMode(committed) === "worktree")
+                  await this.coordinator().observeAll(committed, timestamp);
+                committed.terminalTarget = target;
+                committed.status = terminalStatus(target);
+                this.event(committed, "run_terminal", timestamp(), {
+                  status: committed.status,
+                  target,
+                });
+              }
+              await this.runs.save(committed);
+              run = committed;
+              if (target === "$succeeded" || target === "$failed") return run;
+              stateId = target;
+            }
+          } catch (error) {
+            if (error instanceof RunCancellationRequestedError)
+              return error.run;
+            if (error instanceof ControllerDetachedError) throw error;
+            if (error instanceof DynamicSourceError) {
+              await this.terminateRun(
+                run,
+                { code: error.code, message: error.message },
+                timestamp,
+              );
+              return run;
+            }
+            run.status = "failed";
+            let failure = this.failure(error);
+            try {
+              if (workspaceMode(run) === "worktree")
+                await this.coordinator().observeAll(run, timestamp);
+            } catch (observationError) {
+              failure = workspaceFailure(observationError);
+            }
+            run.failure = failure;
+            this.event(run, "run_terminal", timestamp(), {
+              status: "failed",
+              failure,
+            });
+            await this.runs.save(run);
+            throw error;
           }
-        throw error;
-      }
-      if (error instanceof DynamicSourceError) {
-        await this.terminateRun(
-          run,
-          { code: error.code, message: error.message },
-          timestamp,
-        );
-        return run;
-      }
-      run.status = "failed";
-      let failure = this.failure(error);
-      try {
-        if (workspaceMode(run) === "worktree")
-          await this.coordinator().observeAll(run, timestamp);
-      } catch (observationError) {
-        failure = workspaceFailure(observationError);
-      }
-      run.failure = failure;
-      this.event(run, "run_terminal", timestamp(), {
-        status: "failed",
-        failure,
-      });
-      await this.runs.save(run);
-      throw error;
+        },
+      );
+    } catch (error) {
+      controllerError = error;
     }
+    if (
+      controllerId &&
+      fencingToken !== undefined &&
+      this.runs.releaseControl &&
+      run.controllerLease?.controllerId === controllerId &&
+      run.controllerLease.fencingToken === fencingToken
+    )
+      try {
+        run = await this.runs.releaseControl(
+          run,
+          controllerId,
+          fencingToken,
+          timestamp(),
+        );
+      } catch (error) {
+        if (error instanceof RunCancellationRequestedError) run = error.run;
+        else if (controllerError === undefined) throw error;
+      }
+    if (controllerError !== undefined) {
+      if (controllerError instanceof Error) throw controllerError;
+      throw new Error("Controller failed with a non-Error value");
+    }
+    return run;
   }
 
   private async executeNormalVisit(

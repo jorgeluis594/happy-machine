@@ -27,6 +27,7 @@ import {
   workspaceFailure,
 } from "../services/project-workspace-coordinator.js";
 import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
+import { ControllerLeaseHeartbeat } from "../services/controller-lease-heartbeat.js";
 
 export interface CancelWorkflowRequest {
   currentDirectory: string;
@@ -64,6 +65,7 @@ export class CancelWorkflow {
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
     private readonly workflowTasks?: WorkflowTaskCoordinator,
+    private readonly heartbeatWait?: CancellationWait,
   ) {}
 
   async cancel(request: CancelWorkflowRequest): Promise<RunRecord> {
@@ -87,40 +89,60 @@ export class CancelWorkflow {
       signal: request.signal,
     };
     try {
-      await this.reconcileActiveAttempts(controlled);
-      if (workspaceMode(controlled.run) === "worktree")
-        try {
-          await this.coordinator().observeAll(
-            controlled.run,
-            () => this.timestamp(),
-            "run_canceled",
-          );
-        } catch (error) {
+      await new ControllerLeaseHeartbeat(
+        this.runs,
+        this.now,
+        this.heartbeatWait,
+      ).run(
+        {
+          getRun: () => controlled.run,
+          controllerId: controlled.controllerId,
+          fencingToken: controlled.fencingToken,
+          signal: controlled.signal,
+        },
+        async () => {
+          await this.reconcileActiveAttempts(controlled);
+          if (workspaceMode(controlled.run) === "worktree")
+            try {
+              await this.coordinator().observeAll(
+                controlled.run,
+                () => this.timestamp(),
+                "run_canceled",
+              );
+            } catch (error) {
+              this.event(
+                controlled.run,
+                "worktree_observation_failed",
+                this.timestamp(),
+                { phase: "run_canceled", failure: workspaceFailure(error) },
+              );
+            }
+          const completedAt = this.timestamp();
+          controlled.run.status = "canceled";
+          controlled.run.cancellation ??= {
+            requestedAt: completedAt,
+          };
+          controlled.run.cancellation.completedAt = completedAt;
+          this.event(controlled.run, "run_status_changed", completedAt, {
+            from: "canceling",
+            to: "canceled",
+          });
           this.event(
             controlled.run,
-            "worktree_observation_failed",
-            this.timestamp(),
-            { phase: "run_canceled", failure: workspaceFailure(error) },
+            "run_cancellation_completed",
+            completedAt,
+            {
+              requestedAt: controlled.run.cancellation.requestedAt,
+            },
           );
-        }
-      const completedAt = this.timestamp();
-      controlled.run.status = "canceled";
-      controlled.run.cancellation ??= {
-        requestedAt: completedAt,
-      };
-      controlled.run.cancellation.completedAt = completedAt;
-      this.event(controlled.run, "run_status_changed", completedAt, {
-        from: "canceling",
-        to: "canceled",
-      });
-      this.event(controlled.run, "run_cancellation_completed", completedAt, {
-        requestedAt: controlled.run.cancellation.requestedAt,
-      });
-      this.event(controlled.run, "run_terminal", completedAt, {
-        status: "canceled",
-        reason: "explicit_cancellation",
-      });
-      await this.persist(controlled);
+          this.event(controlled.run, "run_terminal", completedAt, {
+            status: "canceled",
+            reason: "explicit_cancellation",
+          });
+          await this.persist(controlled);
+          return controlled.run;
+        },
+      );
     } finally {
       if (
         this.runs.releaseControl &&

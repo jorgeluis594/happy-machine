@@ -256,7 +256,7 @@ describe("retries and timeouts", () => {
       stdout: "stdout: failure three",
       stderr: "stderr: failure three",
     });
-    expect(run.events.at(-2)).toMatchObject({
+    expect(run.events.at(-3)).toMatchObject({
       type: "retry_exhausted",
       data: { failedAttemptNumber: 3, maxAttempts: 3 },
     });

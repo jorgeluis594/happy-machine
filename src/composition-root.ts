@@ -141,6 +141,7 @@ function createCli(
     workspaceCoordinator,
     diagnostics,
     workflowTasks,
+    sleeper,
   );
   const recoverWorkflow = new RecoverWorkflow(
     runs,
@@ -150,6 +151,7 @@ function createCli(
     workspaceCoordinator,
     diagnostics,
     workflowTasks,
+    (milliseconds) => sleeper(milliseconds),
   );
   const cancelWorkflow = new CancelWorkflow(
     runs,
@@ -159,6 +161,7 @@ function createCli(
     workspaceCoordinator,
     diagnostics,
     workflowTasks,
+    sleeper,
   );
   const cleanupWorktrees = new CleanupWorktrees(runs, workspaces, now);
 

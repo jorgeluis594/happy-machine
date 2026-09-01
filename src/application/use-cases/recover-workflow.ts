@@ -52,6 +52,7 @@ import {
   workspaceFailure,
 } from "../services/project-workspace-coordinator.js";
 import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
+import { ControllerLeaseHeartbeat } from "../services/controller-lease-heartbeat.js";
 import {
   disabledDiagnostics,
   type DiagnosticSink,
@@ -101,6 +102,7 @@ export class RecoverWorkflow {
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
     private readonly workflowTasks?: WorkflowTaskCoordinator,
+    private readonly heartbeatWait?: RecoveryWait,
   ) {}
 
   async recover(request: RecoverWorkflowRequest): Promise<RunRecord> {
@@ -136,30 +138,50 @@ export class RecoverWorkflow {
       mode: recovered.definition.workspaceMode,
       worktrees: [],
     };
+    let controllerError: unknown;
     try {
-      if (workspaceMode(controlled.run) === "worktree")
-        try {
-          await this.coordinator().prepareMain(
-            controlled.run,
-            () => this.timestamp(),
-            () => this.persist(controlled),
-          );
-        } catch (error) {
-          await this.failRun(controlled, workspaceFailure(error));
+      await new ControllerLeaseHeartbeat(
+        this.runs,
+        this.now,
+        this.heartbeatWait,
+      ).run(
+        {
+          getRun: () => controlled.run,
+          controllerId: controlled.controllerId,
+          fencingToken: controlled.fencingToken,
+          signal: controlled.signal,
+        },
+        async () => {
+          try {
+            if (workspaceMode(controlled.run) === "worktree")
+              try {
+                await this.coordinator().prepareMain(
+                  controlled.run,
+                  () => this.timestamp(),
+                  () => this.persist(controlled),
+                );
+              } catch (error) {
+                await this.failRun(controlled, workspaceFailure(error));
+                return controlled.run;
+              }
+            controlled.run = await this.continue(controlled);
+          } catch (error) {
+            if (error instanceof RunCancellationRequestedError)
+              controlled.run = error.run;
+            else if (error instanceof ProjectWorkspaceError)
+              await this.failRun(controlled, workspaceFailure(error));
+            else if (error instanceof DynamicSourceError)
+              await this.failRun(controlled, {
+                code: error.code,
+                message: error.message,
+              });
+            else throw error;
+          }
           return controlled.run;
-        }
-      controlled.run = await this.continue(controlled);
+        },
+      );
     } catch (error) {
-      if (error instanceof RunCancellationRequestedError)
-        controlled.run = error.run;
-      else if (error instanceof ProjectWorkspaceError)
-        await this.failRun(controlled, workspaceFailure(error));
-      else if (error instanceof DynamicSourceError)
-        await this.failRun(controlled, {
-          code: error.code,
-          message: error.message,
-        });
-      else throw error;
+      controllerError = error;
     }
     if (this.runs.releaseControl && controlled.run.controllerLease)
       try {
@@ -174,6 +196,10 @@ export class RecoverWorkflow {
           controlled.run = error.run;
         else throw error;
       }
+    if (controllerError !== undefined) {
+      if (controllerError instanceof Error) throw controllerError;
+      throw new Error("Controller failed with a non-Error value");
+    }
     return controlled.run;
   }
 
