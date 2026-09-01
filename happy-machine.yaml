@@ -10,6 +10,11 @@ agents:
   create_skill_implementation:
     instructions: agents/create-skill-implementation.md
     runtime: codex
+  workflow_submachines_implementation:
+    instructions: agents/workflow-submachines-implementation.md
+    runtime: codex
+    model: gpt-5.6-luna
+    reasoning: medium
 
 defaults:
   attempt_timeout: 60m

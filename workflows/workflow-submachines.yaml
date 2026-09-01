@@ -1,0 +1,68 @@
+version: 1
+id: workflow-submachines
+initial_state: task_01
+
+states:
+  task_01:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/01-prepare-parallel-work-for-submachines.md
+    outcomes:
+      completed: task_02
+      failed: task_01
+
+  task_02:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/02-register-and-snapshot-reusable-workflows.md
+    outcomes:
+      completed: task_03
+      failed: task_02
+
+  task_03:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/03-persist-parent-child-runs-idempotently.md
+    outcomes:
+      completed: task_04
+      failed: task_03
+
+  task_04:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/04-control-child-workflow-processes.md
+    outcomes:
+      completed: task_05
+      failed: task_04
+
+  task_05:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/05-evaluate-child-workflow-results.md
+    outcomes:
+      completed: task_06
+      failed: task_05
+
+  task_06:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/06-execute-workflow-submachines-in-parallel.md
+    outcomes:
+      completed: task_07
+      failed: task_06
+
+  task_07:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/07-recover-and-cancel-workflow-submachines.md
+    outcomes:
+      completed: task_08
+      failed: task_07
+
+  task_08:
+    type: agent
+    agent: workflow_submachines_implementation
+    prompt: /goal implementa la siguiente tarea docs/tasks/workflow-submachines/08-observe-and-certify-workflow-submachines.md
+    outcomes:
+      completed: $succeeded
+      failed: task_08

@@ -60,6 +60,7 @@ describe("create-skill implementation workflow", () => {
 
     expect(Object.keys(definition.agents)).toEqual([
       "create_skill_implementation",
+      "workflow_submachines_implementation",
     ]);
     expect(Object.keys(definition.states)).toEqual(
       taskTitles.map(
