@@ -48,6 +48,7 @@ import {
   detached,
   throwIfDetached,
 } from "../services/controller-detachment.js";
+import type { WorkflowTaskCoordinator } from "../services/workflow-task-coordinator.js";
 import {
   type ProjectWorkspaceCoordinator,
   requireWorkspaceCoordinator,
@@ -99,6 +100,7 @@ export class ExecuteWorkflow {
     private readonly wait: Wait,
     private readonly workspaceCoordinator?: ProjectWorkspaceCoordinator,
     private readonly diagnostics: DiagnosticSink = disabledDiagnostics,
+    private readonly workflowTasks?: WorkflowTaskCoordinator,
   ) {}
 
   async execute(request: ExecuteWorkflowRequest): Promise<RunRecord> {
@@ -247,6 +249,22 @@ export class ExecuteWorkflow {
             visitNumber,
             taskId: task.id,
           });
+        // Persist the complete materialized visit before the coordinator reads
+        // the parent to reserve child identities. No controller is launched
+        // until the coordinator has persisted every wrapper and reservation.
+        await this.runs.save(run);
+        if (visit.type === "parallel" && this.workflowTasks) {
+          const parallelState = state as ParallelStateDefinition;
+          await this.workflowTasks.prepareParallel(
+            run,
+            visit,
+            parallelState.mode === "dynamic"
+              ? Object.fromEntries(
+                  visit.tasks.map((task) => [task.id, parallelState.task]),
+                )
+              : parallelState.tasks,
+          );
+        }
         if (visit.type === "parallel" && workspaceMode(run) === "worktree")
           try {
             await this.coordinator().prepareParallel(
@@ -521,8 +539,6 @@ export class ExecuteWorkflow {
           const task = visit.tasks[index];
           const definition =
             state.mode === "dynamic" ? state.task : state.tasks[task.id];
-          if ("type" in definition && definition.type === "workflow")
-            throw new Error("Workflow parallel tasks are not executable yet");
           task.status = "running";
           this.event(run, "parallel_task_started", timestamp(), {
             stateId: state.id,
@@ -531,6 +547,31 @@ export class ExecuteWorkflow {
           });
           await this.runs.save(run);
           try {
+            if ("type" in definition && definition.type === "workflow") {
+              if (!this.workflowTasks)
+                throw new Error("Workflow task coordinator is not configured");
+              const envelope = await this.workflowTasks.execute(
+                run,
+                visit,
+                task,
+                definition,
+                signal,
+              );
+              task.status = envelope.status;
+              task.outcome =
+                envelope.status === "succeeded" ? "succeeded" : undefined;
+              task.documents = envelope.documents;
+              this.event(run, "parallel_task_settled", timestamp(), {
+                taskId: task.id,
+                status: envelope.status,
+                attempts: task.attempts.length,
+                documents: envelope.documents.map(
+                  (document) => document.internalPath,
+                ),
+              });
+              await this.runs.save(run);
+              continue;
+            }
             const result = await this.executeTask(
               run,
               visit,

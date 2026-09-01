@@ -600,6 +600,10 @@ export class FilesystemRunRepository implements RunRepository {
           workflowId: request.workflowId,
           workflowPath: request.workflowId,
           projectRoot: request.projectRoot,
+          workspace: {
+            mode: request.workflowDefinition.workspaceMode,
+            worktrees: [],
+          },
           definitionSnapshot: snapshot,
           parent: {
             runId: request.parentRunId,

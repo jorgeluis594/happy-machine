@@ -68,6 +68,7 @@ export class ProjectWorkspaceCoordinator {
       await persist();
     }
     for (const task of visit.tasks) {
+      if (task.execution?.type === "workflow") continue;
       let worktree = parallelTaskWorktree(
         run,
         visit.stateId,

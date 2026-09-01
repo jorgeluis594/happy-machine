@@ -4,6 +4,8 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as wait } from "node:timers/promises";
 import { ProjectWorkspaceCoordinator } from "./application/services/project-workspace-coordinator.js";
+import { WorkflowTaskEvaluator } from "./application/services/workflow-task-evaluator.js";
+import { WorkflowTaskCoordinator } from "./application/services/workflow-task-coordinator.js";
 import { AnalyzeDemonstration } from "./application/use-cases/create-skill/analyze-demonstration.js";
 import { CaptureDemonstration } from "./application/use-cases/create-skill/capture-demonstration.js";
 import { CreateSkill } from "./application/use-cases/create-skill/create-skill.js";
@@ -113,9 +115,21 @@ function createCli(
   // Construct the child-run controller at the composition boundary. Later
   // workflow coordinators receive this port; current execution is unchanged.
   const workflowController = new ProcessWorkflowController(runs);
-  void workflowController;
   const sleeper = (milliseconds: number, signal?: AbortSignal) =>
     wait(milliseconds, undefined, { signal });
+  const workflowEvaluator = new WorkflowTaskEvaluator(
+    runs,
+    executor,
+    now,
+    sleeper,
+  );
+  const workflowTasks = new WorkflowTaskCoordinator(
+    runs,
+    workflowController,
+    workflowEvaluator,
+    now,
+    sleeper,
+  );
   const executeWorkflow = new ExecuteWorkflow(
     definitions,
     runs,
@@ -125,6 +139,7 @@ function createCli(
     sleeper,
     workspaceCoordinator,
     diagnostics,
+    workflowTasks,
   );
   const recoverWorkflow = new RecoverWorkflow(
     runs,
