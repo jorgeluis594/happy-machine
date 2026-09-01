@@ -100,6 +100,12 @@ export interface EvaluationContextRecord {
   sha256: string;
 }
 
+export interface EvaluationArtifact {
+  kind: "document" | "structured_output";
+  path: string;
+  sha256: string;
+}
+
 export interface WorkflowTaskResultCommitRequest {
   parent: RunRecord;
   coordinate: WorkflowTaskCoordinate;
@@ -183,7 +189,13 @@ export interface RunRepository {
     coordinate: WorkflowTaskCoordinate;
     resolvedWith: Record<string, JsonValue>;
     childRunId: string;
+    /** The serialized, immutable evidence supplied to the evaluator. */
+    context?: string;
+    artifacts?: readonly EvaluationArtifact[];
   }): Promise<EvaluationContextRecord>;
+  verifyEvaluationArtifacts?(
+    artifacts: readonly EvaluationArtifact[],
+  ): Promise<void>;
   commitWorkflowTaskResult?(
     request: WorkflowTaskResultCommitRequest,
   ): Promise<RunRecord>;

@@ -658,6 +658,8 @@ export class FilesystemRunRepository implements RunRepository {
     coordinate: import("../../../../domain/execution/workflow-task.js").WorkflowTaskCoordinate;
     resolvedWith: Record<string, JsonValue>;
     childRunId: string;
+    context?: string;
+    artifacts?: readonly import("../../../../ports/run-repository.js").EvaluationArtifact[];
   }): Promise<EvaluationContextRecord> {
     this.requireParentCoordinate(request.parent, request.coordinate);
     const directory = path.join(
@@ -666,7 +668,9 @@ export class FilesystemRunRepository implements RunRepository {
       this.segment(request.childRunId),
     );
     const target = path.join(directory, "context.md");
-    const content = `# Workflow task evaluation context\n\n## Resolved bindings\n\n\`\`\`json\n${JSON.stringify(this.canonical(request.resolvedWith), null, 2)}\n\`\`\`\n`;
+    const content =
+      request.context ??
+      `# Workflow task evaluation context\n\n## Resolved bindings\n\n\`\`\`json\n${JSON.stringify(this.canonical(request.resolvedWith), null, 2)}\n\`\`\`\n`;
     await mkdir(directory, { recursive: true });
     await writeFile(target, content, { encoding: "utf8", flag: "wx" }).catch(
       async (error: NodeJS.ErrnoException) => {
@@ -678,6 +682,27 @@ export class FilesystemRunRepository implements RunRepository {
       },
     );
     return { path: target, sha256: this.sha256(content) };
+  }
+
+  async verifyEvaluationArtifacts(
+    artifacts: readonly import("../../../../ports/run-repository.js").EvaluationArtifact[],
+  ): Promise<void> {
+    for (const artifact of artifacts) {
+      let content: Buffer;
+      try {
+        const entry = await lstat(artifact.path);
+        if (!entry.isFile() || entry.isSymbolicLink()) throw new Error();
+        content = await readFile(artifact.path);
+      } catch {
+        throw new Error(
+          `evaluation_evidence_corrupt: missing ${artifact.path}`,
+        );
+      }
+      if (this.sha256(content.toString("utf8")) !== artifact.sha256)
+        throw new Error(
+          `evaluation_evidence_corrupt: hash mismatch ${artifact.path}`,
+        );
+    }
   }
 
   async commitWorkflowTaskResult(
@@ -709,7 +734,13 @@ export class FilesystemRunRepository implements RunRepository {
             : undefined;
         if (!task || task.execution?.type !== "workflow")
           throw new Error("Workflow wrapper is missing");
-        task.execution.evaluationAttempts = [structuredClone(request.attempt)];
+        const previousAttempts = task.execution.evaluationAttempts.filter(
+          (attempt) => attempt.id !== request.attempt.id,
+        );
+        task.execution.evaluationAttempts = [
+          ...previousAttempts,
+          structuredClone(request.attempt),
+        ];
         task.execution.result = structuredClone(request.envelope);
         task.execution.phase = request.envelope.status;
         task.documents = structuredClone(request.documents);
