@@ -212,6 +212,52 @@ describe("agents, prompts, states, tasks, and outcomes", () => {
     },
   );
 
+  it.each([undefined, "codex"] as const)(
+    "accepts a model for the %s Codex runtime",
+    async (runtime) => {
+      const runtimeLine = runtime === undefined ? "" : "\n    runtime: codex";
+      const project = validProject.replace(
+        "    instructions: agents/worker.md",
+        `    instructions: agents/worker.md${runtimeLine}\n    model: gpt-custom`,
+      );
+      const setup = await fixture(project);
+      const definition = await loader.load(setup.workflowPath, setup.root);
+
+      expect(definition.agents.worker).toMatchObject({
+        runtime: "codex",
+        model: "gpt-custom",
+      });
+      expect(definition.states.start).toMatchObject({
+        agent: { runtime: "codex", model: "gpt-custom" },
+      });
+    },
+  );
+
+  it.each(["model: ''", "model: 7", "model: false"])(
+    "rejects invalid agent %s",
+    async (model) => {
+      await rejection(
+        validProject.replace(
+          "    instructions: agents/worker.md",
+          `    instructions: agents/worker.md\n    ${model}`,
+        ),
+        validWorkflow,
+        /model must be a non-empty string/,
+      );
+    },
+  );
+
+  it("rejects a model for OpenCode profiles", async () => {
+    await rejection(
+      validProject.replace(
+        "    instructions: agents/worker.md",
+        "    instructions: agents/worker.md\n    runtime: opencode\n    model: custom",
+      ),
+      validWorkflow,
+      /model requires runtime codex/,
+    );
+  });
+
   it.each(["codex", "opencode"] as const)(
     "accepts open-ended reasoning for the %s agent runtime",
     async (runtime) => {
@@ -275,15 +321,7 @@ states:
     );
   });
 
-  it("rejects model fields in agents, states, and parallel tasks", async () => {
-    await rejection(
-      validProject.replace(
-        "    instructions: agents/worker.md",
-        "    instructions: agents/worker.md\n    model: legacy-model",
-      ),
-      validWorkflow,
-      /Unknown project\.agents\.worker field: model/,
-    );
+  it("rejects model overrides in states and parallel tasks", async () => {
     await rejection(
       validProject,
       validWorkflow.replace(

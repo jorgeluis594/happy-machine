@@ -131,6 +131,7 @@ async function definition(
         id: "worker",
         instructions: "Immutable instructions\n",
         runtime: "codex",
+        model: "gpt-retry",
         reasoning: "high",
       },
     },
@@ -144,6 +145,7 @@ async function definition(
           id: "worker",
           instructions: "Immutable instructions\n",
           runtime: "codex",
+          model: "gpt-retry",
           reasoning: "high",
         },
         prompt: "Immutable prompt",
@@ -343,6 +345,11 @@ describe("retries and timeouts", () => {
       "high",
       "high",
       "high",
+    ]);
+    expect(executor.launches.map((launch) => launch.model)).toEqual([
+      "gpt-retry",
+      "gpt-retry",
+      "gpt-retry",
     ]);
     expect(await readFile(path.join(setup.root, "source.ts"), "utf8")).toBe(
       "preserved\n",

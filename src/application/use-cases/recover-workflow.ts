@@ -1140,6 +1140,7 @@ export class RecoverWorkflow {
       allowedOutcomes,
       structuredOutputs: outputDefinitions,
       runtime: work.agent.runtime,
+      model: work.agent.model,
       reasoning: work.agent.reasoning,
       timeoutMs: work.policies.attemptTimeoutMs,
       attemptNumber: attempt.number,

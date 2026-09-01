@@ -103,9 +103,9 @@ Runs can branch, cycle, retry failed attempts, execute parallel tasks, detach, r
 
 Happy Machine v1 uses Orca as its executor and supports Codex and OpenCode as agent runtimes. These are the first integrations, not intended to be permanent product limits.
 
-Agent selection is project-local. `happy-machine.yaml` registers named profiles with an instruction file, an optional `runtime: codex | opencode`, and an optional open-ended `reasoning` string; omitted runtimes default to `codex`. Every normal state and parallel task selects one registered profile, so a workflow can mix Codex and OpenCode tasks without runtime or reasoning overrides in the workflow itself.
+Agent selection is project-local. `happy-machine.yaml` registers named profiles with an instruction file, an optional `runtime: codex | opencode`, an optional Codex-only `model`, and an optional open-ended `reasoning` string; omitted runtimes default to `codex`. Every normal state and parallel task selects one registered profile, so a workflow can mix Codex and OpenCode tasks without runtime, model, or reasoning overrides in the workflow itself.
 
-Happy Machine selects the CLI and, when configured on the profile, its reasoning effort or variant. Models, internal agents, permissions, and sandbox behavior remain the responsibility of each CLI's local configuration. The project executor is currently limited to Orca.
+Happy Machine selects the CLI and, when configured on a Codex profile, its model; it can also select the runtime's reasoning effort or variant. Internal agents, permissions, and sandbox behavior remain the responsibility of each CLI's local configuration. The project executor is currently limited to Orca.
 
 ## Getting started
 
@@ -117,7 +117,7 @@ Happy Machine selects the CLI and, when configured on the profile, its reasoning
 - Codex and/or OpenCode installed, authenticated, and configured for every runtime used by the project.
 - Git when using `workspace.mode: worktree`.
 
-Without profile reasoning, the Orca adapter launches exactly `codex` or `opencode`. With it, Codex receives `-c model_reasoning_effort=...` and OpenCode receives `run --interactive --variant ...`; values are safely serialized and quoted. It does not pass model, internal-agent, prompt, permission, or sandbox flags to either CLI, and the prompt is delivered separately after terminal startup. Missing executables and CLI-rejected reasoning values use the normal technical-failure and retry handling.
+Without profile options, the Orca adapter launches exactly `codex` or `opencode`. A configured Codex model receives `--model ...`; configured reasoning uses `-c model_reasoning_effort=...` for Codex and `run --interactive --variant ...` for OpenCode. Dynamic values are safely serialized and POSIX-quoted. The prompt is delivered separately after terminal startup. Missing executables and CLI-rejected model or reasoning values use the normal technical-failure and retry handling.
 
 The standalone `create-skill` command additionally requires a configured and authenticated Codex CLI compatible with the validated `0.148.0` baseline. It must expose `app-server` with a Unix listener, `app-server proxy`, and the remote TUI option. Happy Machine checks these capabilities before recording begins.
 
@@ -175,6 +175,7 @@ agents:
   delivery:
     instructions: agents/delivery.md
     runtime: codex
+    model: gpt-5.6-codex
     reasoning: high
   qa:
     instructions: agents/qa.md
@@ -190,9 +191,9 @@ defaults:
   max_transitions: 20
 ```
 
-Each agent profile has its own instructions, runtime, and optional reasoning value. A workflow state or parallel task selects a profile through `agent`; runtime and reasoning overrides are not supported at state or task scope. `runtime` is optional and defaults to `codex`; `reasoning` is an optional non-empty string and is passed through without enum or model-compatibility validation.
+Each agent profile has its own instructions, runtime, optional model, and optional reasoning value. A workflow state or parallel task selects a profile through `agent`; runtime, model, and reasoning overrides are not supported at state or task scope. `runtime` is optional and defaults to `codex`; `model` is an optional non-empty string allowed only for the effective Codex runtime; `reasoning` is an optional non-empty string and is passed through without enum or model-compatibility validation.
 
-To migrate an older definition, remove every `model` field from agent profiles, states, and parallel tasks, then set `runtime: codex` or `runtime: opencode` on each profile that needs an explicit CLI. New definitions containing `model` are rejected. Existing durable snapshots without `runtime` remain recoverable as Codex runs; their legacy `model` value is ignored.
+Model fields may appear only on Codex agent profiles; remove them from states, parallel tasks, and OpenCode profiles. Existing durable snapshots without `runtime` remain recoverable as Codex runs and continue to ignore their legacy `model` value. New snapshots contain a resolved runtime and preserve a configured Codex model.
 
 **`agents/delivery.md`**
 

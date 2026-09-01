@@ -15,6 +15,7 @@ export interface AgentDefinition {
   id: string;
   instructions: string;
   runtime: AgentRuntime;
+  model?: string;
   reasoning?: string;
 }
 

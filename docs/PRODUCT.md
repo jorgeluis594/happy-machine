@@ -79,9 +79,10 @@ An agent is a project-local identifier associated with:
 
 - A Markdown instruction file.
 - An optional runtime: `codex` or `opencode`.
+- An optional model for Codex profiles.
 - An optional open-ended reasoning value.
 
-The runtime defaults to `codex` when omitted. A workflow state or parallel task selects a registered agent profile and MUST NOT override its runtime or reasoning. Happy Machine selects the CLI and may select its reasoning effort or variant; models, internal agents, tools, permissions, and sandbox behavior come from the selected runtime's local configuration and environment.
+The runtime defaults to `codex` when omitted. A workflow state or parallel task selects a registered agent profile and MUST NOT override its runtime, model, or reasoning. Happy Machine selects the CLI, may select the model for Codex, and may select its reasoning effort or variant; internal agents, tools, permissions, and sandbox behavior come from the selected runtime's local configuration and environment.
 
 If an agent should commit source changes, that behavior MUST be declared in its instructions by the project author. Happy Machine itself never creates a commit.
 
@@ -199,6 +200,7 @@ agents:
   writer:
     instructions: agents/writer.md
     runtime: codex
+    model: gpt-5.6-codex
     reasoning: high
   reviewer:
     instructions: agents/reviewer.md
@@ -230,18 +232,19 @@ defaults:
 - `agents` MUST contain every agent referenced by a workflow.
 - Each agent MUST declare an existing Markdown `instructions` file.
 - Each agent MAY declare `runtime` as exactly `codex` or `opencode`; omission resolves to `codex`.
+- Each agent MAY declare `model` as a non-empty string only when its effective runtime is `codex`.
 - Each agent MAY declare `reasoning` as a non-empty string. Happy Machine does not validate a closed set or model compatibility.
-- `model` is not part of the closed project, state, or task schema.
+- `model` is not part of the closed state or task schema.
 
-`AgentRuntime` is the closed set `"codex" | "opencode"`. Happy Machine does not configure a model or an internal agent for either runtime. `reasoning` is inherited only from the selected profile and cannot be overridden by a state or parallel task.
+`AgentRuntime` is the closed set `"codex" | "opencode"`. `model` and `reasoning` are inherited only from the selected profile and cannot be overridden by a state or parallel task. Happy Machine passes Codex model names through without maintaining an enum; OpenCode profiles MUST NOT declare a model.
 
-The migration from the earlier draft schema keeps `version: 1`: new definitions MUST replace profile-level `model` with an optional `runtime` and MUST remove state or task model overrides. A new definition containing `model` is rejected. When loading an existing durable snapshot whose resolved agents have no runtime, Happy Machine MUST use `codex` and ignore any legacy `model` value.
+Compatibility keeps `version: 1`: new definitions MAY use profile-level `model` for Codex and MUST remove state or task model overrides. When loading an existing durable snapshot whose resolved agents have no runtime, Happy Machine MUST use `codex` and ignore any legacy `model` value. A snapshot with a resolved runtime preserves its model.
 
 ### 7.2 Executor
 
 `executor.type` defaults to `orca` when omitted. V1 does not require any other executor.
 
-Happy Machine treats the configured project environment as executor input. It MUST NOT persist secret values merely to make a run snapshot. The run snapshot records declarative configuration, effective runtime identifiers, and configured reasoning values; externally supplied secret values remain an operational dependency.
+Happy Machine treats the configured project environment as executor input. It MUST NOT persist secret values merely to make a run snapshot. The run snapshot records declarative configuration, effective runtime identifiers, configured Codex models, and configured reasoning values; externally supplied secret values remain an operational dependency.
 
 ### 7.3 Workspace Mode
 
@@ -453,7 +456,7 @@ At run creation, Happy Machine snapshots:
 - The workflow file and effective policies.
 - Every referenced agent instruction file.
 - Every referenced prompt file and inline prompt.
-- Resolved agent IDs, effective runtimes, and optional reasoning values.
+- Resolved agent IDs, effective runtimes, optional Codex models, and optional reasoning values.
 - CLI input documents.
 
 `resume` always uses this snapshot. Editing the project definition affects only later `execute` commands.
@@ -501,7 +504,7 @@ Before launching an attempt, Happy Machine materializes:
 - The required `result.json` path.
 - The selected project workspace path.
 - The merged agent instructions and task prompt.
-- The effective runtime, optional reasoning, timeout, and attempt number.
+- The effective runtime, optional model and reasoning, timeout, and attempt number.
 
 Happy Machine automatically appends the required structured-result contract to
 the effective task prompt. The generated block includes the exact output and
@@ -836,7 +839,7 @@ If a crash happens after files are written but before the commit, those files ar
 
 ### 19.4 Snapshot Reproducibility
 
-Editing configuration, workflows, prompts, agent instructions, runtimes, or reasoning after `execute` does not change an existing run. `resume` always uses the original snapshot.
+Editing configuration, workflows, prompts, agent instructions, runtimes, models, or reasoning after `execute` does not change an existing run. `resume` always uses the original snapshot.
 
 Source changes in a direct workspace and external environment values are not immutable product-definition snapshots. Reproducing those dependencies remains the project author's responsibility.
 
@@ -846,10 +849,10 @@ Happy Machine integrates with Orca through a technology-specific adapter while p
 
 The adapter MUST:
 
-- Without reasoning, translate the effective runtime through the closed mapping `codex` → `--command codex` and `opencode` → `--command opencode` without changing those commands.
-- With reasoning, launch Codex as `codex -c model_reasoning_effort=<TOML string>` or OpenCode as `opencode run --interactive --variant <value>`, using TOML serialization and POSIX-safe argument quoting for every dynamic value.
+- Without model or reasoning, translate the effective runtime through the closed mapping `codex` → `--command codex` and `opencode` → `--command opencode` without changing those commands.
+- With a model, launch Codex with `--model <value>`; with reasoning, launch Codex as `codex -c model_reasoning_effort=<TOML string>` or OpenCode as `opencode run --interactive --variant <value>`, using POSIX-safe argument quoting for every dynamic value.
 - Reject any runtime outside the closed set without constructing an arbitrary command.
-- Pass no model, internal-agent, prompt, permission, or sandbox flags beyond the configured reasoning option; task input is sent separately through terminal control.
+- Pass no internal-agent, prompt, permission, or sandbox flags beyond the configured Codex model and runtime reasoning option; task input is sent separately through terminal control.
 - Use machine-readable JSON responses for lifecycle operations.
 - Associate each Orca task and dispatch with the stable Happy Machine attempt identity.
 - Persist the Orca task ID, dispatch ID, and terminal handle when available.

@@ -183,7 +183,7 @@ export class OrcaTaskExecutor implements TaskExecutor {
       "--worktree",
       "current",
       "--command",
-      this.runtimeCommand(launch.runtime, launch.reasoning),
+      this.runtimeCommand(launch.runtime, launch.model, launch.reasoning),
       "--focus",
       "--json",
     ]);
@@ -577,17 +577,29 @@ export class OrcaTaskExecutor implements TaskExecutor {
 
   private runtimeCommand(
     runtime: TaskLaunch["runtime"],
+    model?: string,
     reasoning?: string,
   ): string {
     if (!Object.hasOwn(runtimeCommands, runtime))
       throw new TaskExecutorError(
         `Unsupported agent runtime: ${String(runtime)}`,
       );
+    if (runtime === "codex") {
+      const modelOption =
+        model === undefined ? "" : ` --model ${this.posixArgument(model)}`;
+      const reasoningOption =
+        reasoning === undefined
+          ? ""
+          : ` -c ${this.posixArgument(
+              `model_reasoning_effort=${JSON.stringify(reasoning)}`,
+            )}`;
+      return `codex${modelOption}${reasoningOption}`;
+    }
+    if (model !== undefined)
+      throw new TaskExecutorError(
+        "OpenCode does not support a configured model",
+      );
     if (reasoning === undefined) return runtimeCommands[runtime];
-    if (runtime === "codex")
-      return `codex -c ${this.posixArgument(
-        `model_reasoning_effort=${JSON.stringify(reasoning)}`,
-      )}`;
     return `opencode run --interactive --variant ${this.posixArgument(reasoning)}`;
   }
 

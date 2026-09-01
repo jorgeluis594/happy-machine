@@ -53,6 +53,7 @@ function normalState(): StateDefinition {
       id: "worker",
       instructions: "Recover the work",
       runtime: "codex" as const,
+      model: "gpt-recovery",
       reasoning: "high",
     },
     prompt: "work",
@@ -70,6 +71,7 @@ function parallelState(): StateDefinition {
       id: `${id}-agent`,
       instructions: `Recover ${id}`,
       runtime: "codex" as const,
+      model: "gpt-recovery",
       reasoning: "max",
     },
     prompt: id,
@@ -771,6 +773,9 @@ describe("durable recovery", () => {
     ]);
     expect(executor.launches.map((launch) => launch.reasoning)).toEqual([
       "max",
+    ]);
+    expect(executor.launches.map((launch) => launch.model)).toEqual([
+      "gpt-recovery",
     ]);
   });
 

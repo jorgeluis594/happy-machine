@@ -20,6 +20,7 @@ export interface TaskLaunch {
   allowedOutcomes: readonly string[];
   structuredOutputs?: Record<string, StructuredOutputDefinition>;
   runtime: AgentRuntime;
+  model?: string;
   reasoning?: string;
   timeoutMs: number;
   attemptNumber: number;

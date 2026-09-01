@@ -139,6 +139,59 @@ describe("Orca terminal-only task executor", () => {
   });
 
   it.each([
+    [undefined, undefined, "codex"],
+    ["gpt-custom", undefined, "codex --model 'gpt-custom'"],
+    [undefined, "high", `codex -c 'model_reasoning_effort="high"'`],
+    [
+      "gpt-custom",
+      "high",
+      `codex --model 'gpt-custom' -c 'model_reasoning_effort="high"'`,
+    ],
+  ])(
+    "launches Codex with model %j and reasoning %j",
+    async (model, reasoning, command) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "happy-orca-model-"));
+      const launch = await launchFixture(root);
+      launch.model = model;
+      launch.reasoning = reasoning;
+      const executor = new OrcaTaskExecutor(
+        fixture,
+        undefined,
+        noDelay,
+        noDelay,
+      );
+
+      await executor.execute(launch, () => Promise.resolve());
+
+      expect((await calls(root))[0]).toContain(command);
+    },
+  );
+
+  it.each(["space value", `quote ' and "`, "$(touch nope)", "`touch nope`"])(
+    "quotes adversarial models as literal data: %j",
+    async (model) => {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "happy-orca-safe-model-"),
+      );
+      const launch = await launchFixture(root);
+      launch.model = model;
+      const executor = new OrcaTaskExecutor(
+        fixture,
+        undefined,
+        noDelay,
+        noDelay,
+      );
+
+      await executor.execute(launch, () => Promise.resolve());
+
+      const create = (await calls(root))[0];
+      const command = create[create.indexOf("--command") + 1];
+      expect(command).toBe(`codex --model '${model.replaceAll("'", `'"'"'`)}'`);
+      expect(existsSync(path.join(root, "nope"))).toBe(false);
+    },
+  );
+
+  it.each([
     ["codex" as const, "high", `codex -c 'model_reasoning_effort="high"'`],
     ["opencode" as const, "max", "opencode run --interactive --variant 'max'"],
   ])(

@@ -213,7 +213,7 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
       const raw = this.map(value, `project.agents.${id}`);
       this.keys(
         raw,
-        ["instructions", "runtime", "reasoning"],
+        ["instructions", "runtime", "model", "reasoning"],
         `project.agents.${id}`,
       );
       const instructions = await this.markdown(
@@ -226,10 +226,18 @@ export class FilesystemProjectDefinitions implements ProjectDefinitions {
         logicalId: id,
         content: instructions,
       });
+      const runtime = this.runtime(raw.runtime, `project.agents.${id}.runtime`);
+      if (raw.model !== undefined && runtime !== "codex")
+        throw new DefinitionError(
+          `project.agents.${id}.model requires runtime codex`,
+        );
       result[id] = {
         id,
         instructions,
-        runtime: this.runtime(raw.runtime, `project.agents.${id}.runtime`),
+        runtime,
+        ...(raw.model === undefined
+          ? {}
+          : { model: this.string(raw.model, `project.agents.${id}.model`) }),
         ...(raw.reasoning === undefined
           ? {}
           : {

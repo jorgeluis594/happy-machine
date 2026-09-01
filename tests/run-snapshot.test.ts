@@ -210,6 +210,51 @@ describe("filesystem run snapshots", () => {
     expect(second.record.identity).not.toBe(first.record.identity);
   });
 
+  it("includes a resolved Codex model in snapshot content and identity", async () => {
+    const setup = await fixture();
+    const projectPath = path.join(setup.root, "happy-machine.yaml");
+    await writeFile(
+      projectPath,
+      (await readFile(projectPath, "utf8"))
+        .replace("runtime: opencode", "runtime: codex")
+        .replace("reasoning: max", "model: gpt-first\n    reasoning: max"),
+    );
+    const definitions = new FilesystemProjectDefinitions();
+    const repository = new FilesystemRunRepository();
+    const firstDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const first = await repository.createSnapshot({
+      runId: "run-model-first",
+      projectRoot: setup.root,
+      workflowId: firstDefinition.workflowId,
+      source: firstDefinition.snapshotSource,
+    });
+
+    await writeFile(
+      projectPath,
+      (await readFile(projectPath, "utf8")).replace("gpt-first", "gpt-second"),
+    );
+    const secondDefinition = await definitions.load(
+      setup.workflowPath,
+      setup.root,
+    );
+    const second = await repository.createSnapshot({
+      runId: "run-model-second",
+      projectRoot: setup.root,
+      workflowId: secondDefinition.workflowId,
+      source: secondDefinition.snapshotSource,
+    });
+
+    expect(first.definition.agents.worker.model).toBe("gpt-first");
+    expect(first.definition.states.start).toMatchObject({
+      agent: { runtime: "codex", model: "gpt-first" },
+    });
+    expect(second.definition.agents.worker.model).toBe("gpt-second");
+    expect(second.record.identity).not.toBe(first.record.identity);
+  });
+
   it("loads legacy snapshots without runtime as Codex and ignores model", async () => {
     const setup = await fixture();
     const definition = await new FilesystemProjectDefinitions().load(

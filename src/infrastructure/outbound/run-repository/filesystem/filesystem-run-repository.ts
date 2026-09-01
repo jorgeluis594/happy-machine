@@ -179,8 +179,10 @@ export class FilesystemRunRepository implements RunRepository {
     const normalizeAgent = (agent: unknown): void => {
       if (!agent || typeof agent !== "object" || Array.isArray(agent)) return;
       const record = agent as Record<string, unknown>;
-      if (record.runtime === undefined) record.runtime = "codex";
-      delete record.model;
+      if (record.runtime === undefined) {
+        record.runtime = "codex";
+        delete record.model;
+      }
     };
 
     if (
