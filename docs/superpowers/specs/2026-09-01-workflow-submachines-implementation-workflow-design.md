@@ -25,7 +25,8 @@ but its implementation plan is intentionally sequential.
 
 - Add `workflows/workflow-submachines.yaml` with the eight-state graph.
 - Add a dedicated `workflow_submachines_implementation` agent profile to
-  `happy-machine.yaml`.
+  `happy-machine.yaml`, configured with `model: gpt-5.6-luna` and
+  `reasoning: medium` at the same profile level.
 - Add `agents/workflow-submachines-implementation.md` with instructions to stay
   within the assigned task, preserve earlier and unrelated changes, satisfy the
   task's acceptance criteria, and validate before returning `completed`.
@@ -64,4 +65,3 @@ repository's existing CLI or focused definition tests. Confirm that:
 4. only `task_08.completed` reaches `$succeeded`;
 5. the existing workflow remains loadable; and
 6. workspace mode remains `direct`.
-
