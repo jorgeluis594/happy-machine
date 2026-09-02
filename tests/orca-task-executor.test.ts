@@ -112,6 +112,9 @@ describe("Orca terminal-only task executor", () => {
     expect(sent).toContain(JSON.stringify(launch.contextPath));
     expect(sent).toContain(JSON.stringify(launch.resultPath));
     expect(sent).toContain('- "approved"\n- "needs_revision"');
+    expect(sent).toContain(
+      "Generate and write the outcome only after the entire assigned task is complete, including all implementation and validation. Writing result.json must be the final action of the task.",
+    );
     expect(sent).toContain('"documents": ["relative/path/to/document.md"]');
     expect(sent.indexOf(launch.instructions)).toBeGreaterThan(
       launch.prompt.length,
