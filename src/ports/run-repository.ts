@@ -182,6 +182,9 @@ export interface RunRepository {
   reserveChildRun?(
     request: ChildRunReservationRequest,
   ): Promise<ReservedChildRun>;
+  reserveChildRuns?(
+    requests: readonly ChildRunReservationRequest[],
+  ): Promise<ReservedChildRun[]>;
   getOrCreateChildRun?(request: ChildRunCreationRequest): Promise<RunRecord>;
   loadChildRun?(projectRoot: string, childRunId: string): Promise<RecoveredRun>;
   stageWorkflowTaskEvaluationContext?(request: {

@@ -22,8 +22,10 @@ import type {
   AgentWorkDefinition,
   EffectiveExecutionDefinition,
   NormalStateDefinition,
+  ParallelTaskDefinition,
   ParallelStateDefinition,
   StructuredOutputDefinition,
+  WorkflowWorkDefinition,
 } from "../../ports/project-definitions.js";
 import { ProjectWorkspaceError } from "../../ports/project-workspaces.js";
 import type {
@@ -234,6 +236,24 @@ export class RecoverWorkflow {
       if (
         visit.type === "parallel" &&
         state.type === "parallel" &&
+        this.workflowTasks
+      )
+        try {
+          await this.workflowTasks.prepareParallel(
+            controlled.run,
+            visit,
+            this.parallelDefinitions(visit, state),
+          );
+        } catch (error) {
+          await this.failRun(controlled, {
+            code: "workflow_submachine_recovery_failed",
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return controlled.run;
+        }
+      if (
+        visit.type === "parallel" &&
+        state.type === "parallel" &&
         !visit.contextPath &&
         workspaceMode(controlled.run) === "worktree"
       )
@@ -321,6 +341,20 @@ export class RecoverWorkflow {
         taskId: task.id,
         recovered: true,
       });
+    if (visit.type === "parallel" && this.workflowTasks)
+      try {
+        await this.workflowTasks.prepareParallel(
+          controlled.run,
+          visit,
+          this.parallelDefinitions(visit, state as ParallelStateDefinition),
+        );
+      } catch (error) {
+        await this.failRun(controlled, {
+          code: "workflow_submachine_recovery_failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return visit;
+      }
     if (
       visit.type === "parallel" &&
       workspaceMode(controlled.run) === "worktree"
@@ -339,6 +373,20 @@ export class RecoverWorkflow {
     visit.contextPath = await this.runs.prepareVisitContext(controlled.run);
     await this.persist(controlled);
     return visit;
+  }
+
+  private parallelDefinitions(
+    visit: ParallelVisitRecord,
+    state: ParallelStateDefinition,
+  ): Readonly<
+    Record<
+      string,
+      AgentWorkDefinition | ParallelTaskDefinition | WorkflowWorkDefinition
+    >
+  > {
+    return state.mode === "dynamic"
+      ? Object.fromEntries(visit.tasks.map((task) => [task.id, state.task]))
+      : state.tasks;
   }
 
   private async recoverNormal(

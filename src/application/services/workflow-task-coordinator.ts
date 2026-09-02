@@ -293,8 +293,13 @@ export class WorkflowTaskCoordinator {
       >
     >,
   ): Promise<void> {
-    if (!this.runs.reserveChildRun) return;
-    const reservations: Promise<void>[] = [];
+    if (!this.runs.reserveChildRuns) return;
+    const prepared: Array<{
+      task: ParallelTaskRecord;
+      request: Parameters<
+        NonNullable<RunRepository["reserveChildRuns"]>
+      >[0][number];
+    }> = [];
     for (const task of visit.tasks) {
       const work = definitions[task.id];
       if (!isWorkflow(work)) continue;
@@ -307,52 +312,72 @@ export class WorkflowTaskCoordinator {
       const resolvedWith = task.dynamic
         ? resolveBindings(work.with, task.dynamic.workItem)
         : resolveBindings(work.with);
-      const childRunId = this.childId(parent, coordinate);
-      task.execution =
-        task.execution?.type === "workflow"
-          ? task.execution
-          : {
-              type: "workflow",
-              phase: "queued",
-              coordinate,
-              childRunId,
-              resolvedWith,
-              evaluationAttempts: [],
-            };
-      reserveWorkflowChild(task.execution, childRunId, coordinate);
-      reservations.push(
-        this.runs
-          .reserveChildRun({
-            projectRoot: parent.projectRoot,
-            parentRunId: parent.id,
-            coordinate,
-            workflowId: work.workflowId,
-            workflowSnapshotIdentity: parent.definitionSnapshot.identity,
-            resolvedWith,
-            provenance: {
-              runId: parent.id,
-              stateId: coordinate.stateId,
-              visitNumber: coordinate.visitNumber,
-              taskId: coordinate.taskId,
-            },
-          })
-          .then((reservation) => {
-            if (!task.execution || task.execution.type !== "workflow")
-              throw new Error(
-                "Workflow wrapper disappeared during reservation",
-              );
-            task.execution.childRunId = reservation.childRunId;
-            parent.childRunReservations ??= [];
-            if (
-              !parent.childRunReservations.some(
-                (entry) => entry.childRunId === reservation.childRunId,
-              )
-            )
-              parent.childRunReservations.push(structuredClone(reservation));
-          }),
-      );
+      prepared.push({
+        task,
+        request: {
+          projectRoot: parent.projectRoot,
+          parentRunId: parent.id,
+          coordinate,
+          workflowId: work.workflowId,
+          workflowSnapshotIdentity: parent.definitionSnapshot.identity,
+          resolvedWith,
+          provenance: {
+            runId: parent.id,
+            stateId: coordinate.stateId,
+            visitNumber: coordinate.visitNumber,
+            taskId: coordinate.taskId,
+          },
+        },
+      });
     }
-    await Promise.all(reservations);
+    const reservations = await this.runs.reserveChildRuns(
+      prepared.map(({ request }) => request),
+    );
+    prepared.forEach(({ task, request }, index) => {
+      const reservation = reservations[index];
+      const existing = task.execution;
+      if (existing?.type === "workflow") {
+        reserveWorkflowChild(
+          existing,
+          reservation.childRunId,
+          request.coordinate,
+        );
+        if (
+          JSON.stringify(existing.resolvedWith) !==
+          JSON.stringify(request.resolvedWith)
+        )
+          throw new Error("Workflow wrapper bindings changed");
+      } else {
+        task.execution = {
+          type: "workflow",
+          phase: "queued",
+          coordinate: request.coordinate,
+          childRunId: reservation.childRunId,
+          resolvedWith: request.resolvedWith,
+          evaluationAttempts: [],
+        };
+      }
+    });
+    parent.childRunReservations = structuredClone(
+      parent.childRunReservations ?? [],
+    );
+    for (const reservation of reservations)
+      if (
+        parent.childRunReservations.some(
+          (entry) =>
+            this.sameCoordinate(entry.coordinate, reservation.coordinate) &&
+            !this.sameReservation(entry, reservation),
+        )
+      )
+        throw new Error(
+          "Parent wrapper reservation conflicts with durable intent",
+        );
+      else if (
+        !parent.childRunReservations.some((entry) =>
+          this.sameCoordinate(entry.coordinate, reservation.coordinate),
+        )
+      )
+        parent.childRunReservations.push(structuredClone(reservation));
     await this.runs.save(parent);
   }
 
@@ -496,31 +521,28 @@ export class WorkflowTaskCoordinator {
     });
   }
 
-  private childId(
-    parent: RunRecord,
-    coordinate: WorkflowTaskCoordinate,
-  ): string {
-    const visit = parent.visits.find(
-      (candidate) =>
-        candidate.type === "parallel" &&
-        candidate.stateId === coordinate.stateId &&
-        candidate.number === coordinate.visitNumber,
-    );
-    const task =
-      visit?.type === "parallel"
-        ? visit.tasks.find((candidate) => candidate.id === coordinate.taskId)
-        : undefined;
-    if (task?.execution?.type === "workflow") return task.execution.childRunId;
-    const existing = parent.childRunReservations?.find(
-      (entry) =>
-        entry.coordinate.parentRunId === coordinate.parentRunId &&
-        entry.coordinate.stateId === coordinate.stateId &&
-        entry.coordinate.visitNumber === coordinate.visitNumber &&
-        entry.coordinate.taskId === coordinate.taskId,
-    );
+  private sameCoordinate(
+    left: WorkflowTaskCoordinate,
+    right: WorkflowTaskCoordinate,
+  ): boolean {
     return (
-      existing?.childRunId ??
-      `child_reserved_${coordinate.stateId}_${coordinate.visitNumber}_${coordinate.taskId}`
+      left.parentRunId === right.parentRunId &&
+      left.stateId === right.stateId &&
+      left.visitNumber === right.visitNumber &&
+      left.taskId === right.taskId
+    );
+  }
+
+  private sameReservation(
+    left: NonNullable<RunRecord["childRunReservations"]>[number],
+    right: NonNullable<RunRecord["childRunReservations"]>[number],
+  ): boolean {
+    return (
+      this.sameCoordinate(left.coordinate, right.coordinate) &&
+      left.childRunId === right.childRunId &&
+      left.workflowId === right.workflowId &&
+      left.workflowSnapshotIdentity === right.workflowSnapshotIdentity &&
+      JSON.stringify(left.resolvedWith) === JSON.stringify(right.resolvedWith)
     );
   }
 }

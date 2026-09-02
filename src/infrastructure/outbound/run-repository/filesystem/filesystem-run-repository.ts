@@ -477,39 +477,99 @@ export class FilesystemRunRepository implements RunRepository {
   async reserveChildRun(
     request: ChildRunReservationRequest,
   ): Promise<ReservedChildRun> {
-    return this.withRunLock(
-      request.projectRoot,
-      request.parentRunId,
-      async () => {
-        const parent = (
-          await this.load(request.projectRoot, request.parentRunId)
-        ).run;
+    return (await this.reserveChildRuns([request]))[0];
+  }
+
+  async reserveChildRuns(
+    requests: readonly ChildRunReservationRequest[],
+  ): Promise<ReservedChildRun[]> {
+    if (requests.length === 0) return [];
+    const { projectRoot, parentRunId } = requests[0];
+    if (
+      requests.some(
+        (request) =>
+          request.projectRoot !== projectRoot ||
+          request.parentRunId !== parentRunId,
+      )
+    )
+      throw new Error("Child run reservation batch must share one parent");
+    return this.withRunLock(projectRoot, parentRunId, async () => {
+      const parent = (await this.load(projectRoot, parentRunId)).run;
+      const existingReservations = parent.childRunReservations ?? [];
+      for (let index = 0; index < existingReservations.length; index += 1) {
+        for (let otherIndex = 0; otherIndex < index; otherIndex += 1) {
+          const left = existingReservations[otherIndex];
+          const right = existingReservations[index];
+          if (
+            (this.sameCoordinate(left.coordinate, right.coordinate) ||
+              left.childRunId === right.childRunId) &&
+            !this.sameReservation(left, right)
+          )
+            throw new Error("Durable child run reservations are corrupt");
+        }
+      }
+      const candidates = requests.map((request) => {
         this.requireParentCoordinate(parent, request.coordinate);
-        const existing = parent.childRunReservations?.find((reservation) =>
+        this.requireProvenance(request);
+        const existing = existingReservations.find((reservation) =>
           this.sameCoordinate(reservation.coordinate, request.coordinate),
         );
-        const childRunId =
-          existing?.childRunId ?? this.childRunId(request.coordinate);
         const candidate: ReservedChildRun = {
-          childRunId,
+          childRunId:
+            existing?.childRunId ?? this.childRunId(request.coordinate),
           coordinate: structuredClone(request.coordinate),
           workflowId: request.workflowId,
           workflowSnapshotIdentity: request.workflowSnapshotIdentity,
           resolvedWith: structuredClone(request.resolvedWith),
         };
-        if (existing) {
-          if (!this.sameReservation(existing, candidate))
+        if (existing && !this.sameReservation(existing, candidate))
+          throw new Error(
+            "Child run reservation conflicts with durable intent",
+          );
+        const identityConflict = existingReservations.find(
+          (reservation) =>
+            reservation.childRunId === candidate.childRunId &&
+            !this.sameCoordinate(reservation.coordinate, candidate.coordinate),
+        );
+        if (identityConflict)
+          throw new Error(
+            "Child run reservation identity conflicts with durable provenance",
+          );
+        return existing ?? candidate;
+      });
+      for (let index = 0; index < candidates.length; index += 1) {
+        const duplicate = candidates.findIndex(
+          (candidate, otherIndex) =>
+            otherIndex < index &&
+            (this.sameCoordinate(
+              candidate.coordinate,
+              candidates[index].coordinate,
+            ) ||
+              candidate.childRunId === candidates[index].childRunId),
+        );
+        if (duplicate >= 0) {
+          if (!this.sameReservation(candidates[duplicate], candidates[index]))
             throw new Error(
-              "Child run reservation conflicts with durable intent",
+              "Child run reservation batch contains conflicting intent",
             );
-          return existing;
+          throw new Error(
+            "Child run reservation batch contains a duplicate coordinate",
+          );
         }
-        parent.childRunReservations ??= [];
-        parent.childRunReservations.push(candidate);
+      }
+      parent.childRunReservations ??= [];
+      const additions = candidates.filter(
+        (candidate) =>
+          !parent.childRunReservations!.some((reservation) =>
+            this.sameCoordinate(reservation.coordinate, candidate.coordinate),
+          ),
+      );
+      if (additions.length > 0) {
+        parent.childRunReservations.push(...structuredClone(additions));
         await this.writeRun(parent);
-        return candidate;
-      },
-    );
+      }
+      return structuredClone(candidates);
+    });
   }
 
   async getOrCreateChildRun(
@@ -824,6 +884,17 @@ export class FilesystemRunRepository implements RunRepository {
       JSON.stringify(this.canonical(left.resolvedWith)) ===
         JSON.stringify(this.canonical(right.resolvedWith))
     );
+  }
+
+  private requireProvenance(request: ChildRunReservationRequest): void {
+    if (
+      request.provenance &&
+      (request.provenance.runId !== request.coordinate.parentRunId ||
+        request.provenance.stateId !== request.coordinate.stateId ||
+        request.provenance.visitNumber !== request.coordinate.visitNumber ||
+        request.provenance.taskId !== request.coordinate.taskId)
+    )
+      throw new Error("Child run reservation provenance is inconsistent");
   }
 
   private requireParentCoordinate(
